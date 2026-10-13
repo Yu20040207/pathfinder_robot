@@ -1,0 +1,6 @@
+/attendance_node:
+  ros__parameters:
+    device_id: chest_hp60c
+    window_seconds: 2.0
+    hits_required: 3
+    cooldown_seconds: 60.0

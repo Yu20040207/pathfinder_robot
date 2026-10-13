@@ -1,0 +1,69 @@
+--- a/src/ascamera/CMakeLists.txt
++++ b/src/ascamera/CMakeLists.txt
+@@ -97,6 +97,9 @@
+ install(DIRECTORY launch
+   DESTINATION share/${PROJECT_NAME})
+ 
++install(DIRECTORY configurationfiles
++  DESTINATION share/${PROJECT_NAME})
++
+ if(BUILD_TESTING)
+   find_package(ament_lint_auto REQUIRED)
+   # the following line skips the linter which checks for copyrights
+--- a/src/ascamera/launch/hp60c.launch.py
++++ b/src/ascamera/launch/hp60c.launch.py
+@@ -2,9 +2,12 @@
+ from launch_ros.actions import Node
+ from launch.actions import DeclareLaunchArgument
+ from launch.substitutions import LaunchConfiguration
++from ament_index_python.packages import get_package_share_directory
++from pathlib import Path
+ 
+ def generate_launch_description():
+     ld = LaunchDescription()
++    config_dir = str(Path(get_package_share_directory('ascamera')) / 'configurationfiles')
+     ascamera_node = Node(
+         namespace= "ascamera_hp60c",
+         package='ascamera',
+@@ -14,7 +17,7 @@
+         parameters=[
+             {"usb_bus_no": -1},
+             {"usb_path": "null"},
+-            {"confiPath": "/home/yahboom/ascam_ros2_ws/src/ascamera/configurationfiles"},
++            {"confiPath": config_dir},
+             {"color_pcl": False},
+             {"pub_tfTree": True},
+             {"depth_width": 640},
+@@ -50,4 +53,3 @@
+     # ld.add_action(ascamera_node2)
+ 
+     return ld
+-
+--- a/src/ascamera/src/CameraSrv.cpp
++++ b/src/ascamera/src/CameraSrv.cpp
+@@ -22,6 +22,7 @@
+ #include <iostream>
+ #include <string>
+ #include <dirent.h>
++#include <sys/stat.h>
+ 
+ #include "Logger.h"
+ #include "as_camera_sdk_api.h"
+@@ -377,8 +378,10 @@
+         if (strncmp(ent->d_name, ".", 1) == 0) {
+             continue;
+         }
+-        if (ent->d_type == DT_REG) {
+-            std::string filepath(dir + "/" + ent->d_name);
++        std::string filepath(dir + "/" + ent->d_name);
++        struct stat target_stat;
++        if (ent->d_type == DT_REG ||
++            (ent->d_type == DT_LNK && stat(filepath.c_str(), &target_stat) == 0 && S_ISREG(target_stat.st_mode))) {
+             file.push_back(filepath);
+         }
+         if (ent->d_type == DT_DIR) {
+@@ -393,4 +396,3 @@
+     closedir(directory);
+     return ret;
+ }
+-

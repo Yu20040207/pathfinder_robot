@@ -1,0 +1,10 @@
+string request_id
+string task_type
+string target_id
+---
+bool success
+string status
+string message
+---
+string status
+string message

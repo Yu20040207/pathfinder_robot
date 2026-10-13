@@ -1,0 +1,8 @@
+/path_preview_node:
+  ros__parameters:
+    map_topic: /map
+    pose_topic: /amcl_pose
+    goal_topic: /goal_pose
+    path_topic: /robot/navigation/planned_path
+    clearance_m: 0.25
+    occupancy_threshold: 50

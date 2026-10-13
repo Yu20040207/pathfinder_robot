@@ -1,0 +1,22 @@
+voice_node:
+  ros__parameters:
+    simulation: true
+    locations:
+      - "lobby:大厅:一楼大厅"
+      - "lab:实验室"
+    asr_model_dir: "/home/manbaout/.local/share/four_wheel_robot/voice_models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17"
+    tts_model_dir: "/home/manbaout/.local/share/four_wheel_robot/voice_models/sherpa-onnx-vits-zh-ll"
+    tts_speaker_id: 2
+    tts_speed: 1.0
+    tts_streaming: false
+    tts_provider: "aliyun"
+    tts_cloud_model: "cosyvoice-v3-flash"
+    tts_cloud_voice: "longanya_v3"
+    tts_cloud_websocket_url: "wss://dashscope.aliyuncs.com/api-ws/v1/inference"
+    cloud_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    cloud_model: "qwen3.7-flash"
+    cloud_api_key_env: "FWR_LLM_API_KEY"
+    input_wav: ""
+    microphone_enabled: true
+    wake_word: "小明同学"
+    wake_timeout_s: 30.0

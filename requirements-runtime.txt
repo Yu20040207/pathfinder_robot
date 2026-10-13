@@ -1,0 +1,7 @@
+Flask>=2.3,<4
+numpy==1.26.4
+opencv-python-headless==4.10.0.84
+Pillow>=10,<12
+sherpa-onnx>=1.13,<2
+dashscope>=1.26.4,<2
+sounddevice>=0.5,<1

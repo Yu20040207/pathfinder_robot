@@ -1,0 +1,5 @@
+<library path="fwr_rviz_nav">
+  <class name="fwr_rviz_nav/TwoPointNavPanel" type="fwr_rviz_nav::TwoPointNavPanel" base_class_type="rviz_common::Panel">
+    <description>Select a preview start and goal on the RViz map, then navigate from the robot's current pose.</description>
+  </class>
+</library>

@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>二代机器人 · 人员打卡</title>
+<style>
+  body{font:16px/1.5 system-ui,sans-serif;max-width:900px;margin:2rem auto;padding:0 1rem;color:#142033;background:#f6f8fb}
+  h1,h2{line-height:1.2} section{background:white;border:1px solid #dce3ec;border-radius:12px;padding:1.25rem;margin:1rem 0}
+  label{display:block;margin:.75rem 0} input{display:block;padding:.5rem;width:min(100%,420px);box-sizing:border-box}
+  button,.button{background:#154e8a;color:white;border:0;border-radius:6px;padding:.55rem .8rem;cursor:pointer;text-decoration:none}
+  table{border-collapse:collapse;width:100%} th,td{text-align:left;padding:.55rem;border-bottom:1px solid #e5e9ee}
+  .error{background:#fff1f0;color:#9b241c;padding:.75rem;border-radius:6px}
+</style>
+<h1>二代机器人 · 人员打卡</h1>
+<p>本页面只在当前电脑开放。请取得人员同意后录入照片。</p>
+{% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+<section>
+  <h2>录入人员</h2>
+  <form action="{{ url_for('enroll') }}" method="post" enctype="multipart/form-data">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>人员编号 <input name="person_id" maxlength="64" required></label>
+    <label>姓名 <input name="display_name" maxlength="80" required></label>
+    <label>照片（1–5 张，每张仅一张清晰人脸） <input name="images" type="file" accept="image/jpeg,image/png" multiple required></label>
+    <button type="submit">录入</button>
+  </form>
+</section>
+<section>
+  <h2>已录入人员</h2>
+  <table><thead><tr><th>编号</th><th>姓名</th><th>样本</th><th>操作</th></tr></thead><tbody>
+  {% for id,name,count in people %}<tr><td>{{ id }}</td><td>{{ name }}</td><td>{{ count }}</td><td><form action="{{ url_for('delete_person', person_id=id) }}" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button type="submit">删除</button></form></td></tr>{% endfor %}
+  </tbody></table>
+</section>
+<section>
+  <h2>打卡记录</h2>
+  <p><a class="button" href="{{ url_for('export_events') }}">导出 CSV</a></p>
+  <table><thead><tr><th>本地时间</th><th>编号</th><th>姓名</th><th>分数</th><th>设备</th></tr></thead><tbody>
+  {% for event,local_time in events %}<tr><td>{{ local_time }}</td><td>{{ event.person_id }}</td><td>{{ event.display_name }}</td><td>{{ '%.3f'|format(event.score) }}</td><td>{{ event.device_id }}</td></tr>{% endfor %}
+  </tbody></table>
+</section>
+</html>

@@ -1,0 +1,10 @@
+string person_id
+string display_name
+bool recognized
+float32 score
+int32 x
+int32 y
+int32 width
+int32 height
+bool has_distance
+float32 distance_m

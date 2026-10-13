@@ -1,0 +1,100 @@
+<?xml version="1.0"?>
+<!-- Overall envelope: 0.52 m long, 0.35 m wide, 0.20 m high. +X is front.
+     Wheel sizes and mounting coordinates are illustrative, not measured CAD. -->
+<robot name="fwr_chassis_preview">
+  <material name="body_blue"><color rgba="0.12 0.35 0.68 0.72"/></material>
+  <material name="wheel_dark"><color rgba="0.10 0.12 0.16 1"/></material>
+  <material name="caster_gray"><color rgba="0.52 0.56 0.62 1"/></material>
+  <material name="lidar_dark"><color rgba="0.04 0.05 0.07 1"/></material>
+  <material name="lidar_base_gray"><color rgba="0.23 0.25 0.29 1"/></material>
+
+  <link name="base_link">
+    <visual>
+      <origin xyz="0 0 0.12"/>
+      <geometry><mesh filename="__CHASSIS_MESH_URI__"/></geometry>
+      <material name="body_blue"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.12"/>
+      <geometry><box size="0.52 0.35 0.16"/></geometry>
+    </collision>
+  </link>
+
+  <!-- RPLIDAR C1 simplified visual: 55.6 x 55.6 x 41.3 mm per SLAMTEC drawing.
+       Base position is illustrative; +X is front and the scan frame is chassis-fixed. -->
+  <link name="laser_front">
+    <visual>
+      <origin xyz="0 0 -0.01825"/>
+      <geometry><box size="0.0556 0.0556 0.0231"/></geometry>
+      <material name="lidar_base_gray"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 0.0024"/>
+      <geometry><cylinder radius="0.0215" length="0.0182"/></geometry>
+      <material name="lidar_dark"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 -0.00915"/>
+      <geometry><box size="0.0556 0.0556 0.0413"/></geometry>
+    </collision>
+    <inertial>
+      <origin xyz="0 0 -0.00915"/>
+      <mass value="0.11"/>
+      <inertia ixx="0.0000439" ixy="0" ixz="0" iyy="0.0000439" iyz="0" izz="0.0000567"/>
+    </inertial>
+  </link>
+  <joint name="laser_front_joint" type="fixed">
+    <parent link="base_link"/><child link="laser_front"/>
+    <origin xyz="0.19 0 0.2298" rpy="0 0 0"/>
+  </joint>
+
+  <link name="left_drive_wheel">
+    <visual><origin rpy="1.57079632679 0 0"/><geometry><cylinder radius="0.05" length="0.035"/></geometry><material name="wheel_dark"/></visual>
+  </link>
+  <joint name="left_drive_wheel_preview_joint" type="fixed">
+    <parent link="base_link"/><child link="left_drive_wheel"/>
+    <origin xyz="-0.13 0.145 0.05"/>
+  </joint>
+
+  <link name="right_drive_wheel">
+    <visual><origin rpy="1.57079632679 0 0"/><geometry><cylinder radius="0.05" length="0.035"/></geometry><material name="wheel_dark"/></visual>
+  </link>
+  <joint name="right_drive_wheel_preview_joint" type="fixed">
+    <parent link="base_link"/><child link="right_drive_wheel"/>
+    <origin xyz="-0.13 -0.145 0.05"/>
+  </joint>
+
+  <link name="front_left_caster_swivel">
+    <visual><origin xyz="0 0 -0.015"/><geometry><cylinder radius="0.012" length="0.05"/></geometry><material name="caster_gray"/></visual>
+  </link>
+  <joint name="front_left_caster_steer_joint" type="continuous">
+    <parent link="base_link"/><child link="front_left_caster_swivel"/>
+    <origin xyz="0.19 0.115 0.09"/>
+    <axis xyz="0 0 1"/>
+  </joint>
+  <link name="front_left_caster_wheel">
+    <visual><origin rpy="1.57079632679 0 0"/><geometry><cylinder radius="0.04" length="0.025"/></geometry><material name="caster_gray"/></visual>
+  </link>
+  <joint name="front_left_caster_roll_joint" type="continuous">
+    <parent link="front_left_caster_swivel"/><child link="front_left_caster_wheel"/>
+    <origin xyz="-0.025 0 -0.05"/>
+    <axis xyz="0 1 0"/>
+  </joint>
+
+  <link name="front_right_caster_swivel">
+    <visual><origin xyz="0 0 -0.015"/><geometry><cylinder radius="0.012" length="0.05"/></geometry><material name="caster_gray"/></visual>
+  </link>
+  <joint name="front_right_caster_steer_joint" type="continuous">
+    <parent link="base_link"/><child link="front_right_caster_swivel"/>
+    <origin xyz="0.19 -0.115 0.09"/>
+    <axis xyz="0 0 1"/>
+  </joint>
+  <link name="front_right_caster_wheel">
+    <visual><origin rpy="1.57079632679 0 0"/><geometry><cylinder radius="0.04" length="0.025"/></geometry><material name="caster_gray"/></visual>
+  </link>
+  <joint name="front_right_caster_roll_joint" type="continuous">
+    <parent link="front_right_caster_swivel"/><child link="front_right_caster_wheel"/>
+    <origin xyz="-0.025 0 -0.05"/>
+    <axis xyz="0 1 0"/>
+  </joint>
+</robot>
