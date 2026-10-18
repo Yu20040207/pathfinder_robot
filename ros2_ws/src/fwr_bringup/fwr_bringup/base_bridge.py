@@ -1,0 +1,159 @@
+"""Sole ESP32-S3 serial owner for the physical chassis."""
+
+import math
+import os
+import time
+
+from geometry_msgs.msg import Twist
+from nav_msgs.msg import Odometry
+import rclpy
+from rclpy.node import Node
+from sensor_msgs.msg import JointState
+from std_msgs.msg import Bool, Int32
+
+from .base_bridge_core import BaseBridgeCore
+from .base_protocol import MAX_LINE, parse_state_line
+from .base_serial import open_exclusive_serial
+from .wheel_odometry_node import DEFAULT_DEVICE
+
+
+class BaseBridgeNode(Node):
+    def __init__(self) -> None:
+        super().__init__('base_bridge')
+        self.declare_parameter('device', DEFAULT_DEVICE)
+        self.declare_parameter('motion_enabled', False)
+        self._device = str(self.get_parameter('device').value)
+        self._core = BaseBridgeCore()
+        self._fd = None
+        self._pending = bytearray()
+        self._last_open_attempt = 0.0
+        self._wheel_odom = self.create_publisher(Odometry, '/wheel/odom', 10)
+        self._joint_states = self.create_publisher(JointState, '/joint_states', 10)
+        self._fault = self.create_publisher(Int32, '/base/fault', 10)
+        self._ready = self.create_publisher(Bool, '/base/ready', 10)
+        self.create_subscription(Twist, '/cmd_vel', self._on_velocity, 10)
+        self.create_timer(.05, self._tick)
+
+    def _on_velocity(self, msg: Twist) -> None:
+        if not bool(self.get_parameter('motion_enabled').value):
+            return
+        try:
+            self._core.accept_cmd(msg.linear.x, msg.angular.z, time.monotonic())
+        except ValueError as exc:
+            self.get_logger().warn(f'Rejected /cmd_vel: {exc}', throttle_duration_sec=2.0)
+
+    def _open_if_needed(self, now: float) -> None:
+        if self._fd is not None or now - self._last_open_attempt < 1.0:
+            return
+        self._last_open_attempt = now
+        try:
+            self._fd = open_exclusive_serial(self._device)
+            self._pending.clear()
+            self._core.connect(now)
+            os.write(self._fd, b'x?')
+            self.get_logger().info(f'ESP32 serial opened exclusively: {self._device}')
+        except (OSError, ValueError) as exc:
+            self.get_logger().warn(f'ESP32 serial unavailable: {exc}', throttle_duration_sec=5.0)
+
+    def _disconnect(self, reason: str) -> None:
+        if self._fd is not None:
+            try:
+                os.write(self._fd, b'x')
+            except OSError:
+                pass
+            os.close(self._fd)
+            self._fd = None
+        self._core.disconnect()
+        self._pending.clear()
+        self.get_logger().error(f'ESP32 serial disconnected: {reason}')
+
+    def _consume(self, data: bytes, now: float) -> None:
+        self._pending.extend(data)
+        if len(self._pending) > 4096:
+            self._pending.clear()
+            self._disconnect('serial buffer overflow')
+            return
+        while b'\n' in self._pending:
+            line, _, rest = self._pending.partition(b'\n')
+            self._pending = bytearray(rest)
+            if len(line) > MAX_LINE:
+                continue
+            decoded = line.decode('ascii', errors='replace').strip()
+            if decoded == 'BASE_CONTROL_V2':
+                self._core.handshake(decoded)
+                continue
+            state = parse_state_line(decoded)
+            if state is None:
+                continue
+            out = self._core.step(state, now)
+            if out.odom is not None:
+                self._publish_odometry(out.odom, out.wheel_positions_rad)
+
+    def _publish_odometry(self, sample, wheel_positions_rad) -> None:
+        stamp = self.get_clock().now().to_msg()
+        msg = Odometry()
+        msg.header.stamp = stamp
+        msg.header.frame_id = 'odom'
+        msg.child_frame_id = 'base_footprint'
+        msg.pose.pose.position.x = sample.x
+        msg.pose.pose.position.y = sample.y
+        msg.pose.pose.orientation.z = math.sin(sample.yaw / 2)
+        msg.pose.pose.orientation.w = math.cos(sample.yaw / 2)
+        msg.twist.twist.linear.x = sample.linear_mps
+        msg.twist.twist.angular.z = sample.angular_rps
+        for index in (0, 7, 35):
+            msg.pose.covariance[index] = .1
+            msg.twist.covariance[index] = .1
+        for index in (14, 21, 28):
+            msg.pose.covariance[index] = 1e6
+            msg.twist.covariance[index] = 1e6
+        self._wheel_odom.publish(msg)
+        joints = JointState()
+        joints.header.stamp = stamp
+        joints.name = ['left_drive_wheel_preview_joint', 'right_drive_wheel_preview_joint']
+        joints.position = list(wheel_positions_rad)
+        self._joint_states.publish(joints)
+
+    def _tick(self) -> None:
+        now = time.monotonic()
+        self._open_if_needed(now)
+        if self._fd is not None:
+            try:
+                for _ in range(8):
+                    try:
+                        chunk = os.read(self._fd, 4096)
+                    except BlockingIOError:
+                        break
+                    if not chunk:
+                        if not os.path.exists(self._device):
+                            self._disconnect('device disappeared')
+                        break
+                    self._consume(chunk, now)
+                    if self._fd is None:
+                        break
+                if self._fd is not None:
+                    output = self._core.step(None, now)
+                    command = output.command if bool(self.get_parameter('motion_enabled').value) else b'x'
+                    os.write(self._fd, command)
+            except OSError as exc:
+                self._disconnect(str(exc))
+        self._fault.publish(Int32(data=self._core.fault))
+        self._ready.publish(Bool(data=self._core.ready(now) and
+                                 bool(self.get_parameter('motion_enabled').value)))
+
+    def destroy_node(self) -> bool:
+        self._disconnect('node shutdown')
+        return super().destroy_node()
+
+
+def main(args=None) -> None:
+    rclpy.init(args=args)
+    node = BaseBridgeNode()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()

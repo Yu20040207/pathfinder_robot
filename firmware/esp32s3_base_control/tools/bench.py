@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bounded, exclusive serial bench runner for BASE_CONTROL_V1 firmware."""
+"""Bounded, exclusive serial bench runner for BASE_CONTROL_V1/V2 firmware."""
 import argparse
 import csv
 import fcntl
@@ -105,7 +105,7 @@ def main():
         initial=None
         while time.monotonic()<deadline:
             for line in port.lines():
-                if 'BASE_CONTROL_V1' in line:
+                if line in ('BASE_CONTROL_V1', 'BASE_CONTROL_V2') or line.startswith('BASE_CONTROL_V1:'):
                     identified=True
                 row=state(line)
                 if row is not None:
@@ -113,7 +113,7 @@ def main():
             if identified and initial is not None:
                 break
         if not identified or initial is None:
-            raise RuntimeError('BASE_CONTROL_V1 handshake missing; no motion command sent')
+            raise RuntimeError('BASE_CONTROL_V1/V2 handshake missing; no motion command sent')
         if initial['active'] or initial['left_pwm'] or initial['right_pwm']:
             raise RuntimeError('controller did not confirm stopped state')
         if args.action!='inspect' and initial['fault']:
