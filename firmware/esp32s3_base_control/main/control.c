@@ -2,6 +2,9 @@
 #include <math.h>
 #include <string.h>
 
+// Continuous velocity commands stop a non-moving driven wheel before a long grind.
+static const float V_STALL_LIMIT_S = .45f;
+
 static float clamp(float x, float low, float high) {
     return fminf(high, fmaxf(low, x));
 }
@@ -273,7 +276,7 @@ void base_tick(base_control_t *c, int64_t now, int32_t left, int32_t right,
                 c->stall_s[i] = delta==0 ? c->stall_s[i]+dt : 0;
                 c->wrong_s[i] = direction*c->measured[i]<-20 ? c->wrong_s[i]+dt : 0;
                 c->fast_s[i] = fabsf(c->measured[i])>300 ? c->fast_s[i]+dt : 0;
-                if (c->stall_s[i]>.75f) fail(c, BASE_STALL);
+                if (c->stall_s[i]>V_STALL_LIMIT_S) fail(c, BASE_STALL);
                 else if (c->wrong_s[i]>.2f) fail(c, BASE_DIRECTION);
                 else if (c->fast_s[i]>.1f) fail(c, BASE_OVERSPEED);
                 continue;
@@ -298,7 +301,7 @@ void base_tick(base_control_t *c, int64_t now, int32_t left, int32_t right,
         c->stall_s[i] = fabsf(c->pwm[i])>=.3f && delta==0 ? c->stall_s[i]+dt : 0;
         c->wrong_s[i] = direction*c->measured[i]<-20 ? c->wrong_s[i]+dt : 0;
         c->fast_s[i] = fabsf(c->measured[i])>300 ? c->fast_s[i]+dt : 0;
-        if (c->stall_s[i]>.75f) fail(c, BASE_STALL);
+        if (c->stall_s[i]>V_STALL_LIMIT_S) fail(c, BASE_STALL);
         else if (c->wrong_s[i]>.2f) fail(c, BASE_DIRECTION);
         else if (c->fast_s[i]>.1f) fail(c, BASE_OVERSPEED);
     }

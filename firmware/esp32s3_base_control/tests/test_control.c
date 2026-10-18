@@ -7,6 +7,28 @@
 static void tick(base_control_t *c, int64_t now, int left, int right) {
     base_tick(c, now, left, right, 0, 0);
 }
+static void loaded_plant_run(float left_goal, float right_goal) {
+    base_control_t c;
+    base_init(&c, 0, 0, 0);
+    float physical[2]={0, 0}, count_f[2]={0, 0};
+    for (int i=1; i<=100; ++i) {
+        int64_t now=i*20000LL;
+        if (i%5==1) assert(base_command(&c, left_goal, right_goal, now));
+        for (int wheel=0; wheel<2; ++wheel) {
+            float duty=c.pwm[wheel];
+            float threshold=wheel==0 ? .58f : .55f;
+            float target=copysignf(fmaxf(0, fabsf(duty)-threshold)*700, duty);
+            physical[wheel] += .25f*(target-physical[wheel]);
+            count_f[wheel] += physical[wheel]*.02f/(210.0f/1468.0f) * (wheel==0 ? -1 : 1);
+        }
+        tick(&c, now, (int)lroundf(count_f[0]), (int)lroundf(count_f[1]));
+        assert(c.fault==BASE_OK && c.active);
+        assert(fabsf(c.pwm[0])<=.75f && fabsf(c.pwm[1])<=.75f);
+    }
+    assert(left_goal*c.measured[0]>40 && right_goal*c.measured[1]>40);
+    base_stop(&c);
+    assert(c.pwm[0]==0 && c.pwm[1]==0);
+}
 int main(void) {
     base_control_t c;
     // Loaded diagnostic is forward-only and cannot silently accept a low
@@ -347,5 +369,14 @@ int main(void) {
     assert(parse_turn("t -1", &l) && l==-1);
     assert(!parse_turn("t 0", &l));
     assert(!parse_turn("t 1 junk", &l));
+    loaded_plant_run(80, 80);
+    loaded_plant_run(-80, -80);
+    loaded_plant_run(-80, 80);
+    base_init(&c, 0, 0, 0);
+    for (int i=1; i<=30 && !c.fault; ++i) {
+        if (i%5==1) assert(base_command(&c, -80, 80, i*20000LL));
+        tick(&c, i*20000LL, 0, i*8);
+    }
+    assert(c.fault==BASE_STALL && !c.active && c.pwm[0]==0 && c.pwm[1]==0);
     puts("control and protocol tests passed");
 }
