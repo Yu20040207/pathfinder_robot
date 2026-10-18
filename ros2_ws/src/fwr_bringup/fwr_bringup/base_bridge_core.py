@@ -31,6 +31,7 @@ class BaseBridgeCore:
         self._last_counts = None
         self._last_esp_us = None
         self._wheel_positions = [0.0, 0.0]
+        self._turn_owner = False
 
     def connect(self, now_s: float) -> None:
         self.connected = True
@@ -41,6 +42,7 @@ class BaseBridgeCore:
         self._last_counts = None
         self._last_esp_us = None
         self.odom.reset_reference()
+        self._turn_owner = False
 
     def disconnect(self) -> None:
         self.connected = False
@@ -50,12 +52,15 @@ class BaseBridgeCore:
         self._last_state_at = None
         self._last_counts = None
         self.odom.reset_reference()
+        self._turn_owner = False
 
     def handshake(self, line: str) -> bool:
         self.verified = parse_handshake(line)
         return self.verified
 
     def accept_cmd(self, v_mps: float, omega_rps: float, now_s: float) -> tuple[float, float]:
+        if self._turn_owner:
+            raise RuntimeError('relative turn owns base')
         self._target = None
         self._last_cmd_at = None
         if not math.isfinite(v_mps) or not math.isfinite(omega_rps):
@@ -67,6 +72,28 @@ class BaseBridgeCore:
             self._target = (left, right)
             self._last_cmd_at = now_s
         return left, right
+
+    def begin_turn(self, now_s: float) -> bool:
+        if (self._turn_owner or not self.ready(now_s) or
+                (self._target is not None and self._last_cmd_at is not None and
+                 0 <= now_s - self._last_cmd_at <= .20)):
+            return False
+        self._turn_owner = True
+        self._target = None
+        self._last_cmd_at = None
+        return True
+
+    def accept_turn_cmd(self, left_mm_s: float, right_mm_s: float, now_s: float) -> None:
+        if not self._turn_owner or not self.ready(now_s):
+            raise RuntimeError('relative turn unavailable')
+        encode_wheel_speed(left_mm_s, right_mm_s)
+        self._target = (left_mm_s, right_mm_s)
+        self._last_cmd_at = now_s
+
+    def end_turn(self) -> None:
+        self._turn_owner = False
+        self._target = None
+        self._last_cmd_at = None
 
     def ready(self, now_s: float) -> bool:
         return (self.connected and self.verified and self.fault == 0 and

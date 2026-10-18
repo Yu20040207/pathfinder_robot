@@ -1,0 +1,10 @@
+uint8 PIVOT=1
+uint8 ARC=2
+float32 angle_deg
+uint8 mode
+---
+bool success
+string reason
+float32 actual_angle_deg
+---
+float32 remaining_angle_deg

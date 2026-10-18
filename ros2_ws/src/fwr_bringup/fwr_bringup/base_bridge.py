@@ -1,5 +1,6 @@
 """Sole ESP32-S3 serial owner for the physical chassis."""
 
+import asyncio
 import math
 import os
 import time
@@ -7,14 +8,17 @@ import time
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
 import rclpy
+from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.node import Node
-from sensor_msgs.msg import JointState
+from sensor_msgs.msg import Imu, JointState
 from std_msgs.msg import Bool, Int32
+from fwr_interfaces.action import TurnRelative
 
 from .base_bridge_core import BaseBridgeCore
 from .base_protocol import MAX_LINE, parse_state_line
 from .base_serial import open_exclusive_serial
 from .wheel_odometry_node import DEFAULT_DEVICE
+from .turn_controller import TurnController, TurnFinished
 
 
 class BaseBridgeNode(Node):
@@ -22,16 +26,26 @@ class BaseBridgeNode(Node):
         super().__init__('base_bridge')
         self.declare_parameter('device', DEFAULT_DEVICE)
         self.declare_parameter('motion_enabled', False)
+        self.declare_parameter('allow_pivot', False)
         self._device = str(self.get_parameter('device').value)
         self._core = BaseBridgeCore()
         self._fd = None
         self._pending = bytearray()
         self._last_open_attempt = 0.0
+        self._imu_yaw = None
+        self._imu_yaw_rate = 0.0
+        self._last_imu_at = None
         self._wheel_odom = self.create_publisher(Odometry, '/wheel/odom', 10)
         self._joint_states = self.create_publisher(JointState, '/joint_states', 10)
         self._fault = self.create_publisher(Int32, '/base/fault', 10)
         self._ready = self.create_publisher(Bool, '/base/ready', 10)
         self.create_subscription(Twist, '/cmd_vel', self._on_velocity, 10)
+        self.create_subscription(Imu, '/imu/data', self._on_imu, 10)
+        self._turn_action = ActionServer(
+            self, TurnRelative, 'turn_relative',
+            execute_callback=self._execute_turn,
+            goal_callback=self._turn_goal,
+            cancel_callback=lambda _: CancelResponse.ACCEPT)
         self.create_timer(.05, self._tick)
 
     def _on_velocity(self, msg: Twist) -> None:
@@ -39,8 +53,93 @@ class BaseBridgeNode(Node):
             return
         try:
             self._core.accept_cmd(msg.linear.x, msg.angular.z, time.monotonic())
-        except ValueError as exc:
+        except (ValueError, RuntimeError) as exc:
             self.get_logger().warn(f'Rejected /cmd_vel: {exc}', throttle_duration_sec=2.0)
+
+    def _on_imu(self, msg: Imu) -> None:
+        q = msg.orientation
+        norm = q.x*q.x + q.y*q.y + q.z*q.z + q.w*q.w
+        if not .9 <= norm <= 1.1:
+            return
+        self._imu_yaw = math.atan2(2*(q.w*q.z + q.x*q.y),
+                                   1 - 2*(q.y*q.y + q.z*q.z))
+        self._imu_yaw_rate = msg.angular_velocity.z
+        self._last_imu_at = time.monotonic()
+
+    def _turn_goal(self, request):
+        now = time.monotonic()
+        if (not bool(self.get_parameter('motion_enabled').value) or
+                (request.mode == TurnRelative.Goal.PIVOT and
+                 not bool(self.get_parameter('allow_pivot').value)) or
+                self._imu_yaw is None or self._last_imu_at is None or
+                now - self._last_imu_at > .15):
+            return GoalResponse.REJECT
+        try:
+            TurnController(request.angle_deg, request.mode, now)
+        except ValueError:
+            return GoalResponse.REJECT
+        return GoalResponse.ACCEPT if self._core.begin_turn(now) else GoalResponse.REJECT
+
+    async def _execute_turn(self, goal_handle):
+        now = time.monotonic()
+        controller = TurnController(goal_handle.request.angle_deg,
+                                    goal_handle.request.mode, now)
+        start_yaw = self._imu_yaw
+        start_wheels = tuple(self._core._wheel_positions)
+        finished = None
+        try:
+            while rclpy.ok():
+                now = time.monotonic()
+                if goal_handle.is_cancel_requested:
+                    finished = controller.cancel()
+                    goal_handle.canceled()
+                    break
+                if (not bool(self.get_parameter('motion_enabled').value) or
+                        (controller.mode == TurnController.PIVOT and
+                         not bool(self.get_parameter('allow_pivot').value))):
+                    finished = TurnFinished(False, 'motion_disabled', 0)
+                elif not self._core.ready(now) or self._imu_yaw is None:
+                    finished = TurnFinished(False, 'base_stale', 0)
+                else:
+                    radius_m = .210 / (2 * math.pi)
+                    left_progress = (self._core._wheel_positions[0] - start_wheels[0]) * radius_m
+                    right_progress = (self._core._wheel_positions[1] - start_wheels[1]) * radius_m
+                    relative_yaw = self._imu_yaw - start_yaw
+                    finished = controller.update(
+                        relative_yaw, self._imu_yaw_rate, now,
+                        left_progress, right_progress,
+                        imu_age_s=now-self._last_imu_at, fault=self._core.fault)
+                if isinstance(finished, TurnFinished):
+                    if finished.success:
+                        goal_handle.succeed()
+                    else:
+                        goal_handle.abort()
+                    break
+                try:
+                    self._core.accept_turn_cmd(*finished, now)
+                except (RuntimeError, ValueError):
+                    finished = TurnFinished(False, 'base_unavailable', 0)
+                    goal_handle.abort()
+                    break
+                feedback = TurnRelative.Feedback()
+                feedback.remaining_angle_deg = float(controller.remaining_angle_deg)
+                goal_handle.publish_feedback(feedback)
+                await asyncio.sleep(.05)
+            if finished is None:
+                finished = TurnFinished(False, 'shutdown', 0)
+                goal_handle.abort()
+        finally:
+            self._core.end_turn()
+            if self._fd is not None:
+                try:
+                    os.write(self._fd, b'x')
+                except OSError:
+                    pass
+        result = TurnRelative.Result()
+        result.success = bool(finished and finished.success)
+        result.reason = finished.reason if finished else 'shutdown'
+        result.actual_angle_deg = float(finished.actual_angle_deg if finished else 0)
+        return result
 
     def _open_if_needed(self, now: float) -> None:
         if self._fd is not None or now - self._last_open_attempt < 1.0:
@@ -142,6 +241,7 @@ class BaseBridgeNode(Node):
                                  bool(self.get_parameter('motion_enabled').value)))
 
     def destroy_node(self) -> bool:
+        self._turn_action.destroy()
         self._disconnect('node shutdown')
         return super().destroy_node()
 

@@ -10,5 +10,6 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/VoiceTranscript.msg"
   "msg/VoiceResponse.msg"
   "action/ExecuteRobotTask.action"
+  "action/TurnRelative.action"
   DEPENDENCIES std_msgs)
 ament_package()
