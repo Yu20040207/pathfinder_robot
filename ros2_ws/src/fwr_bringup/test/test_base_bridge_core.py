@@ -89,7 +89,10 @@ def test_encoder_forward_and_reboot_rebaseline():
     assert out.odom.x == pytest.approx(.210)
     assert out.wheel_positions_rad == pytest.approx((2 * 3.141592653589793,) * 2)
     assert core.step(state(us=1000), 1.1).odom is None
-    assert core.step(state(us=11000, left=-10, right=10), 1.11).odom.x == pytest.approx(.210 + .210 * 10 / 1468)
+    assert core.step(state(us=11000, left=-10, right=10), 1.11).odom is None
+    core.handshake('BASE_CONTROL_V2')
+    assert core.step(state(us=11000, left=-10, right=10), 1.12).odom is None
+    assert core.step(state(us=21000, left=-20, right=20), 1.13).odom.x == pytest.approx(.210 + .210 * 10 / 1468)
 
 
 def test_implausible_encoder_jump_does_not_move_joint_positions():
@@ -97,3 +100,45 @@ def test_implausible_encoder_jump_does_not_move_joint_positions():
     out = core.step(state(us=200000, left=-100000, right=100000), .1)
     assert out.odom is None
     assert out.wheel_positions_rad == (0.0, 0.0)
+
+
+def test_reboot_while_command_active_requires_new_handshake_and_command():
+    core = ready_core()
+    core.accept_cmd(.08, 0, .01)
+    assert core.step(state(us=110000), .02).command.startswith(b'v ')
+    assert core.step(state(us=1000), .03).command == b'x'
+    assert not core.verified
+    assert core.step(state(us=2000), .04).command == b'x'
+    core.handshake('BASE_CONTROL_V2')
+    core.step(state(us=3000), .05)
+    assert core.step(None, .06).command == b'x'
+    core.accept_cmd(.08, 0, .07)
+    assert core.step(None, .08).command.startswith(b'v ')
+
+
+def test_forward_only_envelope_rejects_reverse_and_pivot():
+    from fwr_bringup.base_bridge_core import forward_only_velocity
+    assert forward_only_velocity(.06, .2, .263)
+    assert not forward_only_velocity(0, .2, .263)
+    assert not forward_only_velocity(-.02, 0, .263)
+    assert not forward_only_velocity(.01, .2, .263)
+    assert forward_only_velocity(0, 0, .263)
+
+
+def test_smoother_deceleration_never_passes_pivot_into_autonomous_bridge():
+    from fwr_bringup.base_bridge_core import forward_only_velocity
+    track = .263
+    # Nav2 smooths linear and angular components independently; linear can
+    # reach zero first, leaving a residual angular command.
+    trajectory = [(.06, .25), (.04, .20), (.02, .20), (0.0, .10)]
+    assert all(forward_only_velocity(v, w, track) for v, w in trajectory[:2])
+    assert all(not forward_only_velocity(v, w, track) for v, w in trajectory[2:])
+
+
+def test_halt_invalidates_command_before_reenable():
+    core = ready_core()
+    core.accept_cmd(.06, 0, .01)
+    assert core.step(None, .02).command.startswith(b'v ')
+    core.halt()
+    assert core.step(None, .03).command == b'x'
+    assert core.step(None, .04).command == b'x'

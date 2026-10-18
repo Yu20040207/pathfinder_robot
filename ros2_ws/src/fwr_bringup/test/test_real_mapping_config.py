@@ -41,3 +41,8 @@ def test_real_mapping_launch_has_no_simulator_or_fake_tf():
     for package in ('fwr_bringup', 'fwr_imu', 'sllidar_ros2',
                     'robot_localization', 'slam_toolbox', 'robot_state_publisher'):
         assert f"package='{package}'" in source
+
+
+def test_ekf_filtered_output_is_nav_odom():
+    source = (ROOT / 'launch' / 'real_mapping.launch.py').read_text()
+    assert "('odometry/filtered', '/odom')" in source

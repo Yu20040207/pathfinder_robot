@@ -1,20 +1,23 @@
 """Sole ESP32-S3 serial owner for the physical chassis."""
 
-import asyncio
 import math
 import os
 import time
 
+from action_msgs.msg import GoalStatusArray
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
 import rclpy
 from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.node import Node
-from sensor_msgs.msg import Imu, JointState
+from rclpy.qos import qos_profile_action_status_default, qos_profile_sensor_data
+from rclpy.task import Future
+from sensor_msgs.msg import Imu, JointState, LaserScan
 from std_msgs.msg import Bool, Int32
 from fwr_interfaces.action import TurnRelative
 
-from .base_bridge_core import BaseBridgeCore
+from .base_bridge_core import (BaseBridgeCore, ScanWatchdog, SensorStampGuard,
+                               forward_only_velocity)
 from .base_protocol import MAX_LINE, parse_state_line
 from .base_serial import open_exclusive_serial
 from .wheel_odometry_node import DEFAULT_DEVICE
@@ -29,18 +32,29 @@ class BaseBridgeNode(Node):
         self.declare_parameter('allow_pivot', False)
         self._device = str(self.get_parameter('device').value)
         self._core = BaseBridgeCore()
+        self._scan = ScanWatchdog()
+        self._scan_stamp = SensorStampGuard()
+        self._imu_stamp = SensorStampGuard()
         self._fd = None
         self._pending = bytearray()
         self._last_open_attempt = 0.0
         self._imu_yaw = None
         self._imu_yaw_rate = 0.0
         self._last_imu_at = None
+        self._nav_active = {'pose': False, 'through': False}
+        self.create_subscription(GoalStatusArray, '/navigate_to_pose/_action/status',
+                                 lambda msg: self._on_nav_status('pose', msg),
+                                 qos_profile_action_status_default)
+        self.create_subscription(GoalStatusArray, '/navigate_through_poses/_action/status',
+                                 lambda msg: self._on_nav_status('through', msg),
+                                 qos_profile_action_status_default)
         self._wheel_odom = self.create_publisher(Odometry, '/wheel/odom', 10)
         self._joint_states = self.create_publisher(JointState, '/joint_states', 10)
         self._fault = self.create_publisher(Int32, '/base/fault', 10)
         self._ready = self.create_publisher(Bool, '/base/ready', 10)
         self.create_subscription(Twist, '/cmd_vel', self._on_velocity, 10)
-        self.create_subscription(Imu, '/imu/data', self._on_imu, 10)
+        self.create_subscription(Imu, '/imu/data', self._on_imu, qos_profile_sensor_data)
+        self.create_subscription(LaserScan, '/scan', self._on_scan, qos_profile_sensor_data)
         self._turn_action = ActionServer(
             self, TurnRelative, 'turn_relative',
             execute_callback=self._execute_turn,
@@ -49,30 +63,65 @@ class BaseBridgeNode(Node):
         self.create_timer(.05, self._tick)
 
     def _on_velocity(self, msg: Twist) -> None:
-        if not bool(self.get_parameter('motion_enabled').value):
+        if not self._sensors_ready(time.monotonic()):
             return
         try:
+            if not forward_only_velocity(msg.linear.x, msg.angular.z, self._core.track_m):
+                self._core.accept_cmd(0.0, 0.0, time.monotonic())
+                return
             self._core.accept_cmd(msg.linear.x, msg.angular.z, time.monotonic())
         except (ValueError, RuntimeError) as exc:
             self.get_logger().warn(f'Rejected /cmd_vel: {exc}', throttle_duration_sec=2.0)
 
+    def _on_scan(self, msg: LaserScan) -> None:
+        now = time.monotonic()
+        if (msg.header.frame_id == 'laser_front' and
+                any(math.isfinite(r) and msg.range_min <= r <= msg.range_max
+                    for r in msg.ranges) and
+                self._scan_stamp.accept(self._stamp_s(msg.header.stamp),
+                                        self._ros_now_s(), now)):
+            self._scan.observe(msg.ranges, now)
+
+    def _ros_now_s(self) -> float:
+        return self.get_clock().now().nanoseconds / 1e9
+
+    @staticmethod
+    def _stamp_s(stamp) -> float:
+        return stamp.sec + stamp.nanosec / 1e9
+
+    def _sensors_ready(self, now: float) -> bool:
+        return (bool(self.get_parameter('motion_enabled').value) and
+                self._scan.ready(now) and self._scan_stamp.ready(now) and
+                self._imu_stamp.ready(now) and self._last_imu_at is not None and
+                0 <= now - self._last_imu_at <= .25)
+
     def _on_imu(self, msg: Imu) -> None:
         q = msg.orientation
         norm = q.x*q.x + q.y*q.y + q.z*q.z + q.w*q.w
-        if not .9 <= norm <= 1.1:
+        now = time.monotonic()
+        if (msg.header.frame_id != 'imu_link' or
+                not .9 <= norm <= 1.1 or
+                not math.isfinite(msg.angular_velocity.z) or
+                msg.orientation_covariance[0] == -1 or
+                not self._imu_stamp.accept(self._stamp_s(msg.header.stamp),
+                                           self._ros_now_s(), now)):
             return
         self._imu_yaw = math.atan2(2*(q.w*q.z + q.x*q.y),
                                    1 - 2*(q.y*q.y + q.z*q.z))
         self._imu_yaw_rate = msg.angular_velocity.z
         self._last_imu_at = time.monotonic()
 
+    def _on_nav_status(self, kind: str, msg: GoalStatusArray) -> None:
+        self._nav_active[kind] = any(
+            item.status in (1, 2, 3) for item in msg.status_list)
+
     def _turn_goal(self, request):
         now = time.monotonic()
-        if (not bool(self.get_parameter('motion_enabled').value) or
+        if (not self._sensors_ready(now) or any(self._nav_active.values()) or
                 (request.mode == TurnRelative.Goal.PIVOT and
                  not bool(self.get_parameter('allow_pivot').value)) or
                 self._imu_yaw is None or self._last_imu_at is None or
-                now - self._last_imu_at > .15):
+                self._imu_stamp.age_at(now) > .15):
             return GoalResponse.REJECT
         try:
             TurnController(request.angle_deg, request.mode, now)
@@ -94,7 +143,7 @@ class BaseBridgeNode(Node):
                     finished = controller.cancel()
                     goal_handle.canceled()
                     break
-                if (not bool(self.get_parameter('motion_enabled').value) or
+                if (not self._sensors_ready(now) or any(self._nav_active.values()) or
                         (controller.mode == TurnController.PIVOT and
                          not bool(self.get_parameter('allow_pivot').value))):
                     finished = TurnFinished(False, 'motion_disabled', 0)
@@ -108,7 +157,7 @@ class BaseBridgeNode(Node):
                     finished = controller.update(
                         relative_yaw, self._imu_yaw_rate, now,
                         left_progress, right_progress,
-                        imu_age_s=now-self._last_imu_at, fault=self._core.fault)
+                        imu_age_s=self._imu_stamp.age_at(now), fault=self._core.fault)
                 if isinstance(finished, TurnFinished):
                     if finished.success:
                         goal_handle.succeed()
@@ -124,7 +173,7 @@ class BaseBridgeNode(Node):
                 feedback = TurnRelative.Feedback()
                 feedback.remaining_angle_deg = float(controller.remaining_angle_deg)
                 goal_handle.publish_feedback(feedback)
-                await asyncio.sleep(.05)
+                await self._sleep_ros(.05)
             if finished is None:
                 finished = TurnFinished(False, 'shutdown', 0)
                 goal_handle.abort()
@@ -140,6 +189,16 @@ class BaseBridgeNode(Node):
         result.reason = finished.reason if finished else 'shutdown'
         result.actual_angle_deg = float(finished.actual_angle_deg if finished else 0)
         return result
+
+    async def _sleep_ros(self, delay_s: float) -> None:
+        """Yield the rclpy executor; asyncio has no running loop here."""
+        future = Future()
+        timer = self.create_timer(delay_s, lambda: future.set_result(None)
+                                  if not future.done() else None)
+        try:
+            await future
+        finally:
+            self.destroy_timer(timer)
 
     def _open_if_needed(self, now: float) -> None:
         if self._fd is not None or now - self._last_open_attempt < 1.0:
@@ -184,7 +243,11 @@ class BaseBridgeNode(Node):
             state = parse_state_line(decoded)
             if state is None:
                 continue
+            previous_esp_us = self._core._last_esp_us
             out = self._core.step(state, now)
+            if previous_esp_us is not None and state.esp_us < previous_esp_us:
+                if self._fd is not None:
+                    os.write(self._fd, b'x?')
             if out.odom is not None:
                 self._publish_odometry(out.odom, out.wheel_positions_rad)
 
@@ -232,13 +295,17 @@ class BaseBridgeNode(Node):
                         break
                 if self._fd is not None:
                     output = self._core.step(None, now)
-                    command = output.command if bool(self.get_parameter('motion_enabled').value) else b'x'
+                    if self._sensors_ready(now):
+                        command = output.command
+                    else:
+                        self._core.halt()
+                        command = b'x'
                     os.write(self._fd, command)
             except OSError as exc:
                 self._disconnect(str(exc))
         self._fault.publish(Int32(data=self._core.fault))
         self._ready.publish(Bool(data=self._core.ready(now) and
-                                 bool(self.get_parameter('motion_enabled').value)))
+                                 self._sensors_ready(now)))
 
     def destroy_node(self) -> bool:
         self._turn_action.destroy()
