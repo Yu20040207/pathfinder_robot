@@ -20,23 +20,14 @@ rviz2 -d /home/manbaout/Company_Project/Four-wheel-robot/ros2_ws/src/fwr_bringup
 
 RViz 的固定坐标系是 `map`，显示实时 `/map`、C1 `/scan` 和车体模型。
 
-第二个终端确认 `/scan`、`/imu/data`、`/odom` 持续更新，`/base/fault` 为 0，再显式开启人工模式：
+第二个终端确认 `/scan`、`/imu/data`、`/odom` 持续更新，`/base/fault` 为 0。随后在**要接收按键的终端**运行：
 
 ```bash
-source /opt/ros/humble/setup.bash
-source /home/manbaout/Company_Project/Four-wheel-robot/ros2_ws/install/setup.bash
-ros2 param set /base_bridge manual_enabled true
-ros2 param set /base_bridge motion_enabled true
-ros2 topic echo /base/ready --once
+bash /home/manbaout/Company_Project/Four-wheel-robot/scripts/start_keyboard_mapping.sh
 ```
 
-`/base/ready` 必须是 `true`。第三个终端运行 `ros2 run fwr_bringup keyboard_teleop`，**焦点保持在该终端**：W/S 为前进/后退，A/D 为原地左/右转，空格停机，Q 退出。速度固定为直行 0.10 m/s、转向 0.75 rad/s；不能由键盘提高。按键一次只保持约 0.18 s，持续运动依赖键盘重复按键，松键后自动停机。键盘自动重复的起始间隔可能造成短暂停顿，先用短按熟悉响应，再缓慢沿场地边缘采集地图。倒车和原地转向属于人工近距离操作，须目视检查雷达后方盲区；Nav2 自动倒车仍禁止。
+脚本会检查节点和故障码，开启人工模式，并要求 `/base/ready=true`。**焦点保持在该终端**：W/S 为前进/后退，A/D 为原地左/右转，空格停机，Q 退出。速度固定为直行 0.10 m/s、转向 0.75 rad/s；不能由键盘提高。按键一次只保持约 0.18 s，持续运动依赖键盘重复按键，松键后自动停机。键盘自动重复的起始间隔可能造成短暂停顿，先用短按熟悉响应，再缓慢沿场地边缘采集地图。倒车和原地转向属于人工近距离操作，须目视检查雷达后方盲区；Nav2 自动倒车仍禁止。
 
-结束后先按空格并按 Q 退出，再关运动门：
-
-```bash
-ros2 param set /base_bridge motion_enabled false
-ros2 param set /base_bridge manual_enabled false
-```
+结束后先按空格，再按 Q 退出。脚本退出时会关闭软件运动门。
 
 地图采集完成并经 RViz 检查后，使用 `ros2 run nav2_map_server map_saver_cli -f /home/manbaout/Company_Project/Four-wheel-robot/ros2_ws/src/fwr_bringup/maps/real_first_map` 保存。保存地图不表示已经通过 Nav2 自动导航验收；仍须检查地图质量、真实轮廓和雷达盲区。
