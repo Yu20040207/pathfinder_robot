@@ -14,13 +14,24 @@ fi
 # The terminal receives a key press immediately, but GNOME's default 500 ms
 # repeat delay is longer than the teleop's 180 ms release watchdog. Shorten it
 # only while this script owns the keyboard, then restore the original setting.
-if [[ -z "${DISPLAY:-}" ]] || ! command -v xset >/dev/null; then
-  echo '需要 X11 的 xset 才能保证按住按键时指令连续；当前无法启动键盘控制。' >&2
+if [[ -z "${DISPLAY:-}" ]] || ! command -v xset >/dev/null ||
+   ! command -v gsettings >/dev/null; then
+  echo '需要 X11、xset 和 GNOME gsettings 才能保证按住按键时指令连续。' >&2
   exit 1
 fi
 original_repeat=$(xset q | awk '/auto repeat delay:/ {print $4, $7; exit}')
 if [[ ! "$original_repeat" =~ ^[0-9]+\ [0-9]+$ ]]; then
   echo '无法读取原键盘重复设置；当前无法启动键盘控制。' >&2
+  exit 1
+fi
+keyboard_schema=org.gnome.desktop.peripherals.keyboard
+original_gnome_delay=$(gsettings get "$keyboard_schema" delay | awk '{print $2}')
+original_gnome_interval=$(gsettings get "$keyboard_schema" repeat-interval | awk '{print $2}')
+original_gnome_repeat=$(gsettings get "$keyboard_schema" repeat)
+if [[ ! "$original_gnome_delay" =~ ^[0-9]+$ ||
+      ! "$original_gnome_interval" =~ ^[0-9]+$ ||
+      ! "$original_gnome_repeat" =~ ^(true|false)$ ]]; then
+  echo '无法读取 GNOME 键盘重复设置；当前无法启动键盘控制。' >&2
   exit 1
 fi
 
@@ -45,11 +56,17 @@ fi
 cleanup() {
   ros2 param set /base_bridge motion_enabled false >/dev/null 2>&1 || true
   ros2 param set /base_bridge manual_enabled false >/dev/null 2>&1 || true
+  gsettings set "$keyboard_schema" delay "$original_gnome_delay" >/dev/null 2>&1 || true
+  gsettings set "$keyboard_schema" repeat-interval "$original_gnome_interval" >/dev/null 2>&1 || true
+  gsettings set "$keyboard_schema" repeat "$original_gnome_repeat" >/dev/null 2>&1 || true
   xset r rate $original_repeat >/dev/null 2>&1 || true
   echo '键盘控制已退出，软件运动门已关闭。'
 }
 trap cleanup EXIT
 
+gsettings set "$keyboard_schema" repeat true
+gsettings set "$keyboard_schema" delay 120
+gsettings set "$keyboard_schema" repeat-interval 30
 xset r rate 120 30
 
 ros2 param set /base_bridge manual_enabled true >/dev/null

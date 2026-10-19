@@ -1,5 +1,6 @@
 """Sole ESP32-S3 serial owner for the physical chassis."""
 
+from collections import deque
 import math
 import os
 import time
@@ -39,6 +40,7 @@ class BaseBridgeNode(Node):
         self._imu_stamp = SensorStampGuard()
         self._fd = None
         self._pending = bytearray()
+        self._recent_states = deque(maxlen=12)
         self._last_open_attempt = 0.0
         self._last_handshake_attempt = 0.0
         self._imu_yaw = None
@@ -272,6 +274,15 @@ class BaseBridgeNode(Node):
             state = parse_state_line(decoded)
             if state is None:
                 continue
+            self._recent_states.append(
+                (state.esp_us, state.left_count, state.right_count,
+                 round(state.left_measured), round(state.right_measured),
+                 round(state.left_pwm, 2), round(state.right_pwm, 2), state.fault))
+            if state.fault and not self._core.fault:
+                self.get_logger().error(
+                    f'ESP32 fault {state.fault}; recent states '
+                    f'(us,Lcount,Rcount,Lmm/s,Rmm/s,Lpwm,Rpwm,fault): '
+                    f'{list(self._recent_states)}')
             previous_esp_us = self._core._last_esp_us
             out = self._core.step(state, now)
             if previous_esp_us is not None and state.esp_us < previous_esp_us:
