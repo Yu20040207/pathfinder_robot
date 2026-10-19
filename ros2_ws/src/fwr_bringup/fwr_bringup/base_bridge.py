@@ -17,7 +17,8 @@ from std_msgs.msg import Bool, Int32
 from fwr_interfaces.action import TurnRelative
 
 from .base_bridge_core import (BaseBridgeCore, ScanWatchdog, SensorStampGuard,
-                               forward_only_velocity)
+                               forward_only_velocity, manual_velocity,
+                               command_source_allowed)
 from .base_protocol import MAX_LINE, parse_state_line
 from .base_serial import open_exclusive_serial
 from .wheel_odometry_node import DEFAULT_DEVICE
@@ -29,6 +30,7 @@ class BaseBridgeNode(Node):
         super().__init__('base_bridge')
         self.declare_parameter('device', DEFAULT_DEVICE)
         self.declare_parameter('motion_enabled', False)
+        self.declare_parameter('manual_enabled', False)
         self.declare_parameter('allow_pivot', False)
         self._device = str(self.get_parameter('device').value)
         self._core = BaseBridgeCore()
@@ -42,6 +44,7 @@ class BaseBridgeNode(Node):
         self._imu_yaw_rate = 0.0
         self._last_imu_at = None
         self._nav_active = {'pose': False, 'through': False}
+        self._command_source = None
         self.create_subscription(GoalStatusArray, '/navigate_to_pose/_action/status',
                                  lambda msg: self._on_nav_status('pose', msg),
                                  qos_profile_action_status_default)
@@ -53,6 +56,7 @@ class BaseBridgeNode(Node):
         self._fault = self.create_publisher(Int32, '/base/fault', 10)
         self._ready = self.create_publisher(Bool, '/base/ready', 10)
         self.create_subscription(Twist, '/cmd_vel', self._on_velocity, 10)
+        self.create_subscription(Twist, '/cmd_vel_manual', self._on_manual_velocity, 10)
         self.create_subscription(Imu, '/imu/data', self._on_imu, qos_profile_sensor_data)
         self.create_subscription(LaserScan, '/scan', self._on_scan, qos_profile_sensor_data)
         self._turn_action = ActionServer(
@@ -63,6 +67,9 @@ class BaseBridgeNode(Node):
         self.create_timer(.05, self._tick)
 
     def _on_velocity(self, msg: Twist) -> None:
+        if not command_source_allowed('nav', bool(self.get_parameter('manual_enabled').value),
+                                      any(self._nav_active.values())):
+            return
         if not self._sensors_ready(time.monotonic()):
             return
         try:
@@ -70,8 +77,28 @@ class BaseBridgeNode(Node):
                 self._core.accept_cmd(0.0, 0.0, time.monotonic())
                 return
             self._core.accept_cmd(msg.linear.x, msg.angular.z, time.monotonic())
+            self._command_source = 'nav'
         except (ValueError, RuntimeError) as exc:
             self.get_logger().warn(f'Rejected /cmd_vel: {exc}', throttle_duration_sec=2.0)
+
+    def _on_manual_velocity(self, msg: Twist) -> None:
+        if not command_source_allowed('manual', bool(self.get_parameter('manual_enabled').value),
+                                      any(self._nav_active.values())):
+            return
+        now = time.monotonic()
+        if not self._sensors_ready(now):
+            return
+        if not manual_velocity(msg.linear.x, msg.angular.z, self._core.track_m):
+            self._core.halt()
+            self.get_logger().warn('Rejected out-of-range manual velocity',
+                                   throttle_duration_sec=2.0)
+            return
+        try:
+            self._core.accept_cmd(msg.linear.x, msg.angular.z, now)
+            self._command_source = 'manual'
+        except (ValueError, RuntimeError) as exc:
+            self.get_logger().warn(f'Rejected manual velocity: {exc}',
+                                   throttle_duration_sec=2.0)
 
     def _on_scan(self, msg: LaserScan) -> None:
         now = time.monotonic()
@@ -278,6 +305,13 @@ class BaseBridgeNode(Node):
 
     def _tick(self) -> None:
         now = time.monotonic()
+        manual_enabled = bool(self.get_parameter('manual_enabled').value)
+        if ((self._command_source == 'manual' and
+             not command_source_allowed('manual', manual_enabled,
+                                        any(self._nav_active.values()))) or
+            (self._command_source == 'nav' and manual_enabled)):
+            self._core.halt()
+            self._command_source = None
         self._open_if_needed(now)
         if self._fd is not None:
             try:

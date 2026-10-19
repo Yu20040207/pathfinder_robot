@@ -65,6 +65,27 @@ def forward_only_velocity(v_mps: float, omega_rps: float, track_m: float) -> boo
     return v_mps - abs(omega_rps) * track_m / 2 >= -1e-9
 
 
+def manual_velocity(v_mps: float, omega_rps: float, track_m: float) -> bool:
+    """Bound supervised keyboard commands to one low-speed axis at a time."""
+    if not all(map(math.isfinite, (v_mps, omega_rps))):
+        return False
+    if abs(v_mps) > .060001 or abs(omega_rps) > .450001:
+        return False
+    if abs(v_mps) > 1e-9 and abs(omega_rps) > 1e-9:
+        return False
+    return max(abs(v_mps - omega_rps * track_m / 2),
+               abs(v_mps + omega_rps * track_m / 2)) <= .1
+
+
+def command_source_allowed(source: str, manual_enabled: bool,
+                           nav_active: bool) -> bool:
+    if source == 'manual':
+        return manual_enabled and not nav_active
+    if source == 'nav':
+        return not manual_enabled
+    return False
+
+
 @dataclass(frozen=True)
 class BridgeOutput:
     command: bytes

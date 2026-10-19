@@ -31,3 +31,7 @@ ros2 launch fwr_bringup real_navigation.launch.py start_imu:=false
 ## 当前 2.5 kg 配重短测
 
 用户确认底盘处于平整空地、配重和 IMU 固定，并可立即断电。`v 60 60` 0.5 秒：左右计数约 -557/+617，fault=0，自动停机；用户确认前进正常。`v -60 -60` 0.5 秒两次均 fault=0 且自动停机；用户观察车身后退略向右。第三次同步 IMU 与电机采集得到后退 0.5 秒时航向变化约 -3.11°（顺时针/向右），与目测一致；CSV 为 `/tmp/fwr-real-nav2-reverse-imu.csv`。这不是长期闭环或直线精度验收。地面 `v` 左右原地短测：0.3 秒对应 IMU 约 +3.68°/−4.16°，0.5 秒对应 +18.02°/−23.63°，四次均 fault=0、自动停机；两方向角度差说明需要 IMU 定角闭环。对应 CSV 为 `/tmp/fwr-real-nav2-{left,right}-turn-{03,05}.csv`。持续运行、满载、雷达盲区和障碍物停机仍待验证。
+
+## 键盘人工控制进度（2026-10-19）
+
+已实现独立 `/cmd_vel_manual` 与 `keyboard_teleop`，保留 Nav2 `/cmd_vel` 的禁止自动倒车/原地转限制。人工通道默认关闭；开启仍需雷达、IMU 和 ESP 状态新鲜且 fault=0。W/S/A/D 固定限速，松键约 0.18 秒发布零速，桥接端 0.2 秒指令超时。76 项 ROS 包测试通过，已构建；独立键盘节点的 ROS 话题实测为 W→0.06 m/s→零速。实机建图启动后，C1 约 10 Hz、`/map` 发布、`/base/fault=0`、`/base/ready=false`，所以尚未带电遥控。持续地面遥控、松键停机、掉线停机以及地图质量仍待验收。操作步骤见 [keyboard-mapping.md](keyboard-mapping.md)。
