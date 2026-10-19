@@ -40,6 +40,7 @@ class BaseBridgeNode(Node):
         self._fd = None
         self._pending = bytearray()
         self._last_open_attempt = 0.0
+        self._last_handshake_attempt = 0.0
         self._imu_yaw = None
         self._imu_yaw_rate = 0.0
         self._last_imu_at = None
@@ -236,6 +237,7 @@ class BaseBridgeNode(Node):
             self._pending.clear()
             self._core.connect(now)
             os.write(self._fd, b'x?')
+            self._last_handshake_attempt = now
             self.get_logger().info(f'ESP32 serial opened exclusively: {self._device}')
         except (OSError, ValueError) as exc:
             self.get_logger().warn(f'ESP32 serial unavailable: {exc}', throttle_duration_sec=5.0)
@@ -328,6 +330,10 @@ class BaseBridgeNode(Node):
                     if self._fd is None:
                         break
                 if self._fd is not None:
+                    if (not self._core.verified and
+                            now - self._last_handshake_attempt >= 1.0):
+                        os.write(self._fd, b'?')
+                        self._last_handshake_attempt = now
                     output = self._core.step(None, now)
                     if self._sensors_ready(now):
                         command = output.command

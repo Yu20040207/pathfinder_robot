@@ -11,6 +11,19 @@ if [[ ! -t 0 ]]; then
   exit 1
 fi
 
+# The terminal receives a key press immediately, but GNOME's default 500 ms
+# repeat delay is longer than the teleop's 180 ms release watchdog. Shorten it
+# only while this script owns the keyboard, then restore the original setting.
+if [[ -z "${DISPLAY:-}" ]] || ! command -v xset >/dev/null; then
+  echo '需要 X11 的 xset 才能保证按住按键时指令连续；当前无法启动键盘控制。' >&2
+  exit 1
+fi
+original_repeat=$(xset q | awk '/auto repeat delay:/ {print $4, $7; exit}')
+if [[ ! "$original_repeat" =~ ^[0-9]+\ [0-9]+$ ]]; then
+  echo '无法读取原键盘重复设置；当前无法启动键盘控制。' >&2
+  exit 1
+fi
+
 nodes=$(timeout 5 ros2 node list)
 for node in /base_bridge /sllidar_node /dm_imu_l1 /slam_toolbox; do
   if ! grep -Fxq "$node" <<< "$nodes"; then
@@ -32,9 +45,12 @@ fi
 cleanup() {
   ros2 param set /base_bridge motion_enabled false >/dev/null 2>&1 || true
   ros2 param set /base_bridge manual_enabled false >/dev/null 2>&1 || true
+  xset r rate $original_repeat >/dev/null 2>&1 || true
   echo '键盘控制已退出，软件运动门已关闭。'
 }
 trap cleanup EXIT
+
+xset r rate 120 30
 
 ros2 param set /base_bridge manual_enabled true >/dev/null
 ros2 param set /base_bridge motion_enabled true >/dev/null
