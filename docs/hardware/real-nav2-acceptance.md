@@ -36,4 +36,4 @@ ros2 launch fwr_bringup real_navigation.launch.py start_imu:=false
 
 已实现独立 `/cmd_vel_manual` 与 `keyboard_teleop`，保留 Nav2 `/cmd_vel` 的禁止自动倒车/原地转限制。人工通道默认关闭；开启仍需雷达、IMU 和 ESP 状态新鲜且 fault=0。W/S/A/D 固定限速，松键约 0.18 秒发布零速，桥接端 0.2 秒指令超时。
 
-2.5 kg 配重的地面键盘短测：W 目标 0.10 m/s，约 1.35 秒前进 14.4 cm、fault=0、停机；S 约 1 秒后退 6.8 cm、fault=0、停机；A 目标 0.75 rad/s，IMU 左转约 17°、fault=0、停机。原先 0.06 m/s 的直行及 0.45 rad/s 的转向会在 PWM 降低后失速，已弃用。D 的首次 0.75 rad/s 测试右转约 13° 后发生失速，故障码 1；随后加入接近停转时的 PWM 恢复，独立串口右转 1.5 秒和 2 秒均 fault=0、自动停机，但键盘右转复测仍待完成。每次测试后软件运动门都关闭；当前 `/base/fault=0`、`/base/ready=false`。地面长时间遥控、雷达盲区、松键停机与真实地图质量仍待验收。操作步骤见 [keyboard-mapping.md](keyboard-mapping.md)。
+2.5 kg 配重的地面键盘短测：W 目标 0.10 m/s，约 1.35 秒前进 14.4 cm、fault=0、停机；S 约 1 秒后退 6.8 cm、fault=0、停机；A 目标 0.75 rad/s，IMU 左转约 17°、fault=0、停机。原先 0.06 m/s 的直行及 0.45 rad/s 的转向会在 PWM 降低后失速，已弃用。D 的首次 0.75 rad/s 测试右转约 13° 后发生失速，故障码 1；随后加入接近停转时的 PWM 恢复，独立串口右转 1.5 秒和 2 秒均 fault=0、自动停机。再次经键盘 D 地面短测，IMU 右转约 34°、里程计约 37°，fault=0 且正常停机。每次测试后软件运动门都关闭；当前 `/base/fault=0`、`/base/ready=false`。`/scan` 约 10 Hz、`/imu/data` 约 100 Hz、`/map` 约 2 Hz，RViz 已打开实时地图。地面长时间遥控、雷达盲区和真实地图质量仍待验收。操作步骤见 [keyboard-mapping.md](keyboard-mapping.md)。

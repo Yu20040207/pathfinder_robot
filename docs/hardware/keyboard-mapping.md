@@ -10,6 +10,16 @@ source /home/manbaout/Company_Project/Four-wheel-robot/ros2_ws/install/setup.bas
 ros2 launch fwr_bringup real_mapping.launch.py start_imu:=false
 ```
 
+查看实时地图时，可在另一个终端运行：
+
+```bash
+source /opt/ros/humble/setup.bash
+source /home/manbaout/Company_Project/Four-wheel-robot/ros2_ws/install/setup.bash
+rviz2 -d /home/manbaout/Company_Project/Four-wheel-robot/ros2_ws/src/fwr_bringup/config/real_mapping.rviz
+```
+
+RViz 的固定坐标系是 `map`，显示实时 `/map`、C1 `/scan` 和车体模型。
+
 第二个终端确认 `/scan`、`/imu/data`、`/odom` 持续更新，`/base/fault` 为 0，再显式开启人工模式：
 
 ```bash
