@@ -12,8 +12,8 @@ import rclpy
 
 class KeyboardCommand:
     _KEYS = {
-        'w': (.06, 0.0), 's': (-.06, 0.0),
-        'a': (0.0, .45), 'd': (0.0, -.45),
+        'w': (.10, 0.0), 's': (-.10, 0.0),
+        'a': (0.0, .75), 'd': (0.0, -.75),
     }
 
     def __init__(self):
@@ -40,9 +40,9 @@ def main(args=None):
     publisher = node.create_publisher(Twist, '/cmd_vel_manual', 10)
     command = KeyboardCommand()
     last_sent = None
-    print('W/S 前进后退，A/D 原地左右转，空格停机，Q 退出。按键需持续重复；松键约 0.18 秒停机。', flush=True)
     try:
         tty.setcbreak(sys.stdin.fileno())
+        print('W/S 前进后退，A/D 原地左右转，空格停机，Q 退出。按键需持续重复；松键约 0.18 秒停机。', flush=True)
         while rclpy.ok():
             ready, _, _ = select.select([sys.stdin], [], [], .05)
             if ready:

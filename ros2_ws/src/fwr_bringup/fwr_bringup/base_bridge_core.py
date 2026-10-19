@@ -69,7 +69,7 @@ def manual_velocity(v_mps: float, omega_rps: float, track_m: float) -> bool:
     """Bound supervised keyboard commands to one low-speed axis at a time."""
     if not all(map(math.isfinite, (v_mps, omega_rps))):
         return False
-    if abs(v_mps) > .060001 or abs(omega_rps) > .450001:
+    if abs(v_mps) > .100001 or abs(omega_rps) > .750001:
         return False
     if abs(v_mps) > 1e-9 and abs(omega_rps) > 1e-9:
         return False

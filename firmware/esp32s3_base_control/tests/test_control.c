@@ -182,6 +182,26 @@ int main(void) {
     assert(c.measured[0] < 100 && c.pwm[0] >= .45f);
     assert(c.measured[1] < 100 && c.pwm[1] >= .45f);
 
+    // A loaded wheel that has accelerated far beyond a low speed command
+    // must shed startup duty promptly instead of coasting at high speed.
+    base_init(&c, 0, 0, 0);
+    base_command(&c, 60, 60, 0);
+    c.startup_done[0] = c.startup_done[1] = true;
+    c.setpoint[0] = c.setpoint[1] = 60;
+    c.pwm[0] = c.pwm[1] = .65f;
+    c.measured[0] = c.measured[1] = 150;
+    tick(&c, 20000, -21, 21);
+    assert(c.pwm[0] < .62f && c.pwm[1] < .62f);
+    assert(c.fault == BASE_OK);
+    c.measured[0] = c.measured[1] = 10;
+    c.pwm[0] = c.pwm[1] = .42f;
+    c.startup_s[0] = c.startup_s[1] = .2f;
+    for (int i=2; i<=6; ++i) {
+        base_command(&c, 60, 60, i*20000LL);
+        tick(&c, i*20000LL, -21, 21);
+    }
+    assert(c.pwm[0] > .5f && c.pwm[1] > .5f);
+
     base_init(&c, 0, 0, 0);
     tick(&c, 20000, 0, 0);
     assert(c.pwm[0] == 0 && c.pwm[1] == 0 && !c.active);

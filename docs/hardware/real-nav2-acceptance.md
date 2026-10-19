@@ -34,4 +34,6 @@ ros2 launch fwr_bringup real_navigation.launch.py start_imu:=false
 
 ## 键盘人工控制进度（2026-10-19）
 
-已实现独立 `/cmd_vel_manual` 与 `keyboard_teleop`，保留 Nav2 `/cmd_vel` 的禁止自动倒车/原地转限制。人工通道默认关闭；开启仍需雷达、IMU 和 ESP 状态新鲜且 fault=0。W/S/A/D 固定限速，松键约 0.18 秒发布零速，桥接端 0.2 秒指令超时。76 项 ROS 包测试通过，已构建；独立键盘节点的 ROS 话题实测为 W→0.06 m/s→零速。实机建图启动后，C1 约 10 Hz、`/map` 发布、`/base/fault=0`、`/base/ready=false`，所以尚未带电遥控。持续地面遥控、松键停机、掉线停机以及地图质量仍待验收。操作步骤见 [keyboard-mapping.md](keyboard-mapping.md)。
+已实现独立 `/cmd_vel_manual` 与 `keyboard_teleop`，保留 Nav2 `/cmd_vel` 的禁止自动倒车/原地转限制。人工通道默认关闭；开启仍需雷达、IMU 和 ESP 状态新鲜且 fault=0。W/S/A/D 固定限速，松键约 0.18 秒发布零速，桥接端 0.2 秒指令超时。
+
+2.5 kg 配重的地面键盘短测：W 目标 0.10 m/s，约 1.35 秒前进 14.4 cm、fault=0、停机；S 约 1 秒后退 6.8 cm、fault=0、停机；A 目标 0.75 rad/s，IMU 左转约 17°、fault=0、停机。原先 0.06 m/s 的直行及 0.45 rad/s 的转向会在 PWM 降低后失速，已弃用。D 的首次 0.75 rad/s 测试右转约 13° 后发生失速，故障码 1；随后加入接近停转时的 PWM 恢复，独立串口右转 1.5 秒和 2 秒均 fault=0、自动停机，但键盘右转复测仍待完成。每次测试后软件运动门都关闭；当前 `/base/fault=0`、`/base/ready=false`。地面长时间遥控、雷达盲区、松键停机与真实地图质量仍待验收。操作步骤见 [keyboard-mapping.md](keyboard-mapping.md)。

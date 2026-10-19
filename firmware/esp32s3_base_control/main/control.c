@@ -289,6 +289,11 @@ void base_tick(base_control_t *c, int64_t now, int32_t left, int32_t right,
         float effort = feedforward + .0012f*error + trial_i;
         if (effort<=.75f || error<0) c->integral[i] = trial_i;
         effort = clamp(feedforward + .0012f*error + c->integral[i], 0, .75f);
+        // Recover promptly if a loaded wheel slows near a stop after its
+        // startup pulse. Normal tracking remains free to use lower duty.
+        if (goal*direction > 0 && c->startup_s[i] >= .05f &&
+            direction*c->measured[i] < 40.0f)
+            effort = fmaxf(effort, .58f);
         // Preserve wheel momentum after the startup pulse: an abrupt duty
         // reduction from the startup duty can stop loaded wheels.
         // Stop/fault paths still bypass this ramp and set PWM to zero.
@@ -296,8 +301,11 @@ void base_tick(base_control_t *c, int64_t now, int32_t left, int32_t right,
         if (direction*c->measured[i] <= desired && effort < previous)
             effort = previous;
         float rise_rate = error > 20.0f ? 3.0f : 1.0f;
+        float fall_rate = previous > .55f &&
+                          direction*c->measured[i] > desired + 20.0f ?
+                          2.0f : .2f;
         c->pwm[i] = direction*approach(previous, effort,
-                (effort < previous ? .2f : rise_rate)*dt);
+                (effort < previous ? fall_rate : rise_rate)*dt);
         c->stall_s[i] = fabsf(c->pwm[i])>=.3f && delta==0 ? c->stall_s[i]+dt : 0;
         c->wrong_s[i] = direction*c->measured[i]<-20 ? c->wrong_s[i]+dt : 0;
         c->fast_s[i] = fabsf(c->measured[i])>300 ? c->fast_s[i]+dt : 0;
