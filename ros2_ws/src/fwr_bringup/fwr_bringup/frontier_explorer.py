@@ -3,7 +3,7 @@ import math
 import time
 
 from action_msgs.msg import GoalStatus
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseStamped, Twist
 from nav2_msgs.action import NavigateToPose
 from nav_msgs.msg import OccupancyGrid, Odometry
 import rclpy
@@ -15,12 +15,17 @@ from tf2_ros import Buffer, TransformListener, TransformException
 
 from .exploration_core import ExplorationStateMachine
 from .frontier_core import choose_frontier
+from .recent_track import RecentTrack
+from .backtrack_core import BacktrackController
 
 
 class FrontierExplorer(Node):
     def __init__(self):
         super().__init__('frontier_explorer')
         self._sm = ExplorationStateMachine()
+        self._track = RecentTrack()
+        self._backtrack = BacktrackController()
+        self._recovery_pub = self.create_publisher(Twist, '/cmd_vel_recovery_raw', 10)
         self._tf = Buffer()
         self._tf_listener = TransformListener(self._tf, self)
         self._last_map_xy = None
@@ -54,6 +59,10 @@ class FrontierExplorer(Node):
         self._last_xy = xy
         self._odom = msg
         self._odom_at = time.monotonic()
+        if self._sm.enabled and self._status == 'active':
+            mapped = self._odom_in_map(msg)
+            if mapped is not None:
+                self._track.observe(mapped, self._odom_at)
 
     def _on_fault(self, msg):
         self._fault = msg.data
@@ -110,20 +119,33 @@ class FrontierExplorer(Node):
             self._sm.stop()
         self._handle = None
 
+    def _odom_in_map(self, msg):
+        try:
+            tf = self._tf.lookup_transform('map', msg.header.frame_id, rclpy.time.Time())
+        except TransformException:
+            return None
+        q = tf.transform.rotation
+        yaw = math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
+        ox, oy = msg.pose.pose.position.x, msg.pose.pose.position.y
+        mapped = Odometry()
+        mapped.header.frame_id = 'map'
+        mapped.pose.pose.position.x = tf.transform.translation.x + math.cos(yaw) * ox - math.sin(yaw) * oy
+        mapped.pose.pose.position.y = tf.transform.translation.y + math.sin(yaw) * ox + math.cos(yaw) * oy
+        oq = msg.pose.pose.orientation
+        odom_yaw = math.atan2(2 * (oq.w * oq.z + oq.x * oq.y), 1 - 2 * (oq.y * oq.y + oq.z * oq.z))
+        mapped.pose.pose.orientation.z = math.sin((odom_yaw + yaw) / 2)
+        mapped.pose.pose.orientation.w = math.cos((odom_yaw + yaw) / 2)
+        return mapped
+
     def _dispatch(self):
         if self._map is None or self._odom is None or not self._client.server_is_ready():
             return
-        try:
-            tf = self._tf.lookup_transform('map', self._odom.header.frame_id, rclpy.time.Time())
-        except TransformException:
+        mapped = self._odom_in_map(self._odom)
+        if mapped is None:
             self._sm.stop()
             return
-        q = tf.transform.rotation
-        yaw = math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
-        ox, oy = self._odom.pose.pose.position.x, self._odom.pose.pose.position.y
         pose = PoseStamped()
-        pose.pose.position.x = tf.transform.translation.x + math.cos(yaw) * ox - math.sin(yaw) * oy
-        pose.pose.position.y = tf.transform.translation.y + math.sin(yaw) * ox + math.cos(yaw) * oy
+        pose.pose = mapped.pose.pose
         xy = (pose.pose.position.x, pose.pose.position.y)
         if self._last_map_xy and math.dist(xy, self._last_map_xy) > .5:
             self._sm.stop()
