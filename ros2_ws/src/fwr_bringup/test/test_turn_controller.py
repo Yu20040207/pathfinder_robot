@@ -29,6 +29,17 @@ def test_five_degree_completion_and_slowdown():
     assert done.command == (0, 0)
 
 
+def test_ten_degree_turn_uses_imu_progress_until_target():
+    turn = TurnController(10, TurnController.PIVOT, 0)
+    assert turn.update(math.radians(3), 0, .1, -.003, .003) == (-80, 80)
+    assert turn.update(math.radians(7), 0, .2, -.006, .006) == (-50, 50)
+    assert turn.update(math.radians(7.5), 0, .3, -.009, .009) == (-50, 50)
+    done = turn.update(math.radians(9), 0, .35, -.011, .011)
+    assert isinstance(done, TurnFinished) and done.success
+    assert done.actual_angle_deg == pytest.approx(9)
+    assert done.command == (0, 0)
+
+
 def test_negative_angle_wrap_and_overshoot_stop():
     turn = TurnController(-5, 1, 0)
     done = turn.update(math.radians(355), 0, .1, .001, -.001)
