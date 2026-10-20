@@ -99,11 +99,15 @@ def main():
     try:
         # x is also safe on the old diagnostic firmware. Never send velocity
         # digits to that firmware: it interprets digits as raw PWM commands.
-        port.write('x\n?')
+        port.write('x')
         deadline=time.monotonic()+2
         identified=False
         initial=None
+        next_handshake=0
         while time.monotonic()<deadline:
+            if time.monotonic()>=next_handshake:
+                port.write('?')
+                next_handshake=time.monotonic()+.3
             for line in port.lines():
                 if line in ('BASE_CONTROL_V1', 'BASE_CONTROL_V2') or line.startswith('BASE_CONTROL_V1:'):
                     identified=True
