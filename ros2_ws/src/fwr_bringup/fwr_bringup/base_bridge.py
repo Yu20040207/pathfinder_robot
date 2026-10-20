@@ -14,16 +14,18 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_action_status_default, qos_profile_sensor_data
 from rclpy.task import Future
 from sensor_msgs.msg import Imu, JointState, LaserScan
-from std_msgs.msg import Bool, Int32
+from std_msgs.msg import Bool, Float64MultiArray, Int32, String
 from fwr_interfaces.action import TurnRelative
+from fwr_interfaces.srv import RecoveryPermit
 
-from .base_bridge_core import (BaseBridgeCore, ScanWatchdog, SensorStampGuard,
+from .base_bridge_core import (BaseBridgeCore, RecoveryPermitCore, ScanWatchdog, SensorStampGuard,
                                forward_only_velocity, manual_velocity,
                                command_source_allowed)
 from .base_protocol import MAX_LINE, parse_state_line
 from .base_serial import open_exclusive_serial
 from .wheel_odometry_node import DEFAULT_DEVICE
 from .turn_controller import TurnController, TurnFinished
+from .imu_yaw_rate_control import ImuYawRateController
 
 
 class BaseBridgeNode(Node):
@@ -35,6 +37,11 @@ class BaseBridgeNode(Node):
         self.declare_parameter('allow_pivot', False)
         self._device = str(self.get_parameter('device').value)
         self._core = BaseBridgeCore()
+        self._permit = RecoveryPermitCore()
+        self._explore_mode = 'stopped'
+        self._explore_state_at = None
+        self._safe_cmd_at = None
+        self._last_recovery_xy = None
         self._scan = ScanWatchdog()
         self._scan_stamp = SensorStampGuard()
         self._imu_stamp = SensorStampGuard()
@@ -48,6 +55,7 @@ class BaseBridgeNode(Node):
         self._last_imu_at = None
         self._nav_active = {'pose': False, 'through': False}
         self._command_source = None
+        self._manual_yaw_rate = ImuYawRateController()
         self.create_subscription(GoalStatusArray, '/navigate_to_pose/_action/status',
                                  lambda msg: self._on_nav_status('pose', msg),
                                  qos_profile_action_status_default)
@@ -57,8 +65,12 @@ class BaseBridgeNode(Node):
         self._wheel_odom = self.create_publisher(Odometry, '/wheel/odom', 10)
         self._joint_states = self.create_publisher(JointState, '/joint_states', 10)
         self._fault = self.create_publisher(Int32, '/base/fault', 10)
+        self._motor_debug = self.create_publisher(Float64MultiArray, '/base/motor_debug', 10)
+        self._manual_debug = self.create_publisher(Float64MultiArray, '/base/manual_debug', 10)
         self._ready = self.create_publisher(Bool, '/base/ready', 10)
-        self.create_subscription(Twist, '/cmd_vel', self._on_velocity, 10)
+        self.create_subscription(Twist, '/cmd_vel_auto_safe', self._on_velocity, 10)
+        self.create_subscription(String, '/explore/state', self._on_explore_state, 10)
+        self.create_service(RecoveryPermit, '/base/recovery_permit', self._on_recovery_permit)
         self.create_subscription(Twist, '/cmd_vel_manual', self._on_manual_velocity, 10)
         self.create_subscription(Imu, '/imu/data', self._on_imu, qos_profile_sensor_data)
         self.create_subscription(LaserScan, '/scan', self._on_scan, qos_profile_sensor_data)
@@ -69,26 +81,78 @@ class BaseBridgeNode(Node):
             cancel_callback=lambda _: CancelResponse.ACCEPT)
         self.create_timer(.05, self._tick)
 
+    def _on_explore_state(self, msg: String) -> None:
+        self._explore_mode = msg.data
+        self._explore_state_at = time.monotonic()
+        if msg.data != 'reversing':
+            self._permit.abort()
+
+    def _on_recovery_permit(self, request, response):
+        now = time.monotonic()
+        healthy = (self._sensors_ready(now) and self._core.ready(now) and
+                   self._explore_mode == 'reversing' and
+                   self._explore_state_at is not None and
+                   now - self._explore_state_at <= .25)
+        accepted, reason = self._permit.request(
+            request.enable, request.episode_id, now, healthy,
+            not any(self._nav_active.values()),
+            not bool(self.get_parameter('manual_enabled').value))
+        response.accepted, response.reason = accepted, reason
+        if not accepted or not request.enable:
+            self._core.halt()
+        return response
+
     def _on_velocity(self, msg: Twist) -> None:
-        if not command_source_allowed('nav', bool(self.get_parameter('manual_enabled').value),
-                                      any(self._nav_active.values())):
+        now = time.monotonic()
+        self._safe_cmd_at = now
+        if not self._sensors_ready(now) or not self._core.ready(now):
+            self._permit.abort()
+            self._core.halt()
             return
-        if not self._sensors_ready(time.monotonic()):
+        if self._explore_state_at is None or now - self._explore_state_at > .25:
+            self._permit.abort()
+            self._core.halt()
+            return
+        if bool(self.get_parameter('manual_enabled').value):
+            self._permit.abort()
+            return
+        if abs(msg.linear.x) < 1e-9 and abs(msg.angular.z) < 1e-9:
+            if self._command_source == 'auto':
+                self._core.halt()
+            return
+        if self._explore_mode == 'reversing':
+            if any(self._nav_active.values()) or not self._permit.accept_reverse(msg.linear.x, now):
+                self._core.halt()
+                return
+            if abs(msg.angular.z) > .15:
+                self._core.halt()
+                return
+        elif self._explore_mode == 'navigating':
+            if not forward_only_velocity(msg.linear.x, msg.angular.z, self._core.track_m):
+                self._core.halt()
+                return
+        else:
+            self._core.halt()
             return
         try:
-            if not forward_only_velocity(msg.linear.x, msg.angular.z, self._core.track_m):
-                self._core.accept_cmd(0.0, 0.0, time.monotonic())
-                return
-            self._core.accept_cmd(msg.linear.x, msg.angular.z, time.monotonic())
-            self._command_source = 'nav'
+            self._manual_yaw_rate.reset()
+            self._core.accept_cmd(msg.linear.x, msg.angular.z, now)
+            self._command_source = 'auto'
         except (ValueError, RuntimeError) as exc:
-            self.get_logger().warn(f'Rejected /cmd_vel: {exc}', throttle_duration_sec=2.0)
+            self._core.halt()
+            self.get_logger().warn(f'Rejected filtered automatic velocity: {exc}',
+                                   throttle_duration_sec=2.0)
 
     def _on_manual_velocity(self, msg: Twist) -> None:
+        now = time.monotonic()
+        debug = Float64MultiArray()
+        debug.data = [now, msg.linear.x, msg.angular.z,
+                      float(self._core.ready(now)), float(self._sensors_ready(now)),
+                      float(bool(self.get_parameter('manual_enabled').value))]
+        self._manual_debug.publish(debug)
         if not command_source_allowed('manual', bool(self.get_parameter('manual_enabled').value),
                                       any(self._nav_active.values())):
             return
-        now = time.monotonic()
         if not self._sensors_ready(now):
             return
         if not manual_velocity(msg.linear.x, msg.angular.z, self._core.track_m):
@@ -97,7 +161,13 @@ class BaseBridgeNode(Node):
                                    throttle_duration_sec=2.0)
             return
         try:
-            self._core.accept_cmd(msg.linear.x, msg.angular.z, now)
+            if abs(msg.angular.z) > 1e-9:
+                corrected_yaw_rate = self._manual_yaw_rate.update(
+                    msg.angular.z, self._imu_yaw_rate, now)
+            else:
+                self._manual_yaw_rate.reset()
+                corrected_yaw_rate = 0.0
+            self._core.accept_cmd(msg.linear.x, corrected_yaw_rate, now)
             self._command_source = 'manual'
         except (ValueError, RuntimeError) as exc:
             self.get_logger().warn(f'Rejected manual velocity: {exc}',
@@ -238,6 +308,7 @@ class BaseBridgeNode(Node):
             self._fd = open_exclusive_serial(self._device)
             self._pending.clear()
             self._core.connect(now)
+            self._permit.abort()
             os.write(self._fd, b'x?')
             self._last_handshake_attempt = now
             self.get_logger().info(f'ESP32 serial opened exclusively: {self._device}')
@@ -253,6 +324,7 @@ class BaseBridgeNode(Node):
             os.close(self._fd)
             self._fd = None
         self._core.disconnect()
+        self._permit.reset()
         self._pending.clear()
         self.get_logger().error(f'ESP32 serial disconnected: {reason}')
 
@@ -274,6 +346,12 @@ class BaseBridgeNode(Node):
             state = parse_state_line(decoded)
             if state is None:
                 continue
+            debug = Float64MultiArray()
+            debug.data = [float(state.esp_us), state.left_measured,
+                          state.right_measured, state.left_setpoint,
+                          state.right_setpoint, state.left_pwm,
+                          state.right_pwm, self._imu_yaw_rate, float(state.fault)]
+            self._motor_debug.publish(debug)
             self._recent_states.append(
                 (state.esp_us, state.left_count, state.right_count,
                  round(state.left_measured), round(state.right_measured),
@@ -288,6 +366,17 @@ class BaseBridgeNode(Node):
             if previous_esp_us is not None and state.esp_us < previous_esp_us:
                 if self._fd is not None:
                     os.write(self._fd, b'x?')
+            if out.fault:
+                self._permit.abort()
+            if out.odom is not None and self._permit.active:
+                xy = (out.odom.x, out.odom.y)
+                if self._last_recovery_xy is not None:
+                    self._permit.observe_distance(math.dist(xy, self._last_recovery_xy))
+                self._last_recovery_xy = xy
+                if not self._permit.active:
+                    self._core.halt()
+            else:
+                self._last_recovery_xy = None
             if out.odom is not None:
                 self._publish_odometry(out.odom, out.wheel_positions_rad)
 
@@ -319,11 +408,16 @@ class BaseBridgeNode(Node):
     def _tick(self) -> None:
         now = time.monotonic()
         manual_enabled = bool(self.get_parameter('manual_enabled').value)
+        if self._command_source == 'auto' and (self._safe_cmd_at is None or now - self._safe_cmd_at > .15):
+            self._permit.abort()
+            self._core.halt()
+            self._command_source = None
         if ((self._command_source == 'manual' and
              not command_source_allowed('manual', manual_enabled,
                                         any(self._nav_active.values()))) or
-            (self._command_source == 'nav' and manual_enabled)):
+            (self._command_source == 'auto' and manual_enabled)):
             self._core.halt()
+            self._manual_yaw_rate.reset()
             self._command_source = None
         self._open_if_needed(now)
         if self._fd is not None:
@@ -350,6 +444,7 @@ class BaseBridgeNode(Node):
                         command = output.command
                     else:
                         self._core.halt()
+                        self._manual_yaw_rate.reset()
                         command = b'x'
                     os.write(self._fd, command)
             except OSError as exc:

@@ -11,5 +11,6 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/VoiceResponse.msg"
   "action/ExecuteRobotTask.action"
   "action/TurnRelative.action"
+  "srv/RecoveryPermit.srv"
   DEPENDENCIES std_msgs)
 ament_package()

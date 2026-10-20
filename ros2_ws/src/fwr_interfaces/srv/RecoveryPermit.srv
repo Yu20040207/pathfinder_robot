@@ -1,0 +1,5 @@
+bool enable
+uint32 episode_id
+---
+bool accepted
+string reason

@@ -86,6 +86,67 @@ def command_source_allowed(source: str, manual_enabled: bool,
     return False
 
 
+class RecoveryPermitCore:
+    """Independent one-shot reverse budget, closed on faults and reconnects."""
+    def __init__(self):
+        self.last_episode = 0
+        self.active = False
+        self.episode = 0
+        self.segment_m = 0.
+        self.total_m = 0.
+        self.segments = 0
+        self.started_at = None
+
+    def reset(self):
+        self.active = False
+        self.segment_m = 0.
+        self.started_at = None
+
+    def abort(self):
+        self.reset()
+        self.segments = 3
+
+    def request(self, enable, episode_id, now_s, healthy, nav_inactive, manual_off):
+        if not enable:
+            self.reset()
+            return True, 'closed'
+        if not (healthy and nav_inactive and manual_off):
+            self.abort()
+            return False, 'preflight failed'
+        if episode_id < self.last_episode or (episode_id == self.last_episode and self.segments == 0):
+            return False, 'stale episode'
+        if episode_id > self.last_episode:
+            self.last_episode = episode_id
+            self.episode = episode_id
+            self.total_m = 0.
+            self.segments = 0
+        if self.active or self.segments >= 3 or self.total_m >= .30 - 1e-6:
+            return False, 'budget exhausted or already active'
+        self.segment_m = 0.
+        self.segments += 1
+        self.started_at = now_s
+        self.active = True
+        return True, 'armed'
+
+    def accept_reverse(self, v_mps, now_s):
+        if (not self.active or not -.08 <= v_mps < 0 or self.started_at is None or
+                now_s - self.started_at > 10. or self.segment_m >= .10 or self.total_m >= .30):
+            self.active = False
+            return False
+        return True
+
+    def observe_distance(self, meters):
+        if not self.active:
+            return
+        if not math.isfinite(meters) or meters < 0:
+            self.reset()
+            return
+        self.segment_m += meters
+        self.total_m += meters
+        if self.segment_m >= .10 or self.total_m >= .30:
+            self.active = False
+
+
 @dataclass(frozen=True)
 class BridgeOutput:
     command: bytes
