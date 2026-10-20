@@ -1,0 +1,179 @@
+"""Explicitly started Nav2 frontier client. It never owns the motor link."""
+import math
+import time
+
+from action_msgs.msg import GoalStatus
+from geometry_msgs.msg import PoseStamped
+from nav2_msgs.action import NavigateToPose
+from nav_msgs.msg import OccupancyGrid, Odometry
+import rclpy
+from rclpy.action import ActionClient
+from rclpy.node import Node
+from std_msgs.msg import Int32, String
+from std_srvs.srv import Trigger
+from tf2_ros import Buffer, TransformListener, TransformException
+
+from .exploration_core import ExplorationStateMachine
+from .frontier_core import choose_frontier
+
+
+class FrontierExplorer(Node):
+    def __init__(self):
+        super().__init__('frontier_explorer')
+        self._sm = ExplorationStateMachine()
+        self._tf = Buffer()
+        self._tf_listener = TransformListener(self._tf, self)
+        self._last_map_xy = None
+        self._client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
+        self._map = None
+        self._odom = None
+        self._map_at = None
+        self._odom_at = None
+        self._fault = 0
+        self._goal = None
+        self._handle = None
+        self._status = 'idle'
+        self._last_xy = None
+        self._state_pub = self.create_publisher(String, '/explore/state', 10)
+        self.create_subscription(OccupancyGrid, '/map', self._on_map, 10)
+        self.create_subscription(Odometry, '/odom', self._on_odom, 10)
+        self.create_subscription(Int32, '/base/fault', self._on_fault, 10)
+        self.create_service(Trigger, '/explore/start', self._start)
+        self.create_service(Trigger, '/explore/stop', self._stop)
+        self.create_timer(.1, self._tick)
+
+    def _on_map(self, msg):
+        self._map = msg
+        self._map_at = time.monotonic()
+
+    def _on_odom(self, msg):
+        xy = (msg.pose.pose.position.x, msg.pose.pose.position.y)
+        if self._last_xy and math.dist(xy, self._last_xy) > .5:
+            self._sm.stop()
+            self.get_logger().error('Odometry pose jump; exploration stopped')
+        self._last_xy = xy
+        self._odom = msg
+        self._odom_at = time.monotonic()
+
+    def _on_fault(self, msg):
+        self._fault = msg.data
+        if self._fault:
+            self._sm.stop()
+
+    def _start(self, _, response):
+        now = time.monotonic()
+        good = (self._map is not None and self._odom is not None and self._fault == 0
+                and self._map_at is not None and now - self._map_at < 1.
+                and self._odom_at is not None and now - self._odom_at < .3
+                and self._client.server_is_ready())
+        if good:
+            self._sm.start()
+        response.success = good
+        response.message = 'armed' if good else 'map/odom/Nav2/fault preflight failed'
+        return response
+
+    def _stop(self, _, response):
+        self._sm.stop()
+        response.success = True
+        response.message = 'cancel requested; waiting for action terminal state'
+        return response
+
+    def _tick(self):
+        now = time.monotonic()
+        map_ok = self._map_at is not None and now - self._map_at < 1.
+        pose_ok = self._odom_at is not None and now - self._odom_at < .3
+        decision = self._sm.update(map_ok, pose_ok, self._fault, self._status, now,
+                                   self._goal.grid_index if self._goal else None)
+        state = String()
+        state.data = decision.state
+        self._state_pub.publish(state)
+        if decision.action == 'cancel':
+            if self._handle:
+                self._status = 'canceling'
+                future = self._handle.cancel_goal_async()
+                future.add_done_callback(self._canceled)
+            else:
+                # A failed action result is already terminal.
+                self._status = 'canceled'
+        elif decision.action == 'recover':
+            # Recovery is wired only after its independent safety gates exist.
+            self._sm.stop()
+        elif decision.action == 'dispatch':
+            self._dispatch()
+
+    def _canceled(self, future):
+        try:
+            response = future.result()
+            self._status = 'canceled' if response.goals_canceling else 'failed'
+        except Exception:
+            self._status = 'failed'
+            self._sm.stop()
+        self._handle = None
+
+    def _dispatch(self):
+        if self._map is None or self._odom is None or not self._client.server_is_ready():
+            return
+        try:
+            tf = self._tf.lookup_transform('map', self._odom.header.frame_id, rclpy.time.Time())
+        except TransformException:
+            self._sm.stop()
+            return
+        q = tf.transform.rotation
+        yaw = math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
+        ox, oy = self._odom.pose.pose.position.x, self._odom.pose.pose.position.y
+        pose = PoseStamped()
+        pose.pose.position.x = tf.transform.translation.x + math.cos(yaw) * ox - math.sin(yaw) * oy
+        pose.pose.position.y = tf.transform.translation.y + math.sin(yaw) * ox + math.cos(yaw) * oy
+        xy = (pose.pose.position.x, pose.pose.position.y)
+        if self._last_map_xy and math.dist(xy, self._last_map_xy) > .5:
+            self._sm.stop()
+            return
+        self._last_map_xy = xy
+        goal = choose_frontier(self._map, pose, self._sm.blocked, self._goal)
+        if goal is None:
+            self._sm.stop()
+            return
+        if self._goal and self._goal.grid_index == goal.grid_index and self._status in ('active', 'sending'):
+            return
+        self._goal = goal
+        request = NavigateToPose.Goal()
+        request.pose.header.frame_id = 'map'
+        request.pose.header.stamp = self.get_clock().now().to_msg()
+        request.pose.pose.position.x = goal.x
+        request.pose.pose.position.y = goal.y
+        request.pose.pose.orientation.z = math.sin(goal.yaw / 2)
+        request.pose.pose.orientation.w = math.cos(goal.yaw / 2)
+        self._status = 'sending'
+        self._client.send_goal_async(request).add_done_callback(self._accepted)
+
+    def _accepted(self, future):
+        try:
+            self._handle = future.result()
+            if not self._handle.accepted:
+                self._status = 'failed'
+                return
+            self._status = 'active'
+            self._handle.get_result_async().add_done_callback(self._finished)
+        except Exception:
+            self._status = 'failed'
+            self._sm.stop()
+
+    def _finished(self, future):
+        try:
+            status = future.result().status
+            self._status = ('succeeded' if status == GoalStatus.STATUS_SUCCEEDED else
+                            'canceled' if status == GoalStatus.STATUS_CANCELED else 'failed')
+        except Exception:
+            self._status = 'failed'
+        self._handle = None
+
+
+def main():
+    rclpy.init()
+    node = FrontierExplorer()
+    try:
+        rclpy.spin(node)
+    finally:
+        node._sm.stop()
+        node.destroy_node()
+        rclpy.shutdown()
