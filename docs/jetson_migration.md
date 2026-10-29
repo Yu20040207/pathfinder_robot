@@ -40,6 +40,37 @@ cp ~/.config/fwr/fastdds_udp_only.xml /tmp/ 2>/dev/null && echo "DDS 配置已�
 
 ---
 
+## 阶段 0.5 · 一键脚本（推荐先试这个）
+
+仓库里带了 `tools/bootstrap_jetson.sh`，把阶段 1~4 的绝大部分工作自动化：
+
+```bash
+# 在 Jetson 上（先确保能联网）
+git clone --branch codex/real-nav2-imu-turn \
+  https://github.com/Yu20040207/pathfinder_robot.git ~/Company_Project/Four-wheel-robot
+cd ~/Company_Project/Four-wheel-robot
+bash tools/bootstrap_jetson.sh
+```
+
+脚本会依次：检查系统版本 → 装基础工具 → 建 8G swap → 装 ROS 2 Humble 与导航包 →
+克隆三个第三方包并打补丁 → 写 DDS 配置与 `.bashrc` → 加 dialout 组 → `colcon build` → 自检。
+
+常用参数：
+
+| 参数 | 作用 |
+|---|---|
+| `--yes` | 无人值守（不逐项确认） |
+| `--skip-build` | 只装环境不编译 |
+| `--skip-upgrade` | 跳过 apt upgrade |
+| `--jobs 2` | 编译并行数（内存不足时用） |
+| `--dir ~/robot` | 指定工作区目录 |
+| `--branch <名字>` | 指定分支 |
+
+脚本幂等，可以重复执行；中途失败修好后直接再跑一次即可。
+**如果脚本跑完自检全绿，可以直接跳到「阶段 6 · 硬件自检」。**
+
+---
+
 ## 阶段 1 · Jetson 基础系统（约 1.5 小时）
 
 ### 1.1 刷机
