@@ -49,7 +49,11 @@ fi
 
 fault=$(timeout 5 ros2 topic echo /base/fault --once)
 if ! grep -Eq '^data: 0$' <<< "$fault"; then
-  echo "底盘故障未清零：$fault" >&2
+  if grep -Eq '^data: 1$' <<< "$fault"; then
+    echo '底盘故障 1：失速。请检查是否撞到障碍物或车轮受阻；故障未清除，键盘控制不会启动。' >&2
+  else
+    echo "底盘故障未清零：$fault" >&2
+  fi
   exit 1
 fi
 
@@ -63,7 +67,10 @@ cleanup() {
   echo '键盘控制已退出，软件运动门已关闭。'
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
+echo '提示：控制期间会临时加快全桌面按键重复；需要输入文字时先按 Q 退出，脚本会恢复原设置。'
 gsettings set "$keyboard_schema" repeat true
 gsettings set "$keyboard_schema" delay 120
 gsettings set "$keyboard_schema" repeat-interval 30
@@ -86,4 +93,4 @@ if [[ "$ready" != true ]]; then
 fi
 
 echo '键盘已就绪。保持当前终端焦点；W/S 前后，A/D 左右，空格停，Q 退出。'
-ros2 run fwr_bringup keyboard_teleop
+ros2 run fwr_bringup keyboard_teleop --ros-args -p turn_rate_rad_s:=0.65

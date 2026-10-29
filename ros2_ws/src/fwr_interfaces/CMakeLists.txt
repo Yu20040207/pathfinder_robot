@@ -12,5 +12,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "action/ExecuteRobotTask.action"
   "action/TurnRelative.action"
   "srv/RecoveryPermit.srv"
+  "srv/StartFixedGoal.srv"
+  "srv/StartTwoPointGoal.srv"
   DEPENDENCIES std_msgs)
 ament_package()

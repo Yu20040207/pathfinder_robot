@@ -1,10 +1,18 @@
 <root main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree">
-    <PipelineSequence name="NavigateWithReplanning">
-      <RateController hz="2.0">
-        <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
-      </RateController>
-      <FollowPath path="{path}" controller_id="FollowPath"/>
-    </PipelineSequence>
+    <!-- 回归到已验证可用的结构：固定频率重规划 + 跟踪，卡住时原地转 60° 再重试。
+         条件重规划（IsPathValid）留待单独验证，避免再次出现"有目标但不规划"。 -->
+    <RecoveryNode number_of_retries="2" name="NavigateRecovery">
+      <PipelineSequence name="NavigateWithReplanning">
+        <RateController hz="1.0">
+          <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
+        </RateController>
+        <FollowPath path="{path}" controller_id="FollowPath"/>
+      </PipelineSequence>
+      <Sequence name="RecoveryActions">
+        <Spin spin_dist="1.05" name="RecoverySpin"/>
+        <Wait wait_duration="1.0"/>
+      </Sequence>
+    </RecoveryNode>
   </BehaviorTree>
 </root>

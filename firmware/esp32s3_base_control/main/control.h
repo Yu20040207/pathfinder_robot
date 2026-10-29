@@ -7,7 +7,7 @@ enum { BASE_OK=0, BASE_STALL=1, BASE_DIRECTION=2, BASE_OVERSPEED=3,
 typedef struct {
     float target[2], setpoint[2], measured[2], integral[2], pwm[2];
     int64_t last_us, deadline_us, turn_started_us;
-    float stall_s[2], wrong_s[2], fast_s[2], tracking_s[2];
+    float stall_s[2], wrong_s[2], fast_s[2], tracking_s[2], still_s[2];
     float startup_s[2];
     float sync_distance[2];
     float turn_history_mm[2][5], turn_recent_mm[2];

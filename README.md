@@ -161,3 +161,7 @@ ros2 launch fwr_bringup navigation_demo.launch.py
 ```
 
 另开终端可用 `ros2 topic echo --once /demo/reached` 看是否到点，或查看 `/demo/path` 和 `/demo/pose`。2026-10-08 本机运行时得到 16 点路径，虚拟机器人约 29 秒后到达目标附近并停下。差速积分与演示控制器仅供软件验收，完整设计见 [离线演示计划](docs/superpowers/plans/2026-10-05-differential-demo.md)；实机仍需底盘反馈、急停及 Nav2 控制器。
+
+## AI 协作日志
+
+每次 AI 会话改了什么、实测结论、留下了哪些进程和未完成事项，都追加在 [docs/AGENT_LOG.md](docs/AGENT_LOG.md)。接手任务前先读最后几条，再回到本文档和相关设计文档；仓库外的环境改动（例如 DSH 的 `~/.local/bin/systemd-run` 包装脚本）也记在那里，换机器时需要逐项复原。

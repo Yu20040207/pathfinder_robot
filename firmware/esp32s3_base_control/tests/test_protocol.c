@@ -3,9 +3,9 @@
 
 int main(void) {
     float left=0, right=0;
-    assert(parse_velocity("v -100 100", &left, &right));
-    assert(left==-100 && right==100);
-    assert(!parse_velocity("v 100.01 0", &left, &right));
+    assert(parse_velocity("v -300 300", &left, &right));
+    assert(left==-300 && right==300);
+    assert(!parse_velocity("v 300.01 0", &left, &right));
     assert(!parse_velocity("v nan 0", &left, &right));
     assert(!parse_velocity("v 10", &left, &right));
     assert(!parse_velocity("v 10 20 extra", &left, &right));

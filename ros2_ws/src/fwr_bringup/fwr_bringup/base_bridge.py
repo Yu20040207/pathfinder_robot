@@ -15,17 +15,22 @@ from rclpy.qos import qos_profile_action_status_default, qos_profile_sensor_data
 from rclpy.task import Future
 from sensor_msgs.msg import Imu, JointState, LaserScan
 from std_msgs.msg import Bool, Float64MultiArray, Int32, String
+from std_srvs.srv import Trigger
 from fwr_interfaces.action import TurnRelative
 from fwr_interfaces.srv import RecoveryPermit
 
 from .base_bridge_core import (BaseBridgeCore, RecoveryPermitCore, ScanWatchdog, SensorStampGuard,
-                               forward_only_velocity, manual_velocity,
-                               command_source_allowed)
+                               scale_velocity_to_wheel_limit, manual_velocity,
+                               command_source_allowed, safe_command_gap_action,
+                               fault_clear_allowed)
 from .base_protocol import MAX_LINE, parse_state_line
 from .base_serial import open_exclusive_serial
 from .wheel_odometry_node import DEFAULT_DEVICE
 from .turn_controller import TurnController, TurnFinished
+from .heading_hold import HeadingHold
 from .imu_yaw_rate_control import ImuYawRateController
+
+_DEBUG_REJECT = bool(os.environ.get('FWR_BASE_DEBUG'))
 
 
 class BaseBridgeNode(Node):
@@ -39,23 +44,37 @@ class BaseBridgeNode(Node):
         self._core = BaseBridgeCore()
         self._permit = RecoveryPermitCore()
         self._explore_mode = 'stopped'
+        self._auto_armed = False
+        self._stopped_at = None
         self._explore_state_at = None
         self._safe_cmd_at = None
         self._last_recovery_xy = None
-        self._scan = ScanWatchdog()
-        self._scan_stamp = SensorStampGuard()
-        self._imu_stamp = SensorStampGuard()
+        self.declare_parameter('sensor_timeout_s', 0.5)
+        _st = float(self.get_parameter('sensor_timeout_s').value)
+        self._scan = ScanWatchdog(_st)
+        self._scan_stamp = SensorStampGuard(_st)
+        self._imu_stamp = SensorStampGuard(_st)
         self._fd = None
         self._pending = bytearray()
         self._recent_states = deque(maxlen=12)
         self._last_open_attempt = 0.0
+        # 串口（重新）连上后，第一次看到固件报告的非零故障时自动清一次。
+        self._clear_fault_on_connect = False
+        self._last_auto_clear = 0.0
         self._last_handshake_attempt = 0.0
         self._imu_yaw = None
         self._imu_yaw_rate = 0.0
         self._last_imu_at = None
         self._nav_active = {'pose': False, 'through': False}
         self._command_source = None
+        self._safe_cmd_zero = True
         self._manual_yaw_rate = ImuYawRateController()
+        self.declare_parameter('heading_hold_enabled', True)
+        self.declare_parameter('heading_hold_gain', 1.5)
+        self.declare_parameter('heading_hold_limit_rad_s', .12)
+        self._heading_hold = HeadingHold(
+            float(self.get_parameter('heading_hold_gain').value),
+            float(self.get_parameter('heading_hold_limit_rad_s').value))
         self.create_subscription(GoalStatusArray, '/navigate_to_pose/_action/status',
                                  lambda msg: self._on_nav_status('pose', msg),
                                  qos_profile_action_status_default)
@@ -68,9 +87,13 @@ class BaseBridgeNode(Node):
         self._motor_debug = self.create_publisher(Float64MultiArray, '/base/motor_debug', 10)
         self._manual_debug = self.create_publisher(Float64MultiArray, '/base/manual_debug', 10)
         self._ready = self.create_publisher(Bool, '/base/ready', 10)
+        self._manual_mode = self.create_publisher(Bool, '/base/manual_enabled', 10)
+        self._auto_arm_pub = self.create_publisher(Bool, '/base/auto_armed', 10)
         self.create_subscription(Twist, '/cmd_vel_auto_safe', self._on_velocity, 10)
         self.create_subscription(String, '/explore/state', self._on_explore_state, 10)
         self.create_service(RecoveryPermit, '/base/recovery_permit', self._on_recovery_permit)
+        self.create_service(Trigger, '/base/arm_auto', self._arm_auto)
+        self.create_service(Trigger, '/base/clear_fault', self._clear_fault)
         self.create_subscription(Twist, '/cmd_vel_manual', self._on_manual_velocity, 10)
         self.create_subscription(Imu, '/imu/data', self._on_imu, qos_profile_sensor_data)
         self.create_subscription(LaserScan, '/scan', self._on_scan, qos_profile_sensor_data)
@@ -82,10 +105,63 @@ class BaseBridgeNode(Node):
         self.create_timer(.05, self._tick)
 
     def _on_explore_state(self, msg: String) -> None:
+        old_mode = self._explore_mode
         self._explore_mode = msg.data
         self._explore_state_at = time.monotonic()
         if msg.data != 'reversing':
             self._permit.abort()
+        # 2026-10-29：授权不能一见到 stopped 就撤销——frontier_explorer 空闲时 10 Hz
+        # 发 stopped，而“面板授权 → 下发目标”之间有 0.5~1 s 窗口，期间授权必被冲掉
+        # （表现为 preflight failed: arm）。改为：stopped 持续 2 s 且没有活动导航目标
+        # 才真正注销授权（由 _tick 执行）。
+        if msg.data == 'stopped':
+            if old_mode != 'stopped':
+                self._stopped_at = time.monotonic()
+        else:
+            self._stopped_at = None
+
+    def _arm_auto(self, _, response):
+        now = time.monotonic()
+        healthy = (self._core.ready(now) and self._sensors_ready(now) and
+                   not bool(self.get_parameter('manual_enabled').value))
+        self._auto_armed = healthy
+        response.success = healthy
+        response.message = 'armed' if healthy else 'base/sensors unavailable'
+        return response
+
+    def _clear_fault(self, _, response):
+        now = time.monotonic()
+        allowed = fault_clear_allowed(
+            bool(self.get_parameter('motion_enabled').value),
+            bool(self.get_parameter('manual_enabled').value),
+            self._auto_armed, any(self._nav_active.values()),
+            self._explore_mode,
+            self._fd is not None and self._core.connected and self._core.verified)
+        if not allowed:
+            response.success = False
+            response.message = 'motion paths must be disabled and serial connected'
+            return response
+        self._core.halt()
+        self._permit.abort()
+        if not self._core.request_fault_clear(now):
+            response.success = False
+            # 区分两种失败：没有故障可清（fault=0，属于正常）vs 串口状态不新鲜。
+            if not self._core.fault:
+                response.message = '当前无故障（fault=0），无需复位'
+            else:
+                response.message = '底盘状态不新鲜，无法确认清除结果（检查串口）'
+            return response
+        try:
+            if os.write(self._fd, b'xc') != 2:
+                raise OSError('short serial write')
+        except OSError as exc:
+            self._disconnect(str(exc))
+            response.success = False
+            response.message = 'serial write failed'
+            return response
+        response.success = True
+        response.message = 'clear sent; awaiting fault-free ESP state with motion disabled'
+        return response
 
     def _on_recovery_permit(self, request, response):
         now = time.monotonic()
@@ -102,23 +178,37 @@ class BaseBridgeNode(Node):
             self._core.halt()
         return response
 
+    def _reject_motion(self, reason: str) -> None:
+        """Halt and (when FWR_BASE_DEBUG is set) report which gate closed."""
+        self._core.halt()
+        if _DEBUG_REJECT:
+            print(f'[base] reject {reason}', flush=True)
+
     def _on_velocity(self, msg: Twist) -> None:
         now = time.monotonic()
         self._safe_cmd_at = now
+        self._safe_cmd_zero = abs(msg.linear.x) < 1e-9 and abs(msg.angular.z) < 1e-9
         if not self._sensors_ready(now) or not self._core.ready(now):
+            self._auto_armed = False
             self._permit.abort()
-            self._core.halt()
+            self._reject_motion('sensors')
             return
         if self._explore_state_at is None or now - self._explore_state_at > .25:
+            self._auto_armed = False
             self._permit.abort()
-            self._core.halt()
+            self._reject_motion('state-stale')
             return
         if bool(self.get_parameter('manual_enabled').value):
+            self._auto_armed = False
             self._permit.abort()
+            self._reject_motion('manual-enabled')
             return
         if abs(msg.linear.x) < 1e-9 and abs(msg.angular.z) < 1e-9:
             if self._command_source == 'auto':
                 self._core.halt()
+            return
+        if not self._auto_armed:
+            self._reject_motion('not-armed')
             return
         if self._explore_mode == 'reversing':
             if any(self._nav_active.values()) or not self._permit.accept_reverse(msg.linear.x, now):
@@ -128,15 +218,23 @@ class BaseBridgeNode(Node):
                 self._core.halt()
                 return
         elif self._explore_mode == 'navigating':
-            if not forward_only_velocity(msg.linear.x, msg.angular.z, self._core.track_m):
+            # 倒车与非法值仍然拒绝；两轮超固件上限时同比缩放 v、w，
+            # 保留 Nav2 请求的曲率，避免夹小角速度后转弯半径变大。
+            if (not math.isfinite(msg.linear.x) or
+                    not math.isfinite(msg.angular.z) or msg.linear.x < 0):
                 self._core.halt()
                 return
+            auto_v, auto_w = scale_velocity_to_wheel_limit(
+                msg.linear.x, msg.angular.z, self._core.track_m)
         else:
-            self._core.halt()
+            self._reject_motion('mode-' + str(self._explore_mode))
             return
         try:
             self._manual_yaw_rate.reset()
-            self._core.accept_cmd(msg.linear.x, msg.angular.z, now)
+            if self._explore_mode == 'reversing':
+                self._core.accept_cmd(msg.linear.x, msg.angular.z, now)
+            else:
+                self._core.accept_cmd(auto_v, auto_w, now)
             self._command_source = 'auto'
         except (ValueError, RuntimeError) as exc:
             self._core.halt()
@@ -164,9 +262,17 @@ class BaseBridgeNode(Node):
             if abs(msg.angular.z) > 1e-9:
                 corrected_yaw_rate = self._manual_yaw_rate.update(
                     msg.angular.z, self._imu_yaw_rate, now)
+                self._heading_hold.reset()
             else:
                 self._manual_yaw_rate.reset()
-                corrected_yaw_rate = 0.0
+                # 只前进不转向时，用 IMU 航向把车拉回直线（差速车左右轮不等径会画弧）。
+                if (bool(self.get_parameter('heading_hold_enabled').value) and
+                        self._imu_yaw is not None):
+                    corrected_yaw_rate = self._heading_hold.update(
+                        msg.linear.x, 0.0, self._imu_yaw, now)
+                else:
+                    self._heading_hold.reset()
+                    corrected_yaw_rate = 0.0
             self._core.accept_cmd(msg.linear.x, corrected_yaw_rate, now)
             self._command_source = 'manual'
         except (ValueError, RuntimeError) as exc:
@@ -193,7 +299,7 @@ class BaseBridgeNode(Node):
         return (bool(self.get_parameter('motion_enabled').value) and
                 self._scan.ready(now) and self._scan_stamp.ready(now) and
                 self._imu_stamp.ready(now) and self._last_imu_at is not None and
-                0 <= now - self._last_imu_at <= .25)
+                0 <= now - self._last_imu_at <= float(self.get_parameter('sensor_timeout_s').value))
 
     def _on_imu(self, msg: Imu) -> None:
         q = msg.orientation
@@ -311,11 +417,13 @@ class BaseBridgeNode(Node):
             self._permit.abort()
             os.write(self._fd, b'x?')
             self._last_handshake_attempt = now
+            self._clear_fault_on_connect = True
             self.get_logger().info(f'ESP32 serial opened exclusively: {self._device}')
         except (OSError, ValueError) as exc:
             self.get_logger().warn(f'ESP32 serial unavailable: {exc}', throttle_duration_sec=5.0)
 
     def _disconnect(self, reason: str) -> None:
+        self._auto_armed = False
         if self._fd is not None:
             try:
                 os.write(self._fd, b'x')
@@ -356,6 +464,18 @@ class BaseBridgeNode(Node):
                 (state.esp_us, state.left_count, state.right_count,
                  round(state.left_measured), round(state.right_measured),
                  round(state.left_pwm, 2), round(state.right_pwm, 2), state.fault))
+            if (state.fault and self._clear_fault_on_connect and
+                    not state.active and self._fd is not None):
+                # USB 插拔后固件常留一次超速/堵转锁存；仅在刚连上且电机空闲时
+                # 自动清一次，避免每次都手动发 /base/clear_fault。
+                try:
+                    # 固件只在 active=false 时才接受 'c'，必须先发 'x' 停车再清。
+                    os.write(self._fd, b'xc')
+                    self._clear_fault_on_connect = False
+                    self.get_logger().warn(
+                        f'cleared latched ESP32 fault {state.fault} after serial connect')
+                except OSError:
+                    pass
             if state.fault and not self._core.fault:
                 self.get_logger().error(
                     f'ESP32 fault {state.fault}; recent states '
@@ -367,6 +487,8 @@ class BaseBridgeNode(Node):
                 if self._fd is not None:
                     os.write(self._fd, b'x?')
             if out.fault:
+                print('[base] disarm fault', flush=True)
+                self._auto_armed = False
                 self._permit.abort()
             if out.odom is not None and self._permit.active:
                 xy = (out.odom.x, out.odom.y)
@@ -408,10 +530,18 @@ class BaseBridgeNode(Node):
     def _tick(self) -> None:
         now = time.monotonic()
         manual_enabled = bool(self.get_parameter('manual_enabled').value)
-        if self._command_source == 'auto' and (self._safe_cmd_at is None or now - self._safe_cmd_at > .15):
-            self._permit.abort()
-            self._core.halt()
-            self._command_source = None
+        self._manual_mode.publish(Bool(data=manual_enabled))
+        if self._command_source == 'auto':
+            gap_action = safe_command_gap_action(
+                now - self._safe_cmd_at if self._safe_cmd_at is not None else float('inf'),
+                self._safe_cmd_zero)
+            if gap_action != 'ok':
+                self._core.halt()
+            if gap_action == 'disarm':
+                print(f'[base] disarm gap {now - (self._safe_cmd_at or 0):.2f}s zero={self._safe_cmd_zero}', flush=True)
+                self._auto_armed = False
+                self._permit.abort()
+                self._command_source = None
         if ((self._command_source == 'manual' and
              not command_source_allowed('manual', manual_enabled,
                                         any(self._nav_active.values()))) or
@@ -420,6 +550,19 @@ class BaseBridgeNode(Node):
             self._manual_yaw_rate.reset()
             self._command_source = None
         self._open_if_needed(now)
+        if (self._fd is not None and self._core.fault and
+                not self._auto_armed and self._safe_cmd_zero and
+                now - self._last_auto_clear >= 2.0):
+            # 门控已开、指令为零且未授权（电机空闲）时，自动清一次锁存的固件故障。
+            # USB 插拔或编码器毛刺会留下 fault 1/3，否则面板会一直报“底盘未就绪”。
+            try:
+                os.write(self._fd, b'xc')
+                self._last_auto_clear = now
+                self.get_logger().warn(
+                    f'auto-clearing latched ESP32 fault {self._core.fault} '
+                    '(idle, gate open)')
+            except OSError:
+                pass
         if self._fd is not None:
             try:
                 for _ in range(8):
@@ -443,13 +586,22 @@ class BaseBridgeNode(Node):
                     if self._sensors_ready(now):
                         command = output.command
                     else:
+                        print('[base] disarm tick-sensors', flush=True)
+                        self._auto_armed = False
                         self._core.halt()
                         self._manual_yaw_rate.reset()
                         command = b'x'
                     os.write(self._fd, command)
             except OSError as exc:
                 self._disconnect(str(exc))
+        if (self._stopped_at is not None and self._auto_armed and
+                now - self._stopped_at > 3.0 and
+                not any(self._nav_active.values())):
+            print('[base] disarm explore-stopped (persisted 3s)', flush=True)
+            self._auto_armed = False
+            self._stopped_at = None
         self._fault.publish(Int32(data=self._core.fault))
+        self._auto_arm_pub.publish(Bool(data=self._auto_armed))
         self._ready.publish(Bool(data=self._core.ready(now) and
                                  self._sensors_ready(now)))
 

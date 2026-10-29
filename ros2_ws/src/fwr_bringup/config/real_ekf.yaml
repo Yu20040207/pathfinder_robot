@@ -10,12 +10,16 @@ ekf_filter_node:
     base_link_frame: base_footprint
     world_frame: odom
     odom0: /wheel/odom
+    # 平移取自轮式里程计；航向与角速度都不取编码器 —— 轮距 0.263m 未标定，
+    # 编码器角速度带系统误差，会和 IMU 抢权重，导致转弯中航向滞后、地图出现重影。
+    # 航向完全交给 IMU（绝对角 + 角速度）。
     odom0_config: [false, false, false, false, false, false,
-                   true, false, false, false, false, true,
+                   true, false, false, false, false, false,
                    false, false, false]
     odom0_differential: false
     imu0: /imu/data_raw
-    imu0_config: [false, false, false, false, false, false,
+    # IMU 提供绝对航向 + 角速度，作为转向打滑时的航向基准。
+    imu0_config: [false, false, false, false, false, true,
                   false, false, false, false, false, true,
                   false, false, false]
     imu0_differential: false

@@ -1,0 +1,128 @@
+diff --git a/explore/include/explore/costmap_client.h b/explore/include/explore/costmap_client.h
+index 42b065e..c144edb 100644
+--- a/explore/include/explore/costmap_client.h
++++ b/explore/include/explore/costmap_client.h
+@@ -38,8 +38,8 @@
+ #ifndef COSTMAP_CLIENT_
+ #define COSTMAP_CLIENT_
+ 
+-#include <tf2_ros/buffer.hpp>
+-#include <tf2_ros/transform_listener.hpp>
++#include <tf2_ros/buffer.h>
++#include <tf2_ros/transform_listener.h>
+ 
+ #include <geometry_msgs/msg/pose.hpp>
+ #include <geometry_msgs/msg/pose_stamped.hpp>
+diff --git a/explore/include/explore/explore.h b/explore/include/explore/explore.h
+index 7741ce0..a97551b 100644
+--- a/explore/include/explore/explore.h
++++ b/explore/include/explore/explore.h
+@@ -41,7 +41,7 @@
+ #include <explore/costmap_client.h>
+ #include <explore/frontier_search.h>
+ #include <geometry_msgs/msg/pose_stamped.hpp>
+-#include <tf2_ros/transform_listener.hpp>
++#include <tf2_ros/transform_listener.h>
+ 
+ #include <chrono>
+ #include <cmath>
+@@ -125,6 +125,7 @@ private:
+   // rclcpp::TimerBase::SharedPtr oneshot_;
+ 
+   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr resume_subscription_;
++  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr pause_subscription_;
+   void resumeCallback(const std_msgs::msg::Bool::SharedPtr msg);
+ 
+   std::vector<geometry_msgs::msg::Point> frontier_blacklist_;
+@@ -144,6 +145,8 @@ private:
+   bool return_to_init_;
+   std::string robot_base_frame_;
+   bool resuming_ = false;
++  int empty_plan_count_ = 0;
++  bool paused_ = false;
+ };
+ }  // namespace explore
+ 
+diff --git a/explore/src/explore.cpp b/explore/src/explore.cpp
+index 6a1125c..10c2366 100644
+--- a/explore/src/explore.cpp
++++ b/explore/src/explore.cpp
+@@ -72,6 +72,18 @@ Explore::Explore()
+   this->declare_parameter<bool>("return_to_init", false);
+ 
+   this->get_parameter("planner_frequency", planner_frequency_);
++  pause_subscription_ = this->create_subscription<std_msgs::msg::Bool>(
++      "explore/pause", 10,
++      [this](const std_msgs::msg::Bool::SharedPtr msg) {
++        bool was_paused = paused_;
++        paused_ = msg->data;
++        if (paused_ && !was_paused) {
++          RCLCPP_INFO(logger_, "Exploration paused by supervisor.");
++          move_base_client_->async_cancel_all_goals();
++        } else if (!paused_ && was_paused) {
++          RCLCPP_INFO(logger_, "Exploration resumed by supervisor.");
++        }
++      });
+   this->get_parameter("progress_timeout", timeout);
+   this->get_parameter("visualize", visualize_);
+   this->get_parameter("potential_scale", potential_scale_);
+@@ -228,6 +240,9 @@ void Explore::visualizeFrontiers(
+ 
+ void Explore::makePlan()
+ {
++  if (paused_) {
++    return;  // supervisor 踢一脚期间挂起，不抢手动路径
++  }
+   // find frontiers
+   auto pose = costmap_client_.getRobotPose();
+   // get frontiers sorted according to cost
+@@ -238,13 +253,20 @@ void Explore::makePlan()
+   }
+ 
+   if (frontiers.empty()) {
+-    RCLCPP_WARN(logger_, "No frontiers found, stopping.");
+-    auto status_msg = explore_lite_msgs::msg::ExploreStatus();
+-    status_msg.status = explore_lite_msgs::msg::ExploreStatus::EXPLORATION_COMPLETE;
+-    status_pub_->publish(status_msg);
+-    stop(true);
++    // 地图可能还在生长（建图初期/探索中途），空前沿不要永久停止：
++    // 连续 60 个周期（约 1 分钟 @1 Hz）仍无前沿才算真正完成。
++    ++empty_plan_count_;
++    RCLCPP_WARN(logger_, "No frontiers found (waiting for map growth %d/60).",
++                empty_plan_count_);
++    if (empty_plan_count_ >= 60) {
++      auto status_msg = explore_lite_msgs::msg::ExploreStatus();
++      status_msg.status = explore_lite_msgs::msg::ExploreStatus::EXPLORATION_COMPLETE;
++      status_pub_->publish(status_msg);
++      stop(true);
++    }
+     return;
+   }
++  empty_plan_count_ = 0;
+ 
+   // publish frontiers as visualization markers
+   if (visualize_) {
+@@ -258,11 +280,18 @@ void Explore::makePlan()
+                          return goalOnBlacklist(f.centroid);
+                        });
+   if (frontier == frontiers.end()) {
+-    RCLCPP_WARN(logger_, "All frontiers traversed/tried out, stopping.");
+-    auto status_msg = explore_lite_msgs::msg::ExploreStatus();
+-    status_msg.status = explore_lite_msgs::msg::ExploreStatus::EXPLORATION_COMPLETE;
+-    status_pub_->publish(status_msg);
+-    stop(true);
++    // 目标都失败过（例如机器人还在图边界、规划被拒）时不永久停止：
++    // 清空黑名单继续重试，直到连续 60 个周期无任何可去前沿才判完成。
++    ++empty_plan_count_;
++    RCLCPP_WARN(logger_, "All frontiers tried out; clearing blacklist and retrying (%d/60).",
++                empty_plan_count_);
++    frontier_blacklist_.clear();
++    if (empty_plan_count_ >= 60) {
++      auto status_msg = explore_lite_msgs::msg::ExploreStatus();
++      status_msg.status = explore_lite_msgs::msg::ExploreStatus::EXPLORATION_COMPLETE;
++      status_pub_->publish(status_msg);
++      stop(true);
++    }
+     return;
+   }
+   geometry_msgs::msg::Point target_position = frontier->centroid;

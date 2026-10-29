@@ -1,0 +1,35 @@
+diff --git a/include/map_edit/map_eraser_tool.h b/include/map_edit/map_eraser_tool.h
+index 1fcd332..a8ada9f 100755
+--- a/include/map_edit/map_eraser_tool.h
++++ b/include/map_edit/map_eraser_tool.h
+@@ -55,10 +55,11 @@ namespace map_edit
+ 
+   private:
+     bool map_received_ = false;
+-    bool mouse_pressed_;
+-    int brush_size_set;
+-    int max_brush_size_;
+-    int min_brush_size_;
++    bool mouse_pressed_ = false;
++    // 默认 9 像素（0.45 m @0.05 m/px）：未初始化时画笔为 0 像素，拖动看起来毫无反应。
++    int brush_size_set = 9;
++    int max_brush_size_ = 51;
++    int min_brush_size_ = 1;
+     enum BrushMode
+     {
+       ERASE_TO_FREE,     // 擦除为自由空间 (白色)
+diff --git a/src/map_eraser_tool.cpp b/src/map_eraser_tool.cpp
+index 593fb05..6b60805 100755
+--- a/src/map_eraser_tool.cpp
++++ b/src/map_eraser_tool.cpp
+@@ -53,8 +53,8 @@ namespace map_edit
+     brush_size_property_ = new rviz_common::properties::FloatProperty("Brush Size", brush_size_set,
+                                                                       "Size of the square eraser brush (NxN pixels)",
+                                                                       getPropertyContainer(), SLOT(brush_updateProperties()), this);
+-    brush_size_property_->setMin(max_brush_size_);
+-    brush_size_property_->setMax(min_brush_size_);
++    brush_size_property_->setMin(min_brush_size_);
++    brush_size_property_->setMax(max_brush_size_);
+   }
+ 
+   void MapEraserTool::activate()

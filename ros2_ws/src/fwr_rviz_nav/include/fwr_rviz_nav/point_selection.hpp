@@ -13,12 +13,18 @@ struct Point
 class PointSelection
 {
 public:
+  // One click selects a destination and the robot starts from its current
+  // pose. A second click turns the first point into the start and the new
+  // point into the goal. A third click begins a new single-point selection.
   void click(double x, double y)
   {
-    if (!start_ || goal_) {
-      start_ = Point{x, y};
-      goal_.reset();
+    if (!goal_) {
+      goal_ = Point{x, y};
+    } else if (!start_) {
+      start_ = *goal_;
+      goal_ = Point{x, y};
     } else {
+      start_.reset();
       goal_ = Point{x, y};
     }
   }
@@ -29,7 +35,13 @@ public:
     goal_.reset();
   }
 
-  bool ready() const { return start_.has_value() && goal_.has_value(); }
+  bool has_goal() const { return goal_.has_value(); }
+  bool single() const { return goal_.has_value() && !start_.has_value(); }
+  bool two_point() const { return start_.has_value() && goal_.has_value(); }
+  // Retained for the two-point route builders: ready() means both a selected
+  // start and goal exist. Callers that also accept a single destination should
+  // use has_goal()/single().
+  bool ready() const { return two_point(); }
   const std::optional<Point> & start() const { return start_; }
   const std::optional<Point> & goal() const { return goal_; }
 

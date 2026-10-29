@@ -1,0 +1,45 @@
+# Supervised trial only. Distances require measured stopping-distance validation.
+collision_monitor:
+  ros__parameters:
+    use_sim_time: false
+    base_frame_id: base_footprint
+    odom_frame_id: odom
+    cmd_vel_in_topic: /cmd_vel_auto_unchecked
+    cmd_vel_out_topic: /cmd_vel_auto_safe
+    transform_tolerance: 0.1
+    source_timeout: 0.25
+    base_shift_correction: true
+    # Keep zero commands flowing through Nav2's 15 s progress-failure window.
+    # If the obstacle remains, the bridge watchdog still disarms after 18 s.
+    stop_pub_timeout: 18.0
+    polygons: [front_stop, front_slow, rear_visible_stop]
+    front_stop:
+      type: polygon
+      points: [0.20, 0.31, 0.62, 0.31, 0.62, -0.31, 0.20, -0.31]
+      action_type: stop
+      max_points: 1
+      visualize: true
+      polygon_pub_topic: /collision_monitor/front_stop
+      enabled: true
+    front_slow:
+      type: polygon
+      points: [0.20, 0.38, 0.90, 0.38, 0.90, -0.38, 0.20, -0.38]
+      action_type: slowdown
+      max_points: 1
+      slowdown_ratio: 0.4
+      visualize: true
+      polygon_pub_topic: /collision_monitor/front_slow
+      enabled: true
+    rear_visible_stop:
+      type: polygon
+      points: [-0.20, 0.30, -0.60, 0.30, -0.60, -0.30, -0.20, -0.30]
+      action_type: stop
+      max_points: 1
+      visualize: true
+      polygon_pub_topic: /collision_monitor/rear_visible_stop
+      enabled: true
+    observation_sources: [scan]
+    scan:
+      type: scan
+      topic: /scan
+      enabled: true

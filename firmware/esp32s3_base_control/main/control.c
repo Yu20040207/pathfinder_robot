@@ -2,8 +2,47 @@
 #include <math.h>
 #include <string.h>
 
+// 原地转向时轮子会短时打滑空转，实测可冲到 300+ mm/s。指令上限仍是 300，
+// 这里只把“超速锁存”的门槛放宽到 420 并延长窗口，避免正常转弯被误判。
+// 2026-10-29：塑料轮在地砖上打滑时，轮子空转瞬间可超过 420 mm/s，
+// 触发 fault 3（超速）导致导航一动就停。放宽到 700 mm/s / 0.4 s：
+// 仍能抓住编码器异常或真正失控（指令上限只有 300 mm/s）。
+#define OVERSPEED_MMPS 700.0f
+#define OVERSPEED_WINDOW_S .4f
+
+// 占空比软件上限：0.75 在四轮刮擦转向时会顶死（fault 1 堵转）。
+// 2026-10-29：曾试过 0.95/0.65/0.8 想加大扭矩，但**塑料轮在地砖上扭矩越大越空转**，
+// 实测有效前进速度只有指令的 ~60%（打滑 40%），因此回退到 0.90/0.60/0.5。
+// 真正的解法是换橡胶轮（用户已计划）。
+#define MAX_DUTY .90f
+
+// 基础占空比（巡航时的下限）与爬升速率
+#define BASE_DUTY .60f
+#define DUTY_RAMP_PER_S .5f
+
 // Continuous velocity commands stop a non-moving driven wheel before a long grind.
-static const float V_STALL_LIMIT_S = .45f;
+// Judged by measured speed, not by "no encoder counts this tick": a wheel creeping
+// at 5 mm/s produces zero counts on most 10 ms ticks and used to be reported as a
+// stall while it was still turning.
+// 2026-10-29：本平台低占空比下转速本就慢（0.5 占空比仅 ~36 mm/s），
+// 原 8 mm/s + 25% 判据 + 0.8 s 窗口会在“轮子刚起转”时误判失速，
+// 导致指令 >80 mm/s 时固件自停（实测 fault 1）。此处放宽。
+static const float STALL_SPEED_MMPS = 4.0f;
+static const float STALL_LIMIT_S = 2.0f;
+static const float STARTUP_MAX_S = .6f;
+static const float STARTUP_EXIT_MMPS = 20.0f;
+
+// Mature drive practice (e.g. TI sensorless stall detection): judge a stall by
+// the command-tracking error, not by "no encoder counts this control tick".
+// The floor scales with the commanded speed so a slow creep and a fast drive are
+// both judged against what was actually asked for, and a debounce window filters
+// the encoder quantisation noise at low speed.
+static bool wheel_stalled(float demand, float measured, float direction) {
+    // 门槛从指令的 25% 降到 12%：慢速但确在转的轮子不再被判失速
+    float floor_mmps = fmaxf(STALL_SPEED_MMPS, .12f*fabsf(demand));
+    return fabsf(demand) >= STARTUP_EXIT_MMPS &&
+           direction*measured < floor_mmps;
+}
 
 static float clamp(float x, float low, float high) {
     return fminf(high, fmaxf(low, x));
@@ -23,7 +62,7 @@ void base_stop(base_control_t *c) {
     c->turn_ring_pos = 0;
     for (int i=0; i<2; ++i) {
         c->target[i] = c->setpoint[i] = c->integral[i] = c->pwm[i] = 0;
-        c->stall_s[i] = c->wrong_s[i] = c->fast_s[i] = 0;
+        c->stall_s[i] = c->wrong_s[i] = c->fast_s[i] = c->still_s[i] = 0;
         c->tracking_s[i] = 0;
         c->startup_s[i] = 0;
         c->sync_distance[i] = 0;
@@ -39,7 +78,7 @@ void base_init(base_control_t *c, int64_t now, int32_t left, int32_t right) {
     c->counts[1] = right;
 }
 bool base_command(base_control_t *c, float left, float right, int64_t now) {
-    if (!isfinite(left) || !isfinite(right) || fabsf(left)>100 || fabsf(right)>100 || c->fault) {
+    if (!isfinite(left) || !isfinite(right) || fabsf(left)>300 || fabsf(right)>300 || c->fault) {
         base_stop(c);
         return false;
     }
@@ -48,8 +87,17 @@ bool base_command(base_control_t *c, float left, float right, int64_t now) {
     if (!c->active) {
         for (int i=0; i<2; ++i) {
             c->startup_s[i] = 0;
-            c->startup_done[i] = c->measured[i] * (i==0 ? left : right) < 0 &&
-                                 fabsf(c->measured[i]) > 15.0f;
+            c->startup_done[i] = false;
+        }
+    } else {
+        const float incoming[2] = {left, right};
+        for (int i=0; i<2; ++i) {
+            if (c->target[i]*incoming[i] < 0) {
+                c->startup_s[i] = 0;
+                c->startup_done[i] = false;
+                c->integral[i] = 0;
+                c->stall_s[i] = c->still_s[i] = 0;
+            }
         }
     }
     c->target[0] = left;
@@ -174,15 +222,15 @@ void base_tick(base_control_t *c, int64_t now, int32_t left, int32_t right,
             float distance_lag = c->sync_distance[1-i]-c->sync_distance[i];
             c->startup_s[i] += dt;
             c->setpoint[i] = direction*180.0f;
-            float desired = clamp(.6f+.01f*distance_lag, .6f, .75f);
+            float desired = clamp(BASE_DUTY+.01f*distance_lag, BASE_DUTY, MAX_DUTY);
             bool breakaway = c->turn_mode && c->startup_s[i]>=.15f &&
                              c->turn_recent_mm[i]<.5f;
-            float duty = breakaway ? .75f :
-                         approach(fmaxf(.6f, fabsf(c->pwm[i])), desired, .5f*dt);
+            float duty = breakaway ? MAX_DUTY :
+                         approach(fmaxf(BASE_DUTY, fabsf(c->pwm[i])), desired, DUTY_RAMP_PER_S*dt);
             c->pwm[i] = direction*duty;
             c->stall_s[i] = c->startup_s[i]>.2f && delta==0 ? c->stall_s[i]+dt : 0;
             c->wrong_s[i] = own<-20 ? c->wrong_s[i]+dt : 0;
-            c->fast_s[i] = fabsf(c->measured[i])>300 ? c->fast_s[i]+dt : 0;
+            c->fast_s[i] = fabsf(c->measured[i])>OVERSPEED_MMPS ? c->fast_s[i]+dt : 0;
             c->tracking_s[i] = c->turn_mode ?
                 (c->startup_s[i]>.2f && fabsf(distance_lag)>8 ? c->tracking_s[i]+dt : 0) :
                 (c->startup_s[i]>.3f && fabsf(lag)>40 ? c->tracking_s[i]+dt : 0);
@@ -190,7 +238,7 @@ void base_tick(base_control_t *c, int64_t now, int32_t left, int32_t right,
                 c->turn_recent_mm[i]<.5f) fail(c, BASE_STALL);
             else if (c->stall_s[i]>.35f) fail(c, BASE_STALL);
             else if (c->wrong_s[i]>.2f) fail(c, BASE_DIRECTION);
-            else if (c->fast_s[i]>.1f) fail(c, BASE_OVERSPEED);
+            else if (c->fast_s[i]>OVERSPEED_WINDOW_S) fail(c, BASE_OVERSPEED);
             else if (c->tracking_s[i]>(c->turn_mode ? .1f : .4f)) fail(c, BASE_TRACKING);
             continue;
         }
@@ -201,10 +249,10 @@ void base_tick(base_control_t *c, int64_t now, int32_t left, int32_t right,
             c->pwm[i] = c->target[i];
             c->stall_s[i] = c->pwm[i]>=.3f && delta==0 ? c->stall_s[i]+dt : 0;
             c->wrong_s[i] = c->measured[i]<-20 ? c->wrong_s[i]+dt : 0;
-            c->fast_s[i] = fabsf(c->measured[i])>300 ? c->fast_s[i]+dt : 0;
+            c->fast_s[i] = fabsf(c->measured[i])>OVERSPEED_MMPS ? c->fast_s[i]+dt : 0;
             if (c->stall_s[i]>.75f) fail(c, BASE_STALL);
             else if (c->wrong_s[i]>.2f) fail(c, BASE_DIRECTION);
-            else if (c->fast_s[i]>.1f) fail(c, BASE_OVERSPEED);
+            else if (c->fast_s[i]>OVERSPEED_WINDOW_S) fail(c, BASE_OVERSPEED);
             continue;
         }
         if (c->loaded_mode) {
@@ -218,12 +266,12 @@ void base_tick(base_control_t *c, int64_t now, int32_t left, int32_t right,
             c->pwm[i] = clamp(.6f + .0008f*error + c->integral[i], .6f, .65f);
             c->stall_s[i] = c->startup_s[i]>.2f && c->measured[i]<20 ? c->stall_s[i]+dt : 0;
             c->wrong_s[i] = c->measured[i]<-20 ? c->wrong_s[i]+dt : 0;
-            c->fast_s[i] = fabsf(c->measured[i])>300 ? c->fast_s[i]+dt : 0;
+            c->fast_s[i] = fabsf(c->measured[i])>OVERSPEED_MMPS ? c->fast_s[i]+dt : 0;
             c->tracking_s[i] = c->startup_s[i]>.3f && fabsf(error)>40 ?
                                c->tracking_s[i]+dt : 0;
             if (c->stall_s[i]>.35f) fail(c, BASE_STALL);
             else if (c->wrong_s[i]>.2f) fail(c, BASE_DIRECTION);
-            else if (c->fast_s[i]>.1f) fail(c, BASE_OVERSPEED);
+            else if (c->fast_s[i]>OVERSPEED_WINDOW_S) fail(c, BASE_OVERSPEED);
             else if (c->tracking_s[i]>.4f) fail(c, BASE_TRACKING);
             continue;
         }
@@ -242,10 +290,10 @@ void base_tick(base_control_t *c, int64_t now, int32_t left, int32_t right,
             c->setpoint[i] = i==0 ? 0 : delta_goal;
             c->stall_s[i] = c->startup_s[0]>.2f && c->measured[i]<20 ? c->stall_s[i]+dt : 0;
             c->wrong_s[i] = c->measured[i]<-20 ? c->wrong_s[i]+dt : 0;
-            c->fast_s[i] = fabsf(c->measured[i])>300 ? c->fast_s[i]+dt : 0;
+            c->fast_s[i] = fabsf(c->measured[i])>OVERSPEED_MMPS ? c->fast_s[i]+dt : 0;
             if (c->stall_s[i]>.35f) fail(c, BASE_STALL);
             else if (c->wrong_s[i]>.2f) fail(c, BASE_DIRECTION);
-            else if (c->fast_s[i]>.1f) fail(c, BASE_OVERSPEED);
+            else if (c->fast_s[i]>OVERSPEED_WINDOW_S) fail(c, BASE_OVERSPEED);
             if (i==1 && c->active) {
                 c->tracking_s[0] = c->startup_s[0]>.3f &&
                     fabsf(delta_goal-(c->measured[1]-c->measured[0]))>25 ?
@@ -259,41 +307,75 @@ void base_tick(base_control_t *c, int64_t now, int32_t left, int32_t right,
         if (goal*c->setpoint[i]<0 || (fabsf(c->setpoint[i])<.01f && goal*c->measured[i]<0 && fabsf(c->measured[i])>15))
             goal = 0;
         c->setpoint[i] = approach(c->setpoint[i], goal, 150.0f*dt);
+        if (goal==0 && c->target[i]!=0) {
+            // Hold motor power at zero while the previous direction rolls
+            // down. Keep the new direction's startup pulse armed.
+            c->pwm[i] = c->integral[i] = c->stall_s[i] = c->wrong_s[i] = 0;
+            c->fast_s[i] = fabsf(c->measured[i])>OVERSPEED_MMPS ? c->fast_s[i]+dt : 0;
+            if (c->fast_s[i]>.1f) fail(c, BASE_OVERSPEED);
+            continue;
+        }
         if (fabsf(c->setpoint[i])<.01f) {
             c->pwm[i]=c->integral[i]=c->stall_s[i]=c->wrong_s[i]=c->fast_s[i]=0;
+            c->still_s[i]=c->startup_s[i]=0;
+            c->startup_done[i]=false;
             continue;
         }
         float direction = c->setpoint[i]>0 ? 1.0f : -1.0f;
         if (!c->startup_done[i]) {
-            if (goal*direction <= 0 || direction*c->measured[i] >= 15.0f ||
-                c->startup_s[i] >= .20f) {
+            if (goal*direction <= 0 || direction*c->measured[i] >= STARTUP_EXIT_MMPS ||
+                c->startup_s[i] >= STARTUP_MAX_S) {
                 c->startup_done[i] = true;
             } else {
                 c->startup_s[i] += dt;
                 // Start at the proven suspended-wheel duty. Only a wheel
                 // still below 15 mm/s receives the higher loaded-start duty.
-                c->pwm[i] = direction*clamp(.5f + 1.25f*c->startup_s[i], .5f, .75f);
-                c->stall_s[i] = delta==0 ? c->stall_s[i]+dt : 0;
+                c->pwm[i] = direction*clamp(.5f + 1.25f*c->startup_s[i], .5f, MAX_DUTY);
+                c->stall_s[i] = wheel_stalled(c->target[i], c->measured[i],
+                                              direction) ? c->stall_s[i]+dt : 0;
                 c->wrong_s[i] = direction*c->measured[i]<-20 ? c->wrong_s[i]+dt : 0;
-                c->fast_s[i] = fabsf(c->measured[i])>300 ? c->fast_s[i]+dt : 0;
-                if (c->stall_s[i]>V_STALL_LIMIT_S) fail(c, BASE_STALL);
+                c->fast_s[i] = fabsf(c->measured[i])>OVERSPEED_MMPS ? c->fast_s[i]+dt : 0;
+                if (c->stall_s[i]>STALL_LIMIT_S) fail(c, BASE_STALL);
                 else if (c->wrong_s[i]>.2f) fail(c, BASE_DIRECTION);
-                else if (c->fast_s[i]>.1f) fail(c, BASE_OVERSPEED);
+                else if (c->fast_s[i]>OVERSPEED_WINDOW_S) fail(c, BASE_OVERSPEED);
                 continue;
             }
         }
         float desired = fabsf(c->setpoint[i]);
         float error = desired-direction*c->measured[i];
-        float trial_i = clamp(c->integral[i]+.0015f*error*dt, 0, .75f);
-        float feedforward = .22f + .0017f*desired;
-        float effort = feedforward + .0012f*error + trial_i;
-        if (effort<=.75f || error<0) c->integral[i] = trial_i;
-        effort = clamp(feedforward + .0012f*error + c->integral[i], 0, .75f);
+        bool pivot = c->target[0]*c->target[1] < 0 && goal*direction > 0;
+        float effort;
+        if (!pivot) {
+            float trial_i = clamp(c->integral[i]+.0015f*error*dt, 0, .75f);
+            // 2026-10-29：实测 0.5 占空比只能到 ~36 mm/s，原前馈(0.22+0.0017v)偏低，
+// 中高速下要靠积分慢慢爬、期间容易撞上失速判据。增益提到 0.0035。
+            float feedforward = .22f + .0035f*desired;
+            effort = feedforward + .0012f*error + trial_i;
+            if (effort<=.75f || error<0) c->integral[i] = trial_i;
+            effort = clamp(feedforward + .0012f*error + c->integral[i], 0, MAX_DUTY);
+        }
         // Recover promptly if a loaded wheel slows near a stop after its
         // startup pulse. Normal tracking remains free to use lower duty.
-        if (goal*direction > 0 && c->startup_s[i] >= .05f &&
+        if (!pivot && goal*direction > 0 && c->startup_s[i] >= .05f &&
             direction*c->measured[i] < 40.0f)
             effort = fmaxf(effort, .58f);
+        // A pivot needs authority above and below its rolling duty. The
+        // fixed 60% floor made gyro correction unable to slow a fast turn.
+        // Use a separate wheel-speed PI around rolling feedforward; the
+        // short startup pulse and existing stall latch handle breakaway.
+        if (pivot) {
+            float pivot_error = desired-direction*c->measured[i];
+            float proportional = .56f+.003f*pivot_error;
+            float trial = clamp(c->integral[i]+.004f*pivot_error*dt, -.08f, .15f);
+            float unbounded = proportional+trial;
+            if ((unbounded>=.48f && unbounded<=.75f) ||
+                (unbounded>.75f && pivot_error<0) ||
+                (unbounded<.48f && pivot_error>0))
+                c->integral[i] = trial;
+            effort = clamp(proportional+c->integral[i], .48f, MAX_DUTY);
+            if (direction*c->measured[i]<40.0f)
+                effort = fmaxf(effort, .58f);
+        }
         // Preserve wheel momentum after the startup pulse: an abrupt duty
         // reduction from the startup duty can stop loaded wheels.
         // Stop/fault paths still bypass this ramp and set PWM to zero.
@@ -306,11 +388,13 @@ void base_tick(base_control_t *c, int64_t now, int32_t left, int32_t right,
                           2.0f : .2f;
         c->pwm[i] = direction*approach(previous, effort,
                 (effort < previous ? fall_rate : rise_rate)*dt);
-        c->stall_s[i] = fabsf(c->pwm[i])>=.3f && delta==0 ? c->stall_s[i]+dt : 0;
+        c->stall_s[i] = fabsf(c->pwm[i])>=.3f &&
+            wheel_stalled(c->target[i], c->measured[i], direction) ?
+            c->stall_s[i]+dt : 0;
         c->wrong_s[i] = direction*c->measured[i]<-20 ? c->wrong_s[i]+dt : 0;
-        c->fast_s[i] = fabsf(c->measured[i])>300 ? c->fast_s[i]+dt : 0;
-        if (c->stall_s[i]>V_STALL_LIMIT_S) fail(c, BASE_STALL);
+        c->fast_s[i] = fabsf(c->measured[i])>OVERSPEED_MMPS ? c->fast_s[i]+dt : 0;
+        if (c->stall_s[i]>STALL_LIMIT_S) fail(c, BASE_STALL);
         else if (c->wrong_s[i]>.2f) fail(c, BASE_DIRECTION);
-        else if (c->fast_s[i]>.1f) fail(c, BASE_OVERSPEED);
+        else if (c->fast_s[i]>OVERSPEED_WINDOW_S) fail(c, BASE_OVERSPEED);
     }
 }

@@ -1,0 +1,44 @@
+# Forward-only collision zones for supervised trials.
+collision_monitor_forward:
+  ros__parameters:
+    use_sim_time: false
+    base_frame_id: base_footprint
+    odom_frame_id: odom
+    cmd_vel_in_topic: /cmd_vel_auto_unchecked
+    cmd_vel_out_topic: /cmd_vel_auto_forward_filtered
+    transform_tolerance: 0.2
+    # 雷达扫描的 header 时间是扫描起始时刻，实际到达时已 0.25–0.36 s 旧；
+    # 0.25 s 会间歇性整帧丢弃，导致安全层时有时无。
+    source_timeout: 0.6
+    base_shift_correction: true
+    stop_pub_timeout: 18.0
+    polygons: [front_stop, front_slow]
+    # 停车区从车头外缘 0.30 m 起、只留 0.08 m 深度：0.06 m/s 下制动距离约 1 cm，
+    # 8 cm 余量仍足够；再往里（0.20–0.30 m）已经在车体内部，不会有外部回波，等于关掉防撞。
+    front_stop:
+      type: polygon
+      # 横向只比车体（±0.215 m）宽 3.5 cm：窄于 0.62 m 的门框/墙不再误触发停车，
+      # 但正前方 0.30–0.38 m 内的实体仍会停。
+      # 2026-10-29：原来 1 个点就 stop，导致车头 30~42cm 处一个噪点/侧向物体
+      # 就把整台车锁死（连原地旋转都被禁止，Nav2 的 spin 脱困因此必然失败）。
+      # 半宽 0.24（刚好略超车体 0.215，兼顾窄门通过），并要求 3 个点才触发。
+      points: [0.32, 0.24, 0.45, 0.24, 0.45, -0.24, 0.32, -0.24]
+      action_type: stop
+      max_points: 3
+      visualize: true
+      polygon_pub_topic: /collision_monitor_forward/front_stop
+      enabled: true
+    front_slow:
+      type: polygon
+      points: [0.30, 0.30, 0.75, 0.30, 0.75, -0.30, 0.30, -0.30]
+      action_type: slowdown
+      max_points: 1
+      slowdown_ratio: 0.7
+      visualize: true
+      polygon_pub_topic: /collision_monitor_forward/front_slow
+      enabled: true
+    observation_sources: [scan]
+    scan:
+      type: scan
+      topic: /scan
+      enabled: true

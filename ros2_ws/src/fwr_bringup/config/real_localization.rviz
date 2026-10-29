@@ -1,0 +1,137 @@
+Panels:
+  - Class: map_edit/MapEditPanel
+    Name: Map Edit
+  - Class: rviz_common/Displays
+    Name: Displays
+  - Class: rviz_common/Views
+    Name: Views
+  - Class: fwr_rviz_nav/RealTwoPointNavPanel
+    Name: 单点/两点导航
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Enabled: true
+      Cell Size: 0.5
+      Plane: XY
+      Plane Cell Count: 30
+      Value: true
+    - Class: rviz_default_plugins/Map
+      Name: Saved map
+      Enabled: true
+      Alpha: 0.75
+      Topic:
+        Value: /map
+        Durability Policy: Transient Local
+        Reliability Policy: Reliable
+        History Policy: Keep Last
+        Depth: 1
+      Value: true
+    - Class: rviz_default_plugins/Map
+      Name: 编辑中的地图 (/map_edit)
+      Enabled: false
+      Alpha: 1
+      Topic:
+        Value: /map_edit
+        Durability Policy: Transient Local
+        Reliability Policy: Reliable
+        History Policy: Keep Last
+        Depth: 1
+      Value: true
+    - Class: rviz_default_plugins/RobotModel
+      Name: Physical chassis
+      Enabled: true
+      Description Source: Topic
+      Description Topic:
+        Value: /robot_description
+        Durability Policy: Transient Local
+        Reliability Policy: Reliable
+        History Policy: Keep Last
+        Depth: 5
+      Value: true
+    - Class: rviz_default_plugins/LaserScan
+      Name: Localization scan (front and sides)
+      Enabled: true
+      Topic:
+        Value: /scan_mapping
+        Reliability Policy: Best Effort
+      Style: Flat Squares
+      Size (Pixels): 4
+      Color Transformer: FlatColor
+      Color: 40; 220; 90
+      Decay Time: 0.2
+      Value: true
+    - Class: rviz_default_plugins/Path
+      Name: 两点规划预览
+      Enabled: true
+      Color: 40; 230; 100
+      Line Style: Lines
+      Line Width: 0.05
+      Topic:
+        Depth: 5
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /two_point_preview_path
+      Value: true
+    - Class: rviz_default_plugins/Path
+      Name: 全局路径（避障重规划）
+      Enabled: true
+      Color: 255; 140; 0
+      Line Style: Lines
+      Line Width: 0.03
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /plan
+      Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Name: 起点与终点
+      Enabled: true
+      Topic:
+        Depth: 5
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /two_point_markers
+      Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Name: 房间标号
+      Enabled: true
+      Topic:
+        Depth: 5
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /room_labels
+      Value: true
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Enabled: false
+      Show Arrows: false
+      Show Axes: true
+      Value: false
+  Enabled: true
+  Global Options:
+    Fixed Frame: map
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/SetInitialPose
+    - Class: rviz_default_plugins/PublishPoint
+      Topic: /clicked_point
+    - Class: map_edit/MapEraserTool
+    - Class: map_edit/RegionTool
+  Value: true
+  Views:
+    Current:
+      Class: rviz_default_plugins/TopDownOrtho
+      Name: TopDownOrtho
+      Target Frame: map
+      Scale: 80
+      Value: TopDownOrtho (rviz)

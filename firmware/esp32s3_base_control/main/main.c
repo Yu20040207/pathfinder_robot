@@ -119,7 +119,7 @@ void app_main(void) {
     configASSERT(xTaskCreate(control_task, "base_control", 4096, NULL, 10, NULL)==pdPASS);
     setvbuf(stdin, NULL, _IONBF, 0);
     puts("BASE_CONTROL_V2");
-    puts("v L R (mm/s, <=100), d L R (forward duty <=0.65), b L R (loaded mm/s 150-200), a D (right-left mm/s <=50), y +/-1 (straight sync), t +/-1 (turn sync), x stop, c clear idle fault, r encoders, s state");
+    puts("v L R (mm/s, <=300), d L R (forward duty <=0.65), b L R (loaded mm/s 150-200), a D (right-left mm/s <=50), y +/-1 (straight sync), t +/-1 (turn sync), x stop, c clear idle fault, r encoders, s state");
     char line[80];
     size_t used=0;
     bool discard=false;

@@ -1,36 +1,50 @@
 <?xml version="1.0"?>
-<!-- Overall envelope: 0.52 m long, 0.35 m wide, 0.20 m high. +X is front.
-     Wheel sizes and mounting coordinates are illustrative, not measured CAD. -->
+<!-- Preview only: 0.52 x 0.35 x 0.20 m overall envelope; +X is front.
+     The full-width body mesh has shallow wheel recesses at the drive wheels.
+     The user specified 65 mm drive wheels. Wheel width, wheel centers, caster
+     positions, IMU and driver mounts are provisional until chassis CAD exists.
+     Meshes are converted from the supplied STEP files in metres. The supplied
+     MG513X assembly with an 85 mm wheel is deliberately not used. -->
 <robot name="fwr_chassis_preview">
   <material name="body_blue"><color rgba="0.12 0.35 0.68 0.72"/></material>
   <material name="wheel_dark"><color rgba="0.10 0.12 0.16 1"/></material>
   <material name="caster_gray"><color rgba="0.52 0.56 0.62 1"/></material>
   <material name="lidar_dark"><color rgba="0.04 0.05 0.07 1"/></material>
   <material name="lidar_base_gray"><color rgba="0.23 0.25 0.29 1"/></material>
+  <material name="electronics_green"><color rgba="0.08 0.38 0.25 1"/></material>
+  <material name="metal_gray"><color rgba="0.62 0.65 0.68 1"/></material>
+
+  <link name="base_footprint"/>
+  <joint name="base_footprint_joint" type="fixed">
+    <parent link="base_footprint"/><child link="base_link"/>
+    <origin xyz="0 0 0.0325"/>
+  </joint>
 
   <link name="base_link">
     <visual>
-      <origin xyz="0 0 0.12"/>
-      <geometry><mesh filename="package://fwr_bringup/description/fwr_chassis_rounded.stl"/></geometry>
+      <origin xyz="0 0 0.0875"/>
+      <geometry><mesh filename="package://fwr_bringup/description/fwr_chassis_wheel_recesses.stl"/></geometry>
       <material name="body_blue"/>
     </visual>
     <collision>
-      <origin xyz="0 0 0.12"/>
+      <origin xyz="0 0 0.0875"/>
       <geometry><box size="0.52 0.35 0.16"/></geometry>
     </collision>
+    <!-- Provisional preview inertia; replace with weighed chassis data before physics use. -->
+    <inertial><origin xyz="0 0 0.0875"/><mass value="5"/>
+      <inertia ixx="0.06171" ixy="0" ixz="0" iyy="0.12333" iyz="0" izz="0.16371"/>
+    </inertial>
   </link>
 
   <!-- RPLIDAR C1 simplified visual: 55.6 x 55.6 x 41.3 mm per SLAMTEC drawing.
-       Base position is illustrative; +X is front and the scan frame is chassis-fixed. -->
+       Scan center was measured 50 mm behind the front edge of the 520 mm chassis,
+       i.e. 210 mm forward of chassis center, and 75 mm above floor.
+       +X is front and the scan frame is chassis-fixed. -->
   <link name="laser_front">
     <visual>
-      <origin xyz="0 0 -0.01825"/>
-      <geometry><box size="0.0556 0.0556 0.0231"/></geometry>
-      <material name="lidar_base_gray"/>
-    </visual>
-    <visual>
-      <origin xyz="0 0 0.0024"/>
-      <geometry><cylinder radius="0.0215" length="0.0182"/></geometry>
+      <!-- CAD also contains the trailing cable, so its total bounds exceed the head. -->
+      <origin xyz="0 0 -0.0298" rpy="0 0 3.14159265359"/>
+      <geometry><mesh filename="package://fwr_bringup/description/rplidar_c1_cad.stl"/></geometry>
       <material name="lidar_dark"/>
     </visual>
     <collision>
@@ -45,37 +59,79 @@
   </link>
   <joint name="laser_front_joint" type="fixed">
     <parent link="base_link"/><child link="laser_front"/>
-    <origin xyz="0.19 0 0.2298" rpy="0 0 0"/>
+    <!-- Physical C1 scan zero faces chassis rear; rotate its frame into +X front. -->
+    <!-- base_link is 32.5 mm above floor, so measured scan z=75 mm is 42.5 mm here. -->
+    <origin xyz="0.21 0 0.0425" rpy="0 0 3.14159265359"/>
+  </joint>
+
+  <!-- Logical IMU axes only: physical mount position is not measured yet. -->
+  <link name="imu_link"/>
+  <joint name="imu_frame_joint" type="fixed"><parent link="base_link"/><child link="imu_link"/>
+    <origin xyz="0 0 0"/>
+  </joint>
+
+  <link name="motor_driver_body">
+    <visual><geometry><mesh filename="package://fwr_bringup/description/at8236_d157b.stl"/></geometry>
+      <material name="electronics_green"/></visual>
+    <collision><geometry><box size="0.050 0.055 0.014"/></geometry></collision>
+    <inertial><mass value="0.08"/><inertia ixx="0.00002137" ixy="0" ixz="0" iyy="0.00001797" iyz="0" izz="0.00003683"/></inertial>
+  </link>
+  <joint name="motor_driver_mount_joint" type="fixed"><parent link="base_link"/><child link="motor_driver_body"/>
+    <origin xyz="-0.07 0 0.1745"/>
+  </joint>
+
+  <!-- Motor/bracket STEP is centered for display. Shaft/mount transforms await CAD. -->
+  <link name="left_motor_bracket">
+    <visual><origin rpy="3.14159265359 0 0"/><geometry><mesh filename="package://fwr_bringup/description/mg513x_motor_bracket.stl"/></geometry>
+      <material name="metal_gray"/></visual>
+    <inertial><mass value="0.4"/><inertia ixx="0.000169" ixy="0" ixz="0" iyy="0.000196" iyz="0" izz="0.000221"/></inertial>
+  </link>
+  <joint name="left_motor_mount_joint" type="fixed"><parent link="base_link"/><child link="left_motor_bracket"/>
+    <origin xyz="-0.13 0.08 0.0175"/>
+  </joint>
+  <link name="right_motor_bracket">
+    <visual><origin rpy="3.14159265359 0 0"/><geometry><mesh filename="package://fwr_bringup/description/mg513x_motor_bracket.stl"/></geometry>
+      <material name="metal_gray"/></visual>
+    <inertial><mass value="0.4"/><inertia ixx="0.000169" ixy="0" ixz="0" iyy="0.000196" iyz="0" izz="0.000221"/></inertial>
+  </link>
+  <joint name="right_motor_mount_joint" type="fixed"><parent link="base_link"/><child link="right_motor_bracket"/>
+    <origin xyz="-0.13 -0.08 0.0175" rpy="0 0 3.14159265359"/>
   </joint>
 
   <link name="left_drive_wheel">
-    <visual><origin rpy="1.57079632679 0 0"/><geometry><cylinder radius="0.05" length="0.035"/></geometry><material name="wheel_dark"/></visual>
+    <visual><origin rpy="1.57079632679 0 0"/><geometry><cylinder radius="0.0325" length="0.035"/></geometry><material name="wheel_dark"/></visual>
+    <collision><origin rpy="1.57079632679 0 0"/><geometry><cylinder radius="0.0325" length="0.035"/></geometry></collision>
+    <inertial><mass value="0.25"/><inertia ixx="0.0000915" ixy="0" ixz="0" iyy="0.0001320" iyz="0" izz="0.0000915"/></inertial>
   </link>
   <joint name="left_drive_wheel_preview_joint" type="continuous">
     <parent link="base_link"/><child link="left_drive_wheel"/>
-    <origin xyz="-0.13 0.145 0.05"/>
+    <origin xyz="-0.13 0.1575 0"/>
     <axis xyz="0 1 0"/>
   </joint>
 
   <link name="right_drive_wheel">
-    <visual><origin rpy="1.57079632679 0 0"/><geometry><cylinder radius="0.05" length="0.035"/></geometry><material name="wheel_dark"/></visual>
+    <visual><origin rpy="1.57079632679 0 0"/><geometry><cylinder radius="0.0325" length="0.035"/></geometry><material name="wheel_dark"/></visual>
+    <collision><origin rpy="1.57079632679 0 0"/><geometry><cylinder radius="0.0325" length="0.035"/></geometry></collision>
+    <inertial><mass value="0.25"/><inertia ixx="0.0000915" ixy="0" ixz="0" iyy="0.0001320" iyz="0" izz="0.0000915"/></inertial>
   </link>
   <joint name="right_drive_wheel_preview_joint" type="continuous">
     <parent link="base_link"/><child link="right_drive_wheel"/>
-    <origin xyz="-0.13 -0.145 0.05"/>
+    <origin xyz="-0.13 -0.1575 0"/>
     <axis xyz="0 1 0"/>
   </joint>
 
   <link name="front_left_caster_swivel">
     <visual><origin xyz="0 0 -0.015"/><geometry><cylinder radius="0.012" length="0.05"/></geometry><material name="caster_gray"/></visual>
+    <inertial><origin xyz="0 0 -0.015"/><mass value="0.05"/><inertia ixx="0.0000122" ixy="0" ixz="0" iyy="0.0000122" iyz="0" izz="0.0000036"/></inertial>
   </link>
   <joint name="front_left_caster_steer_joint" type="continuous">
     <parent link="base_link"/><child link="front_left_caster_swivel"/>
-    <origin xyz="0.19 0.115 0.09"/>
+    <origin xyz="0.19 0.115 0.0575"/>
     <axis xyz="0 0 1"/>
   </joint>
   <link name="front_left_caster_wheel">
     <visual><origin rpy="1.57079632679 0 0"/><geometry><cylinder radius="0.04" length="0.025"/></geometry><material name="caster_gray"/></visual>
+    <inertial><mass value="0.08"/><inertia ixx="0.0000362" ixy="0" ixz="0" iyy="0.000064" iyz="0" izz="0.0000362"/></inertial>
   </link>
   <joint name="front_left_caster_roll_joint" type="continuous">
     <parent link="front_left_caster_swivel"/><child link="front_left_caster_wheel"/>
@@ -85,14 +141,16 @@
 
   <link name="front_right_caster_swivel">
     <visual><origin xyz="0 0 -0.015"/><geometry><cylinder radius="0.012" length="0.05"/></geometry><material name="caster_gray"/></visual>
+    <inertial><origin xyz="0 0 -0.015"/><mass value="0.05"/><inertia ixx="0.0000122" ixy="0" ixz="0" iyy="0.0000122" iyz="0" izz="0.0000036"/></inertial>
   </link>
   <joint name="front_right_caster_steer_joint" type="continuous">
     <parent link="base_link"/><child link="front_right_caster_swivel"/>
-    <origin xyz="0.19 -0.115 0.09"/>
+    <origin xyz="0.19 -0.115 0.0575"/>
     <axis xyz="0 0 1"/>
   </joint>
   <link name="front_right_caster_wheel">
     <visual><origin rpy="1.57079632679 0 0"/><geometry><cylinder radius="0.04" length="0.025"/></geometry><material name="caster_gray"/></visual>
+    <inertial><mass value="0.08"/><inertia ixx="0.0000362" ixy="0" ixz="0" iyy="0.000064" iyz="0" izz="0.0000362"/></inertial>
   </link>
   <joint name="front_right_caster_roll_joint" type="continuous">
     <parent link="front_right_caster_swivel"/><child link="front_right_caster_wheel"/>

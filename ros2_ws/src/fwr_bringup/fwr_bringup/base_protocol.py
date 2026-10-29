@@ -52,7 +52,7 @@ def parse_state_line(line: str) -> BaseState | None:
 
 
 def encode_wheel_speed(left_mm_s: float, right_mm_s: float) -> bytes:
-    if not all(math.isfinite(value) and abs(value) <= 100
+    if not all(math.isfinite(value) and abs(value) <= 300
                for value in (left_mm_s, right_mm_s)):
-        raise ValueError('wheel speed must be finite and within ±100 mm/s')
+        raise ValueError('wheel speed must be finite and within ±300 mm/s')
     return f'v {left_mm_s:.3f} {right_mm_s:.3f}\n'.encode('ascii')

@@ -13,7 +13,7 @@ class TrackPoint:
 
 
 class RecentTrack:
-    def __init__(self, max_age_s=5., max_length_m=1.):
+    def __init__(self, max_age_s=25., max_length_m=1.):
         self.points = deque()
         self.max_age_s = max_age_s
         self.max_length_m = max_length_m
@@ -34,6 +34,13 @@ class RecentTrack:
             self.points.clear()
         if not self.points or math.dist((point.x, point.y), (self.points[-1].x, self.points[-1].y)) >= .01:
             self.points.append(point)
+        else:
+            # A stationary odometry stream must keep the current pose fresh
+            # while Nav2 waits for its progress checker, without inventing
+            # distance or discarding the previously driven reverse path. Keep
+            # the recorded coordinates so sub-centimetre steps accumulate.
+            last = self.points[-1]
+            self.points[-1] = TrackPoint(last.x, last.y, last.yaw, now_s)
         while len(self.points) > 1 and now_s - self.points[0].at > self.max_age_s:
             self.points.popleft()
         length = 0.
@@ -43,3 +50,19 @@ class RecentTrack:
             a, b = self.points[0], self.points[1]
             length -= math.dist((a.x, a.y), (b.x, b.y))
             self.points.popleft()
+
+    def transformed(self, frame_id, tx, ty, yaw):
+        """Convert a stored odom path with one current rigid transform.
+
+        SLAM may refine map->odom while recording. Applying one transform to
+        the entire path preserves the odometry distances and continuity.
+        """
+        result = RecentTrack(self.max_age_s, self.max_length_m)
+        result.frame_id = frame_id
+        co, si = math.cos(yaw), math.sin(yaw)
+        result.points.extend(TrackPoint(tx + co*p.x - si*p.y,
+                                        ty + si*p.x + co*p.y,
+                                        math.atan2(math.sin(p.yaw + yaw),
+                                                   math.cos(p.yaw + yaw)), p.at)
+                             for p in self.points)
+        return result

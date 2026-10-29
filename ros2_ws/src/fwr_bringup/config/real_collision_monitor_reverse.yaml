@@ -1,0 +1,30 @@
+# The front-mounted laser only sees portions of the side/rear zone.
+collision_monitor_reverse:
+  ros__parameters:
+    use_sim_time: false
+    base_frame_id: base_footprint
+    odom_frame_id: odom
+    cmd_vel_in_topic: /cmd_vel_auto_unchecked
+    cmd_vel_out_topic: /cmd_vel_auto_reverse_filtered
+    transform_tolerance: 0.2
+    # 雷达扫描的 header 时间是扫描起始时刻，实际到达时已 0.25–0.36 s 旧；
+    # 0.25 s 会间歇性整帧丢弃，导致安全层时有时无。
+    source_timeout: 0.6
+    base_shift_correction: true
+    stop_pub_timeout: 18.0
+    polygons: [rear_visible_stop]
+    # 同样只保留车尾外缘的 0.15 m 深度，避免原地转向时被车尾扇区误停。
+    rear_visible_stop:
+      type: polygon
+      points: [-0.30, 0.30, -0.45, 0.30, -0.45, -0.30, -0.30, -0.30]
+      action_type: stop
+      # 与正向一致：容忍噪点，3 点才停
+      max_points: 3
+      visualize: true
+      polygon_pub_topic: /collision_monitor_reverse/rear_visible_stop
+      enabled: true
+    observation_sources: [scan]
+    scan:
+      type: scan
+      topic: /scan
+      enabled: true

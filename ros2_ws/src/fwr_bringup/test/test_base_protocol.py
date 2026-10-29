@@ -31,7 +31,7 @@ def test_version_handshake_accepts_only_v2():
     assert parse_handshake('BASE_CONTROL_V1') is False
 
 
-@pytest.mark.parametrize('value', [math.nan, math.inf, -math.inf, 100.01, -100.01])
+@pytest.mark.parametrize('value', [math.nan, math.inf, -math.inf, 300.01, -300.01])
 def test_wheel_speed_rejects_nonfinite_and_out_of_range(value):
     with pytest.raises(ValueError):
         encode_wheel_speed(value, 0)

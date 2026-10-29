@@ -51,3 +51,30 @@ def test_keeps_current_goal_when_new_candidate_not_twenty_percent_better():
     m = open_map()
     first = choose_frontier(m, robot(1., 1.5), set(), None)
     assert choose_frontier(m, robot(1.01, 1.5), set(), first).grid_index == first.grid_index
+
+
+def test_robot_footprint_self_occlusion_does_not_block_frontier_search():
+    m = open_map()
+    # The front-mounted scanner does not observe some cells under the robot.
+    for y in range(12, 19):
+        for x in range(7, 11):
+            m.data[y * 30 + x] = -1
+    goal = choose_frontier(m, robot(1., 1.5), set(), None)
+    assert goal is not None
+    assert goal.x > 1.3
+
+
+def test_frontier_goal_is_forward_of_robot_for_forward_only_controller():
+    m = open_map()
+    for y in range(12, 19):
+        m.data[y * 30 + 3] = -1
+    goal = choose_frontier(m, robot(1., 1.5), set(), None)
+    assert goal is not None
+    assert goal.x > 1.2
+
+
+def test_frontier_goal_exceeds_nav2_goal_tolerance():
+    m = open_map()
+    pose = robot(1.5, 1.5)
+    goal = choose_frontier(m, pose, set(), None)
+    assert goal is None or ((goal.x - 1.5)**2 + (goal.y - 1.5)**2)**.5 >= .5

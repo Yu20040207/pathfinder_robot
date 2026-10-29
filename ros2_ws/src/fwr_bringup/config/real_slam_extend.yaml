@@ -1,0 +1,29 @@
+slam_toolbox:
+  ros__parameters:
+    use_sim_time: false
+    map_frame: map
+    odom_frame: odom
+    base_frame: base_footprint
+    scan_topic: /scan_mapping
+    mode: mapping
+    # 加载建图时序列化的 posegraph（不含扩展名）
+    map_file_name: /home/manbaout/Company_Project/Four-wheel-robot/ros2_ws/src/fwr_bringup/maps/real_map_2026-10-28
+    # 车在旧图中的起始位姿（扩建时必须有，否则节点报错退出）。
+    map_start_pose: [-0.742, 4.596, -0.729]
+    # 车在 SLAM 地图里的起始位姿；换位置启动时要同步改这里。
+
+    resolution: 0.05
+    min_laser_range: 0.12
+    max_laser_range: 12.0
+    minimum_travel_distance: 0.1
+    minimum_travel_heading: 0.1
+    transform_timeout: 0.2
+    tf_buffer_duration: 30.0
+    map_update_interval: 0.5
+    throttle_scans: 1
+    do_loop_closing: true
+    loop_search_maximum_distance: 4.0
+    loop_match_minimum_chain_size: 10
+    loop_match_maximum_variance_coarse: 3.0
+    loop_match_minimum_response_coarse: 0.35
+    loop_match_minimum_response_fine: 0.45

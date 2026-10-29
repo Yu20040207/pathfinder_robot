@@ -1,0 +1,6 @@
+frontier_explorer:
+  ros__parameters:
+    use_sim_time: false
+    supervised_recovery_enabled: false
+    max_trial_duration_s: 120.0
+    max_fixed_goal_distance_m: 0.0

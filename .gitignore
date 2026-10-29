@@ -13,7 +13,19 @@ log/
 ros2_ws/build/
 ros2_ws/install/
 ros2_ws/log/
+ros2_ws/src/sllidar_ros2/
+firmware/**/sdkconfig
+firmware/**/sdkconfig.old
 ascam_ros2_ws/
 data/
 models/
 .superpowers/
+
+# 地图备份与 slam_toolbox 序列化产物（体积大、可重新生成；栅格图 .pgm/.yaml 仍入库）
+*.bak
+*.posegraph
+*.data
+
+# 第三方源码（各自是独立 git 仓库，clone 后单独放置；补丁见 patches/）
+ros2_ws/src/m-explore-ros2/
+ros2_ws/src/map_edit/

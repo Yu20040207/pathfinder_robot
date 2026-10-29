@@ -47,6 +47,28 @@ Visualization Manager:
       Color: 255; 80; 50
       Decay Time: 0.2
       Value: true
+    - Class: rviz_default_plugins/LaserScan
+      Name: Front and side mapping scan
+      Enabled: true
+      Topic:
+        Value: /scan_mapping
+        Reliability Policy: Best Effort
+      Style: Flat Squares
+      Size (Pixels): 4
+      Color Transformer: FlatColor
+      Color: 40; 220; 90
+      Decay Time: 0.2
+      Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Name: 房间标号
+      Enabled: true
+      Topic:
+        Depth: 5
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /room_labels
+      Value: true
     - Class: rviz_default_plugins/TF
       Name: TF
       Enabled: true
@@ -61,6 +83,9 @@ Visualization Manager:
   Tools:
     - Class: rviz_default_plugins/Interact
     - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/SetInitialPose
+    - Class: rviz_default_plugins/PublishPoint
+      Topic: /clicked_point
   Value: true
   Views:
     Current:

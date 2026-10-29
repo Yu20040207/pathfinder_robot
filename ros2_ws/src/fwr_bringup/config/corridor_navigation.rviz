@@ -4,7 +4,7 @@ Panels:
   - Class: rviz_common/Views
     Name: Views
   - Class: fwr_rviz_nav/TwoPointNavPanel
-    Name: 两点导航
+    Name: 单点/两点导航
 Visualization Manager:
   Class: ""
   Displays:

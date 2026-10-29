@@ -46,7 +46,9 @@ class WheelOdometryNode(Node):
     def __init__(self) -> None:
         super().__init__('wheel_odometry')
         self.declare_parameter('device', DEFAULT_DEVICE)
-        self.declare_parameter('wheel_circumference_m', 0.210)
+        # 2026-10-28 实测标定：1.500 m 实地距离，三次里程计读数 1.568/1.571/1.557（均值 1.5653），
+        # 尺度系数 1.500/1.5653 = 0.9583 → 0.210*0.9583 = 0.2012（原名义值 0.210 偏大 4.3%）。
+        self.declare_parameter('wheel_circumference_m', 0.2012)
         self.declare_parameter('wheel_track_m', 0.263)
         self.declare_parameter('counts_per_revolution', 1468)
         self.declare_parameter('poll_rate_hz', 10.0)
