@@ -19,7 +19,7 @@ def generate_launch_description():
         DeclareLaunchArgument('lidar_port', default_value='/dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_Controller_e00aaf475431f111b7818c5f30d20014-if00-port0'),
         DeclareLaunchArgument('start_imu', default_value='true'),
         # IMU 航向尺度修正：2026-10-30 雷达互相关标定（转一圈 355.04° vs 真值 359.55°）
-        DeclareLaunchArgument('imu_yaw_scale', default_value='1.0'),   # 1.0127 待充分验证
+        DeclareLaunchArgument('imu_yaw_scale', default_value='1.019'),  # 2026-10-30 雷达互相关实测
         DeclareLaunchArgument('start_slam', default_value='true'),
         DeclareLaunchArgument('slam_executable', default_value='async_slam_toolbox_node'),
         DeclareLaunchArgument('slam_params',

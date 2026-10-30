@@ -131,6 +131,13 @@ class DmImuNode(Node):
         # Axis mounting and world-frame convention are not calibrated yet.
         msg.orientation_covariance[0] = -1.0
         msg.angular_velocity.x, msg.angular_velocity.y, msg.angular_velocity.z = self._gyro
+        if self._yaw_scale != 1.0:
+            # 2026-10-30 雷达互相关实测（残差 2.3 cm，转一圈真值 362.58°）：
+            #   原始陀螺积分 355.84° → 少算 1.86%
+            #   AHRS 姿态积分 355.06° → 少算 2.07%
+            # EKF 读的是 /imu/data_raw，只用 vyaw，所以必须在这里修正，
+            # 否则转弯时航向累积误差（120° → 4 米外偏 15 cm）。
+            msg.angular_velocity.z *= self._yaw_scale
         msg.linear_acceleration.x, msg.linear_acceleration.y, msg.linear_acceleration.z = self._accel
         # Zero covariance means unknown. Set measured covariances before EKF fusion.
         self._publisher.publish(msg)
