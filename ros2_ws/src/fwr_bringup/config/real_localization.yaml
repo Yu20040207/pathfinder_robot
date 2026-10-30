@@ -8,17 +8,18 @@ amcl:
     tf_broadcast: true
     robot_model_type: nav2_amcl::DifferentialMotionModel
     laser_model_type: likelihood_field
-    # 走廊等重复结构下 500–2000 粒子容易落到错误极值；加大粒子数与观测数量，
-    # 并打开 AMCL 自带的随机粒子注入（recovery_alpha_*），让错误收敛能自己爬回来。
+    # 2026-10-30：房间结构重复时，"随机粒子注入"（recovery_alpha_*）会把粒子撒到
+    # 别的地方，表现为**车没动位姿却跳了几米**。这里关掉随机注入，靠里程计+扫描维持，
+    # 位姿真丢了就重新播种（tools/seed_amcl.py）。
     min_particles: 1000
     max_particles: 5000
     max_beams: 120
     laser_min_range: 0.12
     laser_max_range: 8.0
-    recovery_alpha_slow: 0.001
-    recovery_alpha_fast: 0.1
-    update_min_d: 0.05
-    update_min_a: 0.05
+    recovery_alpha_slow: 0.0
+    recovery_alpha_fast: 0.0
+    update_min_d: 0.10
+    update_min_a: 0.10
     transform_tolerance: 0.5
     set_initial_pose: false
 

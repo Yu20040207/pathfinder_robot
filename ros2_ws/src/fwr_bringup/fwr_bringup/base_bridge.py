@@ -121,12 +121,34 @@ class BaseBridgeNode(Node):
             self._stopped_at = None
 
     def _arm_auto(self, _, response):
-        now = time.monotonic()
-        healthy = (self._core.ready(now) and self._sensors_ready(now) and
-                   not bool(self.get_parameter('manual_enabled').value))
-        self._auto_armed = healthy
-        response.success = healthy
-        response.message = 'armed' if healthy else 'base/sensors unavailable'
+        # 2026-10-30：面板的“开门 → 授权”是两次独立的服务调用，参数生效有几十毫秒
+        # 的延迟；原来一次性判断，导致第二次点导航常常报 preflight failed: arm。
+        # 这里改成最多等 1.5 s 再给结论。
+        deadline = time.monotonic() + 1.5
+        reason = 'base/sensors unavailable'
+        while True:
+            now = time.monotonic()
+            if not self._core.ready(now):
+                reason = 'serial not ready'
+            elif not self._sensors_ready(now):
+                reason = 'scan/imu not fresh'
+            elif bool(self.get_parameter('manual_enabled').value):
+                reason = 'manual enabled'
+            else:
+                self._auto_armed = True
+                # 关键：清掉“stopped 已持续多久”的计时器。
+                # 空闲时 frontier_explorer 一直发 stopped，若不清零，授权后下一个 tick
+                # 立即判定“stopped 已超过 3 秒” → 刚授权就被撤销（2026-10-30 实测）。
+                self._stopped_at = None
+                response.success = True
+                response.message = 'armed'
+                return response
+            if now >= deadline:
+                break
+            time.sleep(0.03)
+        self._auto_armed = False
+        response.success = False
+        response.message = reason
         return response
 
     def _clear_fault(self, _, response):

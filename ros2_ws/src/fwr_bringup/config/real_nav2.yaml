@@ -96,23 +96,31 @@ controller_server:
       # 角度阈值放大到 80°：只有接近反向时才原地转，其余情况走弧线。
       # 2026-10-29：1.4 rad(80°) 意味着只有偏得离谱才原地先转向；
       # 窄处/贴障碍时改成 0.6 rad(34°) 先转向再走，避免直接顶上去报 collision。
-      angular_dist_threshold: 0.6
+      # 2026-10-30：0.6 rad(34°) 太敏感——路径一转弯就原地转，用户反馈“转向太过头”。
+      # 恢复 1.2 rad(69°)：普通绕障边走边转，只有大偏差才原地对准。
+      angular_dist_threshold: 1.2
       forward_sampling_distance: 0.30
       rotate_to_heading_angular_vel: 0.8
       max_angular_accel: 3.0
       simulate_ahead_time: 1.0
       rotate_to_goal_heading: false
-      desired_linear_vel: 0.18
-      lookahead_dist: 0.30
-      min_lookahead_dist: 0.20
-      max_lookahead_dist: 0.50
+      # 2026-10-30：原 0.06 m/s 太慢（建图时设的），导航恢复 0.15。
+      desired_linear_vel: 0.15
+      # 前视距离必须大于车长（0.60 m）才有稳定裕度：
+      # 0.30 m 时车头前方只有半个车身，微小横向误差就产生大角速度 → 左右摆动。
+      lookahead_dist: 0.55
+      min_lookahead_dist: 0.35
+      max_lookahead_dist: 0.75
       use_velocity_scaled_lookahead_dist: false
       # Shim 已在路径起步时原地对准航向；RPP 再做一次“转-走-转”会形成
       # 极限环，表现为转弯一顿一顿。路径跟踪只保留前进 + 小角速度修正。
       use_rotate_to_heading: false
       rotate_to_heading_min_angle: 0.35
       allow_reversing: false
-      use_collision_detection: true
+      # 2026-10-30：局部膨胀 0.20 < 内切半径 0.215，RPP 的碰撞预测频繁误判
+      # （“detected collision ahead!” → patience exceeded → Goal failed）。
+      # 真实障碍由 collision_monitor（原始雷达，30-45 cm 停车区）兜底，关掉 RPP 的重复判定。
+      use_collision_detection: false
       max_allowed_time_to_collision_up_to_carrot: 1.5
       min_approach_linear_velocity: 0.05
       transform_tolerance: 0.2
@@ -141,7 +149,9 @@ local_costmap:
         # 0.45 会让贴墙停车的机器人自身处于致命格（规划直接失败），改 0.30
         # 局部代价地图：0.20（略小于内切半径 0.215，允许贴墙通过；
         # 真实障碍由 collision_monitor 用原始雷达兜底）。
-        inflation_radius: 0.20
+        # 2026-10-30：0.20 时代价梯度过弱 → 规划器贴障碍走 → 碰撞监控停车。
+        # 膨胀是“代价”不是“墙”，0.30 仍可穿过 0.86 m 门（只是代价高）。
+        inflation_radius: 0.30
       obstacle_layer:
         plugin: nav2_costmap_2d::ObstacleLayer
         enabled: true
@@ -208,7 +218,9 @@ global_costmap:
         #   R=0.24 → 0.38 m < 车宽 0.43 m → 过不了门（实测规划失败）
         #   R=0.20 → 0.46 m > 0.43 m → 能过
         # 取 0.20（与局部一致）；真实障碍由 collision_monitor（原始雷达）兜底。
-        inflation_radius: 0.20
+        # 2026-10-30：0.20 时代价梯度过弱 → 规划器贴障碍走 → 碰撞监控停车。
+        # 膨胀是“代价”不是“墙”，0.30 仍可穿过 0.86 m 门（只是代价高）。
+        inflation_radius: 0.30
       always_send_full_costmap: true
       footprint_padding: 0.02
 planner_server:

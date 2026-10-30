@@ -75,8 +75,11 @@ def main():
     msg.pose.pose.orientation.z = math.sin(byaw / 2)
     msg.pose.pose.orientation.w = math.cos(byaw / 2)
     cov = [0.0] * 36
-    cov[0] = cov[7] = 0.25
-    cov[35] = 0.07
+    # 全局匹配结果给中等不确定度：σxy=10 cm、σyaw≈0.1 rad（约 5.7°）。
+    # 给 0 会让粒子云坍缩成一个点、之后再也纠不回来；给太大又会退化成全局定位。
+    cov[0] = 0.10 ** 2
+    cov[7] = 0.10 ** 2
+    cov[35] = 0.10 ** 2
     msg.pose.covariance = cov
     for _ in range(5):
         pub.publish(msg)
