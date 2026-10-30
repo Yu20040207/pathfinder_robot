@@ -35,24 +35,35 @@ class WallFollower(Node):
     def __init__(self) -> None:
         super().__init__('wall_follower')
         self.declare_parameter('side', 'right')          # 贴着哪一侧走
-        self.declare_parameter('target_dist_m', 0.55)
+        # 0.75：0.55 太贴墙（车半宽 0.215 m，实际只剩 0.34 m）
+        self.declare_parameter('target_dist_m', 0.75)
         self.declare_parameter('speed_mps', 0.12)        # 慢一点，扫描更稳
-        self.declare_parameter('turn_rate_rad_s', 0.35)
+        # 0.55：0.35 时避障转弯半径太大（v/ω），窄处绕不开
+        self.declare_parameter('turn_rate_rad_s', 0.55)
         self.declare_parameter('front_stop_m', 0.60)
-        self.declare_parameter('gain', 1.6)
+        self.declare_parameter('gain', 2.0)
         self.declare_parameter('max_time_s', 300.0)
         self.declare_parameter('loop_close_radius_m', 0.6)
+        # 大范围建图时关掉“回到起点就停”，让它一直沿墙走（靠 max_time 收工）
+        self.declare_parameter('stop_on_loop', True)
         # 自动开门：本节点自己把底盘两道门打开（等价 supervisor 做的事）
         self.declare_parameter('open_gates', True)
         # 2026-10-30 平滑化：不再"停了再转"，改成边走边绕 + 加减速限幅
-        self.declare_parameter('avoid_start_m', 1.10)   # 前方小于这个距离开始绕
+        # 1.45：1.10 时开始绕已经太晚（实测会撞）
+        self.declare_parameter('avoid_start_m', 1.45)   # 前方小于这个距离开始绕
         # 0.50：雷达装在前部，读数 0.50 意味着车头边缘距障碍约 0.41 m；
         # 太小会顶到墙 → 轮子打滑 → 固件失速自停。
-        self.declare_parameter('emergency_m', 0.50)     # 小于这个距离才急停
+        self.declare_parameter('emergency_m', 0.60)     # 小于这个距离才急停
         self.declare_parameter('gap_gain', 1.4)         # 间隙转向权重
-        self.declare_parameter('pivot_m', 0.38)         # 只有小于这个距离才原地转
+        self.declare_parameter('pivot_m', 0.45)
+        # 侧向测距窗口：±50° 会把前方障碍混进来（实测正右 1.68 m 却读成 0.44 m），
+        # 收窄到 ±18° 只测真正的侧墙。
+        self.declare_parameter('side_half_deg', 18.0)    # 侧向测距窗口（度）
         self.declare_parameter('turn_commit_s', 1.5)    # 转向方向锁定时间（防左右抖）
-        self.declare_parameter('arc_min_speed_ratio', 0.35)  # 弧线转弯时最低速度比例
+        # 0.60：实测 0.35（≈4 cm/s）时车轮克服不了静摩擦 → 失速自停反复触发。
+        # 这台车可靠起步速度约 7 cm/s 以上。
+        self.declare_parameter('arc_min_speed_ratio', 0.60)
+        self.declare_parameter('min_speed_mps', 0.07)   # 硬下限，低于它宁可不发
         self.declare_parameter('max_accel_mps2', 0.25)  # 线加速度限幅
         self.declare_parameter('max_alpha_rads2', 1.2)  # 角加速度限幅
 
@@ -81,6 +92,7 @@ class WallFollower(Node):
         self._last_tick = None
         self._turn_dir = 0.0
         self._turn_until = 0.0
+        self._pivot_at = 0.0
 
         q = QoSProfile(depth=5, reliability=ReliabilityPolicy.BEST_EFFORT)
         self.create_subscription(LaserScan, '/scan', self._on_scan, q)
@@ -115,7 +127,9 @@ class WallFollower(Node):
         self._front = min(sector(180.0, 20.0), sector(-180.0, 20.0))
         self._front_left = sector(-150.0, 25.0)     # 车头左侧 30° 左右
         self._front_right = sector(150.0, 25.0)     # 车头右侧
-        self._side_min = sector(-90.0, 50.0) if self._side == 'left' else sector(90.0, 50.0)
+        side_half = float(self.get_parameter('side_half_deg').value)
+        self._side_min = (sector(-90.0, side_half) if self._side == 'left'
+                          else sector(90.0, side_half))
 
     def _on_odom(self, msg: Odometry) -> None:
         p = msg.pose.pose.position
@@ -130,7 +144,8 @@ class WallFollower(Node):
         elapsed = (self.get_clock().now().nanoseconds * 1e-9) - (self._started_at or 0.0)
         # 闭环：走回起点附近且已经离开过一段时间
         # 闭环必须建立在"确实走过一圈"之上：累计路程够长 + 回到起点 + 转够了方向
-        if (not self._done and moved < self._loop_r and
+        if (bool(self.get_parameter('stop_on_loop').value) and
+                not self._done and moved < self._loop_r and
                 self._travelled > 6.0 and self._turned > 8.0 and elapsed > 30.0):
             self.get_logger().info(
                 f'沿墙建图：回到起点附近（走了 {self._travelled:.1f} m），闭环完成')
@@ -177,9 +192,9 @@ class WallFollower(Node):
             self._recover_stage = 4
             return
         if self._recover_stage == 4 and st > 4.2:
-            # 倒车脱困
+            # 原地转脱困：车尾是盲区，绝不倒车（实测倒车会撞后方墙面）
             twist = Twist()
-            twist.linear.x = -self._speed
+            twist.angular.z = (1.0 if self._side == 'right' else -1.0) * self._turn
             self._pub.publish(twist)
             return
         if self._recover_stage == 4 and st > 5.2:
@@ -273,9 +288,14 @@ class WallFollower(Node):
         rf = self._front_right if math.isfinite(self._front_right) else 3.0
 
         if self._front <= pivot_m:
-            # ② 贴脸：原地转（必须），方向沿用已锁定方向
+            # ② 贴脸：原地转。转 3 秒还不开就换方向（避免一直朝墙里转）
             if self._turn_dir == 0.0:
                 self._turn_dir = 1.0 if lf >= rf else -1.0
+                self._pivot_at = now
+            elif now - self._pivot_at > 3.0:
+                self._turn_dir = -self._turn_dir
+                self._pivot_at = now
+                self.get_logger().info('原地转 3 秒未脱困，换方向转')
             v = 0.0
             omega = self._turn_dir * self._turn
         elif self._front < avoid_start:
@@ -300,6 +320,11 @@ class WallFollower(Node):
             v = self._speed
 
         omega = max(-self._turn, min(self._turn, omega))
+        # 硬下限：低速指令会让轮子卡在静摩擦里 → 固件判失速。
+        # 要么给到能转起来的速度，要么干脆停（给 0）。
+        min_v = float(self.get_parameter('min_speed_mps').value)
+        if v > 1e-3 and v < min_v:
+            v = min_v
 
         # ---------- 加减速限幅（消除一卡一卡） ----------
         dt = 0.05 if self._last_tick is None else max(0.01, now - self._last_tick)

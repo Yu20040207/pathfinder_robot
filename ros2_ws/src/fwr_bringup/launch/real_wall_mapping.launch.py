@@ -26,7 +26,9 @@ def generate_launch_description():
         DeclareLaunchArgument('use_sim_time', default_value='false'),
         DeclareLaunchArgument('side', default_value='right'),
         DeclareLaunchArgument('speed', default_value='0.12'),
-        DeclareLaunchArgument('target_dist', default_value='0.55'),
+        DeclareLaunchArgument('target_dist', default_value='0.75'),
+        DeclareLaunchArgument('max_time', default_value='600.0'),
+        DeclareLaunchArgument('stop_on_loop', default_value='true'),
         # 建图栈：底盘 + 雷达 + IMU + EKF + Cartographer + 栅格发布
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
@@ -38,5 +40,7 @@ def generate_launch_description():
              parameters=[{'use_sim_time': use_sim_time,
                           'side': LaunchConfiguration('side'),
                           'speed_mps': LaunchConfiguration('speed'),
-                          'target_dist_m': LaunchConfiguration('target_dist')}]),
+                          'target_dist_m': LaunchConfiguration('target_dist'),
+                          'max_time_s': LaunchConfiguration('max_time'),
+                          'stop_on_loop': LaunchConfiguration('stop_on_loop')}]),
     ])
