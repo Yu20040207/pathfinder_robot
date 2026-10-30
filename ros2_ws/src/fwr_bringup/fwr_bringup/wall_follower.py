@@ -67,6 +67,11 @@ class WallFollower(Node):
         # 这台车可靠起步速度约 7 cm/s 以上。
         self.declare_parameter('arc_min_speed_ratio', 0.60)
         self.declare_parameter('min_speed_mps', 0.07)   # 硬下限，低于它宁可不发
+        # 2026-10-30：车尾是盲区，但地图里后方刚走过=空闲。倒车前查地图。
+        self.declare_parameter('rear_check_m', 0.90)    # 检查后方多远的格子
+        self.declare_parameter('rear_half_width_m', 0.28)
+        self.declare_parameter('reverse_speed_mps', 0.07)
+        self.declare_parameter('reverse_time_s', 2.2)
         self.declare_parameter('max_accel_mps2', 0.25)  # 线加速度限幅
         self.declare_parameter('max_alpha_rads2', 1.2)  # 角加速度限幅
 
@@ -100,6 +105,9 @@ class WallFollower(Node):
         self._turn_until = 0.0
         self._pivot_at = 0.0
         self._enter_at = 0.0
+        self._reverse_until = 0.0
+        # 刚走过的轨迹（倒车沿原路退回，走过的地方必然空闲）
+        self._trail = []
 
         q = QoSProfile(depth=5, reliability=ReliabilityPolicy.BEST_EFFORT)
         self.create_subscription(LaserScan, '/scan', self._on_scan, q)
@@ -155,6 +163,11 @@ class WallFollower(Node):
             self._narrow_logged = False
             self.get_logger().info(f'换贴墙侧 → {self._side}（已走 {self._travelled:.1f} m）')
         self._last_xy = (p.x, p.y)
+        if not self._trail or math.hypot(p.x - self._trail[-1][0],
+                                         p.y - self._trail[-1][1]) > 0.05:
+            self._trail.append((p.x, p.y))
+            if len(self._trail) > 400:
+                self._trail = self._trail[-400:]
         if self._start is None:
             self._start = (p.x, p.y)
             return
@@ -168,6 +181,26 @@ class WallFollower(Node):
             self.get_logger().info(
                 f'沿墙建图：回到起点附近（走了 {self._travelled:.1f} m），闭环完成')
             self._done = True
+
+    def _rear_clear(self) -> bool:
+        """后方能不能退：沿刚走过的航迹退还剩多少路。
+
+        2026-10-30：原来用 /map + TF 判断后方空闲，OccupancyGrid 有 9 万格，
+        每秒在 Python 里重建对象把 wall_follower 顶到 276% CPU，拖垮雷达和建图。
+        改成看自己的航迹：只要「刚走过的路」还够长，沿原路退就必然安全。
+        """
+        need = float(self.get_parameter('rear_check_m').value)
+        if len(self._trail) < 2:
+            return False
+        # 从当前位置沿航迹往回累计距离
+        dist = 0.0
+        ax, ay = self._trail[-1]
+        for (bx, by) in reversed(self._trail[:-1]):
+            dist += math.hypot(ax - bx, ay - by)
+            ax, ay = bx, by
+            if dist >= need:
+                return True
+        return False
 
     # ---------- 控制 ----------
     def _on_fault(self, msg: Int32) -> None:
@@ -272,6 +305,10 @@ class WallFollower(Node):
             if now - self._gates_at > 2.0 and now - self._gates_at < 2.2:
                 self._open_gates()
             return
+        if now < self._reverse_until:
+            twist.linear.x = -float(self.get_parameter('reverse_speed_mps').value)
+            self._pub.publish(twist)
+            return
         if self._recover_stage == 0 and self._fault not in (0, None):
             self._recover_fault(now)
             return
@@ -313,6 +350,9 @@ class WallFollower(Node):
             self._pub.publish(twist)
             return
         self._enter_at = 0.0
+        self._reverse_until = 0.0
+        # 刚走过的轨迹（倒车沿原路退回，走过的地方必然空闲）
+        self._trail = []
 
         # ① 沿墙保持项
         #   2026-10-30：固定 0.75 m 在 0.86 m 门洞里必然撞门框（想离右墙 0.75，
@@ -337,14 +377,50 @@ class WallFollower(Node):
         rf = self._front_right if math.isfinite(self._front_right) else 3.0
 
         if self._front <= pivot_m:
-            # ② 贴脸：原地转。转 3 秒还不开就换方向（避免一直朝墙里转）
-            if self._turn_dir == 0.0:
-                self._turn_dir = 1.0 if lf >= rf else -1.0
+            # ② 墙角脱困：只朝"空档大的一侧"单向转，不再左右来回换向。
+            #    2026-10-30：原来每 3 秒换方向 → 在墙角左右摆动死锁。
+            # 注意：_turn_dir 可能已由“进洞/避障”分支设过非 0 值，
+            # 此时必须用 _pivot_at==0 来判断“刚进入脱困”，否则计时基准是 0
+            # 会让“转 25 秒”立刻成立（ROS 时间是 1.79e9 量级）。
+            if self._pivot_at == 0.0:
+                if self._turn_dir == 0.0:
+                    self._turn_dir = 1.0 if lf >= rf else -1.0
                 self._pivot_at = now
-            elif now - self._pivot_at > 3.0:
-                self._turn_dir = -self._turn_dir
-                self._pivot_at = now
-                self.get_logger().info('原地转 3 秒未脱困，换方向转')
+                self.get_logger().info(
+                    f'贴障脱困：朝{"左" if self._turn_dir > 0 else "右"}单向转 '
+                    f'(前 {self._front:.2f} 左 {lf:.2f} 右 {rf:.2f})')
+            if (now - self._pivot_at > 6.0 and
+                    now >= self._reverse_until and
+                    self._rear_clear()):
+                self.get_logger().info('后方地图确认空闲，倒车脱困')
+                self._reverse_until = now + float(
+                    self.get_parameter('reverse_time_s').value)
+                self._turn_dir = 0.0
+                self._pivot_at = 0.0
+                return
+            if now - self._pivot_at > 25.0:
+                self.get_logger().error(
+                    '原地转 25 秒仍未脱困，停止并等待人工处理')
+                self._pub.publish(Twist())
+                self._done = True
+                return
+            # 旋转过程中一旦某一侧出现空档，就立刻朝那边走出去，不要死转
+            free_side = 0.0
+            if lf > 0.90 and lf > rf:
+                free_side = 1.0
+            elif rf > 0.90 and rf > lf:
+                free_side = -1.0
+            if free_side != 0.0:
+                self._pub.publish(Twist())
+                self._turn_dir = 0.0
+                self._pivot_at = 0.0
+                self.get_logger().info(
+                    f'侧向出现空档（左 {lf:.2f} 右 {rf:.2f}），改为朝空档走')
+                twist.linear.x = max(float(self.get_parameter('min_speed_mps').value),
+                                     self._speed * 0.7)
+                twist.angular.z = free_side * self._turn * 0.9
+                self._pub.publish(twist)
+                return
             v = 0.0
             omega = self._turn_dir * self._turn
         elif self._front < avoid_start:
