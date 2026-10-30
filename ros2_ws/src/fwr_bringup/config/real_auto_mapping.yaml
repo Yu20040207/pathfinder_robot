@@ -3,13 +3,21 @@ explore_node:
   ros__parameters:
     robot_base_frame: base_footprint
     return_to_init: false
-    costmap_topic: map
+    # 用中继后的地图：机器人脚下那一片被强制标成空闲，
+    # 否则 explore 报 `Could not find nearby clear cell` 直接放弃。
+    costmap_topic: /map_explore
     costmap_updates_topic: map_updates
     visualize: true
     planner_frequency: 1.0
-    progress_timeout: 30.0
-    potential_scale: 3.0
+    progress_timeout: 20.0
+    # 2026-10-30 效率调参：
+    #   potential_scale 降低 → 不那么偏好"最近"的前沿，减少在同一房间来回绕圈
+    #   gain_scale 提高   → 更愿意去"能揭开大片未知区域"的前沿
+    #   min_frontier_size 提高 → 忽略犄角旮旯的小前沿，减少无意义折返
+    potential_scale: 1.0
     orientation_scale: 0.0
-    gain_scale: 1.0
+    gain_scale: 3.0
     transform_tolerance: 0.3
-    min_frontier_size: 0.6
+    # 0.4：实测当前地图最大前沿只有 0.65 m，阈值 0.8 m 会一个都不过 → 探索立刻放弃。
+    # Cartographer 的地图比较保守、前沿碎，阈值必须小一点。
+    min_frontier_size: 0.4

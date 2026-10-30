@@ -31,6 +31,9 @@ def generate_launch_description():
         DeclareLaunchArgument('lidar_port', default_value='/dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_Controller_e00aaf475431f111b7818c5f30d20014-if00-port0'),
         DeclareLaunchArgument('start_imu', default_value='true'),
         DeclareLaunchArgument('use_saved_map', default_value='false'),
+        # 2026-10-30：建图引擎可选 slam（slam_toolbox）或 carto（Cartographer）。
+        # 离线 bag 回放对比结论：Cartographer 墙更实（87.7% vs 84%）、方向更一致（6° vs 13.5°）。
+        DeclareLaunchArgument('slam_engine', default_value='slam'),
         # 自动建图时不需要 frontier_explorer（它抢发 /explore/state=stopped 会解除授权）
         DeclareLaunchArgument('start_explorer', default_value='true'),
         # amcl（地图图片）或 slam（slam_toolbox localization + posegraph）
@@ -38,7 +41,18 @@ def generate_launch_description():
         DeclareLaunchArgument('map', default_value=str(share / 'maps' / 'real_map_merged.yaml')),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(str(share / 'launch' / 'real_mapping.launch.py')),
-            condition=UnlessCondition(use_saved_map),
+            condition=IfCondition(PythonExpression(
+                ["'", use_saved_map, "' != 'true' and '",
+                 LaunchConfiguration('slam_engine'), "' != 'carto'"])),
+            launch_arguments={'use_sim_time': use_sim_time,
+                              'lidar_port': LaunchConfiguration('lidar_port'),
+                              'start_imu': LaunchConfiguration('start_imu')}.items()),
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(
+                str(share / 'launch' / 'real_mapping_cartographer.launch.py')),
+            condition=IfCondition(PythonExpression(
+                ["'", use_saved_map, "' != 'true' and '",
+                 LaunchConfiguration('slam_engine'), "' == 'carto'"])),
             launch_arguments={'use_sim_time': use_sim_time,
                               'lidar_port': LaunchConfiguration('lidar_port'),
                               'start_imu': LaunchConfiguration('start_imu')}.items()),
@@ -59,10 +73,14 @@ def generate_launch_description():
                           'static_map': use_saved_map}]),
         # 启动后自动做一次全局雷达匹配并播种 AMCL（手动挪车/重启后的 kidnapped 恢复）。
         # slam localization 模式下每 2 分钟把地图（pgm/yaml + posegraph）存盘。
+        # 2026-10-30：自动存档在建图模式下也要跑（原来只在 slam localization 模式），
+        # 引擎名一起传下去：slam → /serialize_map + /save_map；carto → /write_state。
         Node(package='fwr_bringup', executable='map_autosave', output='screen',
              condition=IfCondition(PythonExpression(
-                 ["'", LaunchConfiguration('localizer'), "' == 'slam'"])),
+                 ["'", use_saved_map, "' != 'true' or '",
+                  LaunchConfiguration('localizer'), "' == 'slam'"])),
              parameters=[{'use_sim_time': use_sim_time,
+                          'engine': LaunchConfiguration('slam_engine'),
                           'map_name': str(share / 'maps' / 'real_map_2026-10-28'),
                           'period_s': 120.0}]),
         # 等 map/scan/地图坐标 TF 都就绪后自动激活导航生命周期，省掉手动 STARTUP。

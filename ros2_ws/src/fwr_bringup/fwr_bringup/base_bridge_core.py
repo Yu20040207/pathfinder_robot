@@ -103,13 +103,18 @@ def forward_only_velocity(v_mps: float, omega_rps: float, track_m: float,
 
 
 def manual_velocity(v_mps: float, omega_rps: float, track_m: float,
-                    max_linear_mps: float = .2) -> bool:
-    """Bound supervised keyboard commands to one low-speed axis at a time."""
+                    max_linear_mps: float = .2,
+                    allow_mixed: bool = False) -> bool:
+    """Bound supervised manual commands.
+
+    默认只允许单轴（键盘安全习惯）；allow_mixed=True 时允许同时给线速度与角速度，
+    供沿墙建图这类需要边走边转的自动轨迹使用（仍受单轮速度包络限制）。
+    """
     if not all(map(math.isfinite, (v_mps, omega_rps))):
         return False
     if abs(v_mps) > max_linear_mps + 1e-6 or abs(omega_rps) > .750001:
         return False
-    if abs(v_mps) > 1e-9 and abs(omega_rps) > 1e-9:
+    if not allow_mixed and abs(v_mps) > 1e-9 and abs(omega_rps) > 1e-9:
         return False
     return max(abs(v_mps - omega_rps * track_m / 2),
                abs(v_mps + omega_rps * track_m / 2)) <= max_linear_mps + 1e-6

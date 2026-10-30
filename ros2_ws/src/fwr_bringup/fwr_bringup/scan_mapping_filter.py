@@ -50,7 +50,11 @@ def filter_scan_message(message: LaserScan, rear_half_angle: float) -> LaserScan
 class ScanMappingFilter(Node):
     def __init__(self):
         super().__init__('scan_mapping_filter')
-        self.declare_parameter('rear_half_angle_rad', math.pi / 2)
+        # 2026-10-30 实测：车身只挡后方 ±45°（扫描角 0° = 车尾，
+        # -45°~+45° 读数为 0.12~0.15 m 的自击，±60° 起是真实距离）。
+        # 原来屏蔽 ±90° 白扔了两侧各 45° 的有效数据；改为 ±55°（留 10° 过渡余量），
+        # 有效视场从 180° 提升到约 250°。
+        self.declare_parameter('rear_half_angle_rad', math.radians(55.0))
         self._half_angle = float(self.get_parameter('rear_half_angle_rad').value)
         if not 0 < self._half_angle < math.pi:
             raise ValueError('rear_half_angle_rad must be between 0 and pi')

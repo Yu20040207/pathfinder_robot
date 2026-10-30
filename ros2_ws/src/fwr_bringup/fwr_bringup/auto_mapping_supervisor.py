@@ -27,10 +27,14 @@ class AutoMappingSupervisor(Node):
         self.declare_parameter('kick_speed_mps', 0.15)
         self.declare_parameter('kick_turn_rad_s', 0.7)
         self.declare_parameter('startup_delay_s', 15.0)
-        self.declare_parameter('front_block_m', 0.7)
+        # 0.45：0.7 在普通房间里会被判成“一直堵”，导致踢一脚反复前进后退
+        self.declare_parameter('front_block_m', 0.45)
         self.declare_parameter('front_clear_m', 1.2)
         self.declare_parameter('legs', 4)
         self.declare_parameter('leg_max_s', 8.0)
+        # 2026-10-30：踢一脚最多跑这么久，超时就交给探索器（否则墙角死循环）
+        self.declare_parameter('kick_timeout_s', 90.0)
+        self.declare_parameter('kick_max_backups', 3)
         self._cmd_manual = self.create_publisher(Twist, '/cmd_vel_manual', 10)
         self._state_pub = self.create_publisher(String, '/explore/state', 10)
         self._pause_pub = self.create_publisher(Bool, '/explore/pause', 10)
@@ -40,6 +44,8 @@ class AutoMappingSupervisor(Node):
         self._phase_at = time.monotonic()
         self._leg_at = 0.0
         self._legs_done = 0
+        self._kick_started_at = None
+        self._backups = 0
         self._last_set_try = 0.0
         self._ready_ok = False
         self._manual_ok = False
@@ -62,9 +68,17 @@ class AutoMappingSupervisor(Node):
         n = len(msg.ranges)
         deg = n / 360.0  # 每度对应索引数
 
+        # 2026-10-30：雷达装在前部，车头前缘只比雷达远约 9 cm，
+        # 因此 /scan 里 0.10~0.15 m 的读数大多是**车身/支架自己**。
+        # 实测：前左 0.105、前右 0.102、左 0.134、右 0.150 m ——
+        # 这些假读数让监督节点误判“被包围”，于是墙角反复前进后退。
+        # 统一忽略 0.20 m 以内的读数（车身内切半径 0.215 m）。
+        SELF_MIN = 0.20
+
         def _min(indices):
             finite = [msg.ranges[i] for i in indices
-                      if 0 <= i < n and math.isfinite(msg.ranges[i]) and msg.ranges[i] > 0.01]
+                      if 0 <= i < n and math.isfinite(msg.ranges[i])
+                      and SELF_MIN < msg.ranges[i]]
             return min(finite) if finite else float('inf')
 
         def sector(center_deg, half_deg):
@@ -150,15 +164,35 @@ class AutoMappingSupervisor(Node):
             self._phase = 'arming'
             self._leg_at = now
             return
+        if self._phase.startswith('kick') and self._kick_started_at is None:
+            self._kick_started_at = now
+        if (self._phase.startswith('kick') and self._kick_started_at is not None and
+                now - self._kick_started_at >
+                float(self.get_parameter('kick_timeout_s').value)):
+            self.get_logger().warn('kickstart: 超时（可能卡在角落），直接交给探索器')
+            self._cmd_manual.publish(Twist())
+            self._phase = 'kick_return'
+            self._leg_at = now
+            self._kick_started_at = None
+            return
         if self._phase == 'kick_back':
             # 三面都堵（墙角/贴墙）：倒车 0.5 m 脱困再重新判断
-            if now - self._leg_at < 3.5:
+            if now - self._leg_at < 6.0:
                 twist = Twist()
                 twist.linear.x = -0.15
                 self._cmd_manual.publish(twist)
                 return
             self._cmd_manual.publish(Twist())
-            self.get_logger().info('kickstart: backed out, re-orienting')
+            self._backups += 1
+            self.get_logger().info(
+                f'kickstart: backed out ({self._backups}/'
+                f'{int(self.get_parameter("kick_max_backups").value)}), re-orienting')
+            if self._backups > int(self.get_parameter('kick_max_backups').value):
+                self.get_logger().warn('kickstart: 倒车次数过多，直接交给探索器')
+                self._phase = 'kick_return'
+                self._leg_at = now
+                self._kick_started_at = None
+                return
             self._phase = 'kick_orient'
             self._leg_at = now
             return

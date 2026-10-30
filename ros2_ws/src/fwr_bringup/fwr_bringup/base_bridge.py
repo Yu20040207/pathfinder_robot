@@ -70,6 +70,8 @@ class BaseBridgeNode(Node):
         self._safe_cmd_zero = True
         self._manual_yaw_rate = ImuYawRateController()
         self.declare_parameter('heading_hold_enabled', True)
+        # 沿墙建图需要“边走边转”，默认关闭以保持键盘单轴习惯
+        self.declare_parameter('manual_allow_mixed', False)
         self.declare_parameter('heading_hold_gain', 1.5)
         self.declare_parameter('heading_hold_limit_rad_s', .12)
         self._heading_hold = HeadingHold(
@@ -275,7 +277,9 @@ class BaseBridgeNode(Node):
             return
         if not self._sensors_ready(now):
             return
-        if not manual_velocity(msg.linear.x, msg.angular.z, self._core.track_m):
+        if not manual_velocity(msg.linear.x, msg.angular.z, self._core.track_m,
+                                allow_mixed=bool(
+                                    self.get_parameter('manual_allow_mixed').value)):
             self._core.halt()
             self.get_logger().warn('Rejected out-of-range manual velocity',
                                    throttle_duration_sec=2.0)

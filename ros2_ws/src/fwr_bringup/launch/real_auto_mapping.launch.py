@@ -21,12 +21,20 @@ def generate_launch_description():
     use_sim_time = LaunchConfiguration('use_sim_time')
     return LaunchDescription([
         DeclareLaunchArgument('use_sim_time', default_value='false'),
+        # slam_engine: carto（默认，推荐） 或 slam
+        DeclareLaunchArgument('slam_engine', default_value='carto'),
         # 建图 + Nav2 + 门控/碰撞监控/方向选择器（复用 real_navigation 的 use_saved_map:=false 分支）
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(str(share / 'launch' / 'real_navigation.launch.py')),
             launch_arguments={'use_saved_map': 'false',
                               'use_sim_time': use_sim_time,
-                              'start_explorer': 'false'}.items()),
+                              'start_explorer': 'false',
+                              # 2026-10-30：离线 bag 对比后确定用 Cartographer
+                              'slam_engine': LaunchConfiguration('slam_engine')}.items()),
+        # 把机器人脚下涂成空闲再给探索器（见节点 docstring）
+        Node(package='fwr_bringup', executable='map_free_around_robot',
+             name='map_free_around_robot', output='screen',
+             parameters=[{'use_sim_time': use_sim_time}]),
         # 前沿探索：向 /navigate_to_pose 发送目标
         Node(package='explore_lite', executable='explore',
              name='explore_node', output='screen',

@@ -14,13 +14,15 @@ def test_saved_map_localization_uses_real_frames_and_filtered_scan():
         'map', 'odom', 'base_footprint')
     assert amcl['scan_topic'] == '/scan_mapping'
     assert amcl['tf_broadcast'] is True
-    # 实机走廊环境：粒子与观测数量要足够，且打开随机粒子注入以便从错误收敛恢复。
+    # 实机走廊环境：粒子与观测数量要足够。
     assert amcl['min_particles'] >= 1000
     assert amcl['max_particles'] >= 4000
     assert amcl['max_beams'] >= 90
     assert amcl['laser_max_range'] <= 8.0
-    assert amcl['recovery_alpha_slow'] > 0.0
-    assert amcl['recovery_alpha_fast'] > 0.0
+    # 2026-10-30 实测：随机粒子注入在结构重复的房间里会让“车没动位姿跳几米”，
+    # 已关闭；位姿丢失改用 tools/seed_amcl.py 重新播种。
+    assert amcl['recovery_alpha_slow'] == 0.0
+    assert amcl['recovery_alpha_fast'] == 0.0
     assert config['map_server']['ros__parameters']['use_sim_time'] is False
 
 
