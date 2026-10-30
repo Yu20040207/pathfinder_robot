@@ -22,6 +22,6 @@ ros2 param set /base_bridge motion_enabled true >/dev/null
 ros2 param set /base_bridge manual_enabled true >/dev/null
 echo "运动门已开（motion_enabled=true, manual_enabled=true）"
 
-# 建图用 0.10 m/s（慢一点地图更稳）；转弯 0.4 rad/s
+# 直行 0.15 m/s（2026-10-30 用户要求提速）；转弯 0.4 rad/s
 exec ros2 run fwr_bringup keyboard_teleop --ros-args \
-     -p forward_speed_mps:=0.10 -p turn_rate_rad_s:=0.4
+     -p forward_speed_mps:=0.15 -p turn_rate_rad_s:=0.4
