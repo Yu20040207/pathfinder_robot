@@ -59,6 +59,9 @@ class WallFollower(Node):
         # 侧向测距窗口：±50° 会把前方障碍混进来（实测正右 1.68 m 却读成 0.44 m），
         # 收窄到 ±18° 只测真正的侧墙。
         self.declare_parameter('side_half_deg', 18.0)    # 侧向测距窗口（度）
+        # 2026-10-30：只贴一侧走，另一侧的门洞永远进不去。
+        # 每走 switch_side_after_m 米换一次贴墙侧（0 = 不换）。
+        self.declare_parameter('switch_side_after_m', 8.0)
         self.declare_parameter('turn_commit_s', 1.5)    # 转向方向锁定时间（防左右抖）
         # 0.60：实测 0.35（≈4 cm/s）时车轮克服不了静摩擦 → 失速自停反复触发。
         # 这台车可靠起步速度约 7 cm/s 以上。
@@ -80,10 +83,13 @@ class WallFollower(Node):
         self._front_left = float('inf')
         self._front_right = float('inf')
         self._side_min = float('inf')
+        self._left_dist = float('inf')
+        self._right_dist = float('inf')
         self._start = None
         self._started_at = None
         self._turned = 0.0
         self._travelled = 0.0
+        self._since_switch = 0.0
         self._last_xy = None
         self._turn_started = None
         self._done = False
@@ -93,6 +99,7 @@ class WallFollower(Node):
         self._turn_dir = 0.0
         self._turn_until = 0.0
         self._pivot_at = 0.0
+        self._enter_at = 0.0
 
         q = QoSProfile(depth=5, reliability=ReliabilityPolicy.BEST_EFFORT)
         self.create_subscription(LaserScan, '/scan', self._on_scan, q)
@@ -124,18 +131,29 @@ class WallFollower(Node):
             return min(vals) if vals else float('inf')
 
         # 雷达倒装：index 0 = 车头；scan 角 ±180 = 正前，-90 = 车左，+90 = 车右
-        self._front = min(sector(180.0, 20.0), sector(-180.0, 20.0))
-        self._front_left = sector(-150.0, 25.0)     # 车头左侧 30° 左右
-        self._front_right = sector(150.0, 25.0)     # 车头右侧
+        # ±35°：±20° 时斜前方 30~60° 的墙看不到，斜着靠近发现太晚 → 撞
+        self._front = min(sector(180.0, 35.0), sector(-180.0, 35.0))
+        self._front_left = sector(-140.0, 40.0)     # 覆盖 100°~180°
+        self._front_right = sector(140.0, 40.0)     # 覆盖 100°~180°
         side_half = float(self.get_parameter('side_half_deg').value)
-        self._side_min = (sector(-90.0, side_half) if self._side == 'left'
-                          else sector(90.0, side_half))
+        self._left_dist = sector(-90.0, side_half)
+        self._right_dist = sector(90.0, side_half)
+        self._side_min = (self._left_dist if self._side == 'left'
+                          else self._right_dist)
 
     def _on_odom(self, msg: Odometry) -> None:
         p = msg.pose.pose.position
-        if self._last_xy is not None:
-            self._travelled += math.hypot(p.x - self._last_xy[0],
-                                          p.y - self._last_xy[1])
+        step = (math.hypot(p.x - self._last_xy[0], p.y - self._last_xy[1])
+                if self._last_xy is not None else 0.0)
+        self._travelled += step
+        self._since_switch += step
+        limit = float(self.get_parameter('switch_side_after_m').value)
+        if limit > 0 and self._since_switch > limit:
+            self._side = 'left' if self._side == 'right' else 'right'
+            self._since_switch = 0.0
+            self._turn_dir = 0.0
+            self._narrow_logged = False
+            self.get_logger().info(f'换贴墙侧 → {self._side}（已走 {self._travelled:.1f} m）')
         self._last_xy = (p.x, p.y)
         if self._start is None:
             self._start = (p.x, p.y)
@@ -278,10 +296,41 @@ class WallFollower(Node):
         arc_ratio = float(self.get_parameter('arc_min_speed_ratio').value)
         side_sign = -1.0 if self._side == 'right' else 1.0   # 贴右墙时"离墙远"要右转
 
+        # ①a 侧面出现门洞/大开口：主动转进去（否则会直接开过去）
+        #     判据：贴墙那一侧测不到墙（或远到 > target+1.2 m），且前方是通的。
+        #     限制：一次最多“进洞”2.5 秒，避免在空旷处一直转圈。
+        if now >= self._turn_until:
+            side_open = (not math.isfinite(self._side_min) or
+                         self._side_min > self._target + 1.2)
+            if side_open and self._front > max(pivot_m, 0.6):
+                self._turn_dir = side_sign
+                self._turn_until = now + float(self.get_parameter('turn_commit_s').value)
+                self._enter_at = now
+        if self._enter_at and now - self._enter_at < 2.5:
+            twist.linear.x = max(float(self.get_parameter('min_speed_mps').value),
+                                 self._speed * 0.6)
+            twist.angular.z = self._turn_dir * self._turn * 0.8
+            self._pub.publish(twist)
+            return
+        self._enter_at = 0.0
+
         # ① 沿墙保持项
+        #   2026-10-30：固定 0.75 m 在 0.86 m 门洞里必然撞门框（想离右墙 0.75，
+        #   就等于贴到左边门框）。左右都近时改为"走中间"。
+        target_eff = self._target
+        if math.isfinite(self._left_dist) and math.isfinite(self._right_dist):
+            corridor = self._left_dist + self._right_dist
+            if corridor < 1.70:
+                target_eff = max(0.32, corridor / 2.0 - 0.02)
+                if not getattr(self, '_narrow_logged', False):
+                    self.get_logger().info(
+                        f'检测到窄通道（左右合计 {corridor:.2f} m），改为居中对齐')
+                    self._narrow_logged = True
+            else:
+                self._narrow_logged = False
         omega_wall = 0.0
         if math.isfinite(self._side_min):
-            omega_wall = side_sign * self._gain * (self._side_min - self._target)
+            omega_wall = side_sign * self._gain * (self._side_min - target_eff)
         omega_wall = max(-self._turn * 0.6, min(self._turn * 0.6, omega_wall))
 
         lf = self._front_left if math.isfinite(self._front_left) else 3.0
