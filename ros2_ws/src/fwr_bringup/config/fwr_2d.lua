@@ -45,7 +45,9 @@ TRAJECTORY_BUILDER_2D.use_imu_data = true
 -- 走廊关键项：开启在线相关匹配（分支限界），平行墙场景比纯优化匹配稳
 TRAJECTORY_BUILDER_2D.use_online_correlative_scan_matching = true
 TRAJECTORY_BUILDER_2D.real_time_correlative_scan_matcher.linear_search_window = 0.1
-TRAJECTORY_BUILDER_2D.real_time_correlative_scan_matcher.angular_search_window = math.rad(20.)
+-- 2026-10-30：空房间（四面直墙、无家具）里 20° 搜索窗不够——长方形房间有 90° 对称性，
+-- 匹配会滑到旋转过的位姿上（用户实测：空房间扫着扫着就歪了）。放大到 35°。
+TRAJECTORY_BUILDER_2D.real_time_correlative_scan_matcher.angular_search_window = math.rad(35.)
 TRAJECTORY_BUILDER_2D.real_time_correlative_scan_matcher.translation_delta_cost_weight = 10.
 TRAJECTORY_BUILDER_2D.real_time_correlative_scan_matcher.rotation_delta_cost_weight = 1e-1
 
@@ -55,10 +57,12 @@ TRAJECTORY_BUILDER_2D.motion_filter.max_distance_meters = 0.15
 TRAJECTORY_BUILDER_2D.motion_filter.max_angle_radians = math.rad(0.3)
 
 -- 子图与回环
-TRAJECTORY_BUILDER_2D.submaps.num_range_data = 90
+-- 每个子图收更多帧，直线墙的估计更稳（原 90）
+TRAJECTORY_BUILDER_2D.submaps.num_range_data = 120
 TRAJECTORY_BUILDER_2D.submaps.grid_options_2d.resolution = 0.05
 
-POSE_GRAPH.optimize_every_n_nodes = 30
+-- 更频繁做位姿图优化，歪斜能更早被拉回（原 30）
+POSE_GRAPH.optimize_every_n_nodes = 20
 POSE_GRAPH.constraint_builder.min_score = 0.6
 POSE_GRAPH.constraint_builder.global_localization_min_score = 0.65
 POSE_GRAPH.constraint_builder.sampling_ratio = 0.3
