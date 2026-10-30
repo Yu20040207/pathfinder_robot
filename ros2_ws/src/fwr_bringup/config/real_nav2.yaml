@@ -145,13 +145,15 @@ local_costmap:
       - inflation_layer
       inflation_layer:
         plugin: nav2_costmap_2d::InflationLayer
-        cost_scaling_factor: 3.0
         # 0.45 会让贴墙停车的机器人自身处于致命格（规划直接失败），改 0.30
         # 局部代价地图：0.20（略小于内切半径 0.215，允许贴墙通过；
         # 真实障碍由 collision_monitor 用原始雷达兜底）。
         # 2026-10-30：0.20 时代价梯度过弱 → 规划器贴障碍走 → 碰撞监控停车。
         # 膨胀是“代价”不是“墙”，0.30 仍可穿过 0.86 m 门（只是代价高）。
         inflation_radius: 0.30
+        # 2026-10-30：cost_scaling_factor 3.0 时代价衰减太快，缓冲区形同虚设；
+        # 降到 2.0 让 0.30 m 缓冲带整体保持高代价，规划器才会绕开。
+        cost_scaling_factor: 2.0
       obstacle_layer:
         plugin: nav2_costmap_2d::ObstacleLayer
         enabled: true
@@ -212,7 +214,6 @@ global_costmap:
         map_subscribe_transient_local: true
       inflation_layer:
         plugin: nav2_costmap_2d::InflationLayer
-        cost_scaling_factor: 3.0
         # 0.45 会让贴墙停车的机器人自身处于致命格（规划直接失败），改 0.30
         # 2026-10-29：现场门宽 ≈0.86 m（两个车宽）。膨胀 R 时通道净宽 = 0.86-2R：
         #   R=0.24 → 0.38 m < 车宽 0.43 m → 过不了门（实测规划失败）
@@ -221,6 +222,9 @@ global_costmap:
         # 2026-10-30：0.20 时代价梯度过弱 → 规划器贴障碍走 → 碰撞监控停车。
         # 膨胀是“代价”不是“墙”，0.30 仍可穿过 0.86 m 门（只是代价高）。
         inflation_radius: 0.30
+        # 2026-10-30：cost_scaling_factor 3.0 时代价衰减太快，缓冲区形同虚设；
+        # 降到 2.0 让 0.30 m 缓冲带整体保持高代价，规划器才会绕开。
+        cost_scaling_factor: 2.0
       always_send_full_costmap: true
       footprint_padding: 0.02
 planner_server:
@@ -235,7 +239,11 @@ planner_server:
       allow_unknown: false
       downsample_costmap: false
       max_planning_time: 2.0
-      cost_travel_multiplier: 3.0
+      # 2026-10-30：本版本 SmacPlanner2D 没有 cost_penalty 参数（设了也不生效），
+      # 真正起作用的是 cost_travel_multiplier：搜索时对高代价格的放大倍数。
+      # 3.0 时规划器几乎无视膨胀代价 → 路径贴着障碍（0.32~0.45 m）→ front_stop 停车。
+      # 提到 8.0，让它宁愿绕远也不进膨胀区。
+      cost_travel_multiplier: 8.0
       # 速度提高后网格阶梯路径会放大成左右摆动；加大平滑权重、略降数据贴合。
       smoother:
         w_smooth: 0.45
