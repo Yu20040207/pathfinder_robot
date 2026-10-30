@@ -34,6 +34,43 @@
 - `base_bridge` 默认 `motion_enabled=false`、`manual_enabled=false`，不会让车动。
 - 实机 RViz 的“两点导航”面板：**单击一次**表示从当前位置前往点击点（`/explore/start_fixed_goal`）；**连续点击两次**表示先到起点再到终点（`/explore/start_two_point_goal`）。现场人员点击“开始导航”时面板自行开启 `motion_enabled`、等待 `/base/ready`、申请 `/base/arm_auto`，然后发送目标；点击“停止导航”或任务结束/失败时请求停机并关闭运动门。无需另开终端运行授权脚本。该按钮流程已构建和通过单元测试，**尚未由现场人员验证完整实车按钮操作**；最新证据见 `docs/AGENT_LOG.md` 末尾。代理不得代替用户点击按钮或打开运动门，除非本次会话另有明确授权。
 
+
+### 当前已验证参数快照（2026-10-30，换橡胶轮后）
+
+**底盘/固件**（`firmware/esp32s3_base_control/main/control.c`）
+- `MAX_DUTY 0.90`、`BASE_DUTY 0.60`、`DUTY_RAMP_PER_S 0.5`
+- 失速：`STALL_SPEED_MMPS 4`、门槛 12% 指令、`STALL_LIMIT_S 2.0`
+- 超速：`OVERSPEED_MMPS 700`、窗口 0.4 s
+
+**里程计**（`base_bridge_core.py`）
+- `track_m 0.262`、`circumference_m 0.2075`、`counts_per_rev 1468`
+- 3 米实测误差 +0.20%（换胎后标定）
+
+**IMU 航向修正**（`fwr_imu/node.py` + launch `imu_yaw_scale`）
+- `yaw_scale 1.019`（雷达互相关实测：转一圈真值 362.58°，陀螺积分 355.84°）
+- **EKF 吃的是 `/imu/data_raw` 的 vyaw**，姿态四元数不进 EKF；
+  换 IMU/改安装后必须重标此系数
+
+**AMCL**（`real_localization.yaml`）
+- `max_beams 120`、`laser_max_range 8.0`、`min/max_particles 1000/5000`
+- `recovery_alpha_slow/fast = 0/0`（**关闭随机粒子注入**，否则车不动位姿乱跳）
+- `update_min_d/a 0.10`
+
+**Nav2**（`real_nav2.yaml`）
+- 巡航 `desired_linear_vel 0.15`、前视 `lookahead_dist 0.55`（0.35~0.75）
+- 旋转 shim `angular_dist_threshold 1.2 rad`（<0.6 会“转过头”）
+- `use_collision_detection: false`（RPP 预测误报太多，由 collision_monitor 兜底）
+- 膨胀 `inflation_radius 0.30`、`cost_scaling_factor 2.0`
+- Smac `cost_travel_multiplier 8.0`（本版本**没有** `cost_penalty` 参数）
+- `front_stop` 半宽 0.24 m、3 点触发、`simulate_ahead_time 0.5`
+
+**已知 Nav2 坑（务必知道）**
+- `collision_monitor` 触发一次 `stop` 后会**卡死不再处理指令** →
+  `/cmd_vel_auto_safe` 恒为 0、车不动。用 `tools/chain_watchdog.py` 自动重启，
+  或手工 `ros2 lifecycle set /collision_monitor_forward deactivate/activate`。
+- 底盘 `motion_enabled=false` 时所有速度指令被丢弃；
+  面板“开始导航”会自己开门，但**手动测试时必须先设 true**。
+
 ### 工具环境（2026-10-24）
 
 - 用户级 skill：`~/.agents/skills/ros2-engineering-skills`（Apache-2.0，DSH 已识别）。
