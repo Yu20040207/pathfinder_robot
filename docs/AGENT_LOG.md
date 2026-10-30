@@ -2906,3 +2906,36 @@ base = (11.53, 8.30)  残差 0.009~0.010 m
 - 标定方法：原地转一圈，用雷达互相关求真值（代码见本次会话脚本思路），
   残差 <3 cm 时结果可信；
 - 该系数作用于 vyaw 会影响 EKF 航向积分，**不要在其他地方重复乘**。
+
+## 2026-10-30 16:40 · SLAM 方案离线对比（同一条 bag 回放）
+
+### 方法
+录一次数据（`~/fwr_bags/特征房间_第一次`，197 s：/scan_mapping /scan /odom
+/wheel/odom /tf /tf_static /imu/data_raw），然后用 `tools/bench_slam.sh`
+把**同一个 bag** 分别回放给三个方案，`tools/map_quality.py` 自动打分。
+这样输入完全相同，结果可比。
+
+### 结果
+| 方案 | 尺寸m | 墙 | 实心% | 空闲m² | 可用m² | 主块% | 方向分散° | 正交对数 |
+|---|---|---|---|---|---|---|---|---|
+| slam_toolbox 0.5/0.5 | 11.0×7.1 | 812 | 78.0 | 25.1 | 12.2 | 98.2 | 14.5 | 1 |
+| slam_toolbox 0.25/0.25（低视场参数） | 11.2×7.9 | 1054 | 84.0 | 27.0 | **13.8** | **98.5** | 13.5 | 1 |
+| **Cartographer** | 20.3×12.0 | 1181 | **87.7** | **31.8** | 12.9 | 89.3 | **6.0** | **2** |
+
+### 结论
+- **Cartographer 胜出**：墙体实心度 87.7%（vs 84%）、方向一致性 6.0°（vs 13.5°）、
+  正交方向能识别出 2 组（slam_toolbox 只有 1 组）。
+- 低视场参数（0.25/0.25）确实让 slam_toolbox 变好（墙 +30%，实心度 +6%），
+  但追不上 Cartographer。
+- Cartographer 的"主块占比"偏低（89.3%）、碎片多，是它只画观测到的格子所致，
+  不表示地图更差；导航前用 AMCL 定位即可。
+
+→ **最终建图方案定 Cartographer**（配置已按空房间调过：角度搜索窗 35°、
+  子图 120 帧、每 20 节点优化一次）。
+
+### 本轮踩到的坑
+- `cartographer_node` 的 `-configuration_directory` **必须放在 `--ros-args` 之前**，
+  否则被当成未知 ROS 参数直接 abort。
+- Cartographer 需要 remap：`scan:=/scan_mapping odom:=/odom imu:=/imu/data_raw`，
+  否则一直 "Queue waiting for data: (0, imu)"，不出图。
+- bag 放完后 `/clock` 停止，`use_sim_time` 的 map_saver 会卡死 → 存图要用系统时钟。

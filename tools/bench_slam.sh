@@ -80,14 +80,18 @@ run_engine() {   # run_engine <engine> <outdir>
       ;;
     carto)
       echo "  启动 Cartographer"
-      nohup ros2 run cartographer_ros cartographer_node --ros-args \
-        -p use_sim_time:=true \
+      # 注意：cartographer 自己的 -configuration_* 必须放在 --ros-args 之前，
+      # 否则会被当成未知 ROS 参数直接 abort（2026-10-30 实测）。
+      nohup ros2 run cartographer_ros cartographer_node \
         -configuration_directory "$SHARE/config" \
-        -configuration_basename fwr_2d.lua > "$out/carto.log" 2>&1 &
+        -configuration_basename fwr_2d.lua \
+        --ros-args -p use_sim_time:=true \
+        -r scan:=/scan_mapping -r odom:=/odom -r imu:=/imu/data_raw \
+        > "$out/carto.log" 2>&1 &
       sleep 2
-      nohup ros2 run cartographer_ros cartographer_occupancy_grid_node --ros-args \
-        -p use_sim_time:=true -resolution 0.05 -publish_period_sec 1.0 \
-        >> "$out/carto.log" 2>&1 &
+      nohup ros2 run cartographer_ros cartographer_occupancy_grid_node \
+        -resolution 0.05 -publish_period_sec 1.0 \
+        --ros-args -p use_sim_time:=true >> "$out/carto.log" 2>&1 &
       ;;
     *)
       echo "未知方案: $eng（可选 slam / slam_lowfov / carto）" >&2
@@ -102,9 +106,10 @@ run_engine() {   # run_engine <engine> <outdir>
   sleep 8
 
   echo "  保存地图"
-  ros2 run nav2_map_server map_saver_cli -f "$out/map" \
-    --ros-args -p save_map_timeout:=10.0 -p use_sim_time:=true \
-    > "$out/save.log" 2>&1 || true
+  # 注意：bag 放完后 /clock 停止，use_sim_time 的节点时间会冻结 → map_saver 会卡住。
+  # 它只是读 latched 的 /map 写文件，用系统时钟即可。
+  timeout 40 ros2 run nav2_map_server map_saver_cli -f "$out/map" \
+    --ros-args -p save_map_timeout:=15.0 > "$out/save.log" 2>&1 || true
 
   stop_all
   if [ -f "$out/map.yaml" ]; then
