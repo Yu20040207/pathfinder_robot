@@ -10,7 +10,7 @@ from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import Imu
 
-from fwr_imu.orientation import quaternion_xyzw
+from fwr_imu.orientation import quaternion_xyzw, scale_yaw_xyzw
 from fwr_imu.protocol import ImuFrameParser
 
 
@@ -44,9 +44,17 @@ class DmImuNode(Node):
         self.declare_parameter('device', DEFAULT_DEVICE)
         self.declare_parameter('frame_id', 'imu_link')
         self.declare_parameter('publish_rate_hz', 100.0)
+        # 2026-10-30 实测：DM-IMU-L1 六轴航向少算 1.25%
+        # （转一圈 IMU 355.04°，雷达互相关真值 359.55°）→ 乘 1.0127 修正。
+        # 换新 IMU 或改安装方向后必须重新标定（tools/yaw_scale_calibrate.py 思路）。
+        self.declare_parameter('yaw_scale', 1.0)
         rate = float(self.get_parameter('publish_rate_hz').value)
         if not 1.0 <= rate <= 500.0:
             raise ValueError('publish_rate_hz must be between 1 and 500')
+        self._yaw_scale = float(self.get_parameter('yaw_scale').value)
+        if not 0.8 <= self._yaw_scale <= 1.2:
+            raise ValueError('yaw_scale must be between 0.8 and 1.2')
+        self._yaw_reference = None
         self._device = str(self.get_parameter('device').value)
         self._frame_id = str(self.get_parameter('frame_id').value)
         self._publisher = self.create_publisher(Imu, '/imu/data_raw', 10)
@@ -70,6 +78,7 @@ class DmImuNode(Node):
             self._parser = ImuFrameParser()
             self._accel = self._gyro = None
             self._quaternion = None
+            self._yaw_reference = None
             self._fresh.clear()
             self.get_logger().info(f'Connected to {self._device} at 921600 8N1')
         except OSError as exc:
@@ -128,7 +137,13 @@ class DmImuNode(Node):
         if have_attitude:
             attitude = Imu()
             attitude.header = msg.header
-            attitude.orientation.x, attitude.orientation.y, attitude.orientation.z, attitude.orientation.w = self._quaternion
+            q = self._quaternion
+            if self._yaw_scale != 1.0:
+                if self._yaw_reference is None:
+                    from fwr_imu.orientation import _euler_from_xyzw
+                    self._yaw_reference = _euler_from_xyzw(q)[2]
+                q = scale_yaw_xyzw(q, self._yaw_scale, self._yaw_reference)
+            attitude.orientation.x, attitude.orientation.y, attitude.orientation.z, attitude.orientation.w = q
             attitude.angular_velocity = msg.angular_velocity
             attitude.linear_acceleration = msg.linear_acceleration
             # Covariances remain unknown. The six-axis yaw is relative and drifts.

@@ -208,7 +208,7 @@ class BaseBridgeCore:
     # 2026-10-29 轮距实测标定：原地正/反各 180°，编码器 178.6° vs IMU 176.6°/176.7°，
     # 两轮实测（0.263→0.2659；再用 0.2659 复测残差 +1.7%）取均值 0.268。
     # 残余 1~2% 是转向打滑的物理现象，任何轮距值都修不掉。
-    def __init__(self, track_m: float = .268, circumference_m: float = .2012,
+    def __init__(self, track_m: float = .262, circumference_m: float = .2075,
                  counts_per_rev: int = 1468) -> None:
         self.track_m = track_m
         self.counts_per_rev = counts_per_rev

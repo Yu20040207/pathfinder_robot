@@ -18,6 +18,8 @@ def generate_launch_description():
         DeclareLaunchArgument('use_sim_time', default_value='false'),
         DeclareLaunchArgument('lidar_port', default_value='/dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_Controller_e00aaf475431f111b7818c5f30d20014-if00-port0'),
         DeclareLaunchArgument('start_imu', default_value='true'),
+        # IMU 航向尺度修正：2026-10-30 雷达互相关标定（转一圈 355.04° vs 真值 359.55°）
+        DeclareLaunchArgument('imu_yaw_scale', default_value='1.0'),   # 1.0127 待充分验证
         DeclareLaunchArgument('start_slam', default_value='true'),
         DeclareLaunchArgument('slam_executable', default_value='async_slam_toolbox_node'),
         DeclareLaunchArgument('slam_params',
@@ -26,7 +28,10 @@ def generate_launch_description():
              output='screen', parameters=[{'motion_enabled': False,
                                            'use_sim_time': use_sim_time}]),
         Node(package='fwr_imu', executable='dm_imu_node', name='dm_imu_l1',
-             condition=IfCondition(LaunchConfiguration('start_imu')), output='screen', parameters=[{'use_sim_time': use_sim_time}]),
+             condition=IfCondition(LaunchConfiguration('start_imu')), output='screen',
+             parameters=[{'use_sim_time': use_sim_time,
+                          # 2026-10-30 实测：六轴航向少算 1.25%，乘 1.0127 修正
+                          'yaw_scale': LaunchConfiguration('imu_yaw_scale')}]),
         Node(package='sllidar_ros2', executable='sllidar_node', name='sllidar_node',
              output='screen', parameters=[{
                  'channel_type': 'serial', 'serial_port': LaunchConfiguration('lidar_port'),

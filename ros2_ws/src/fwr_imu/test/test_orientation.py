@@ -34,3 +34,34 @@ class OrientationTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def test_scale_yaw_xyzw_is_identity_at_unit_scale():
+    import math as m
+    from fwr_imu.orientation import scale_yaw_xyzw, _xyzw_from_euler
+    q = _xyzw_from_euler(0.1, -0.05, m.radians(40))
+    out = scale_yaw_xyzw(q, 1.0, m.radians(10))
+    for a, b in zip(q, out):
+        assert abs(a - b) < 1e-9
+
+
+def test_scale_yaw_xyzw_corrects_under_reported_rotation():
+    import math as m
+    from fwr_imu.orientation import scale_yaw_xyzw, _xyzw_from_euler, _euler_from_xyzw
+    ref = 0.0
+    # IMU 认为转了 120°，真实是 120 * 1.0127
+    q = _xyzw_from_euler(0.0, 0.0, m.radians(120))
+    out = scale_yaw_xyzw(q, 1.0127, ref)
+    _, _, yaw = _euler_from_xyzw(out)
+    assert abs(m.degrees(yaw) - 120 * 1.0127) < 1e-6
+
+
+def test_scale_yaw_xyzw_wraps_across_pi():
+    import math as m
+    from fwr_imu.orientation import scale_yaw_xyzw, _xyzw_from_euler, _euler_from_xyzw
+    ref = m.radians(170)
+    q = _xyzw_from_euler(0.0, 0.0, m.radians(-175))
+    out = scale_yaw_xyzw(q, 2.0, ref)
+    _, _, yaw = _euler_from_xyzw(out)
+    # 相对参考的最短角差 = +15°（从 170° 到 185°），乘 2 → +30° → 绝对 200°（等价 -160°）
+    assert abs(((m.degrees(yaw) - 200 + 180) % 360) - 180) < 1e-6
