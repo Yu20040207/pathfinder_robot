@@ -3420,3 +3420,34 @@ supervisor 踢一脚判定"被包围"放弃。**需要人工挪出**后再验证
 2. **换更大的场地**再跑自动探索，验证算法本身没问题
 3. 真要在这类窄环境自动跑，需要 **原地旋转半径 < 0.6 m 的底盘**
    （四轮差速做不到，需要麦轮/舵轮或允许原地旋转的窄体车）
+
+## 2026-10-31 17:35 · 关键结论：车不动是**编码器故障（fault 4）**，不是路径规划
+
+### 证据链
+1. `/cmd_vel` (0,1.0) → `/cmd_vel_auto_unchecked` (0,1.0) → `/cmd_vel_auto_forward_filtered` (0,1.0)
+   —— **指令一路畅通**，前方 3.42 m 空旷、碰撞监控 active
+2. 但 `/cmd_vel_auto_safe` 恒为 0 → 方向安全选择器判 `stale-tf`
+3. 查 TF：`odom→base_footprint` 时间戳滞后 **0.45~2.0 s**（允许 ≤0.25 s）
+4. 查底盘：`/base/fault = 4`（`BASE_ENCODER`，`control.h: BASE_ENCODER=4`），
+   `disarm fault` 刷屏；`/wheel/odom` 一度掉到 4.35 Hz
+5. 用**纯底盘栈**（无导航/无探索，`explore_state` 不是 navigating）清故障成功 → fault=0，
+   手动前进 1.2 s 位移 0.026 m（能动）
+6. **重启自动建图后 fault 立刻回到 4** —— 一动就触发
+
+固件判据（`control.c`）：
+```c
+if (c->active && (uint32_t)(skips[i]-c->skipped[i])>8) fail(c, BASE_ENCODER);
+```
+即"运动中编码器跳变计数超过 8"就锁死底盘并自停。
+
+### 结论
+**现场"路径规划不好/走不动"的真正原因是编码器信号在运动中丢脉冲**，
+底盘锁在 fault 4 里，任何速度指令都不会被执行。
+今天所有导航侧改动（门控、看门狗、目标预验证、脱困）都已正常工作，
+不是它们导致车不动。
+
+### 待办（硬件）
+1. 检查左右轮编码器 4 芯线（A/B 相是否虚接）、磁环/码盘是否松动或偏心
+2. 检查电机线是否与编码器线并行捆扎（EMI）；必要时分开走线或加磁环
+3. 修好后：`ros2 service call /base/clear_fault` 需在**纯底盘栈**下执行
+   （`explore_state` 不能是 navigating、Nav2 无活动目标、两道门都关）
