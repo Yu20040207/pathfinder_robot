@@ -72,6 +72,9 @@ class BaseBridgeNode(Node):
         self.declare_parameter('heading_hold_enabled', True)
         # 沿墙建图需要“边走边转”，默认关闭以保持键盘单轴习惯
         self.declare_parameter('manual_allow_mixed', False)
+        # 2026-10-31：后向超声守卫。true 时拒绝任何"后退"指令（v<0）。
+        # 只限制后退，不产生前进/倒车指令；不改变自动倒车许可。
+        self.declare_parameter('rear_guard_enabled', True)
         self.declare_parameter('heading_hold_gain', 1.5)
         self.declare_parameter('heading_hold_limit_rad_s', .12)
         self._heading_hold = HeadingHold(
@@ -277,6 +280,11 @@ class BaseBridgeNode(Node):
             return
         if not self._sensors_ready(now):
             return
+        if (msg.linear.x < -1e-6 and self._rear_blocked and
+                bool(self.get_parameter('rear_guard_enabled').value)):
+            self._core.halt()
+            self.get_logger().warn('后退被车尾超声守卫拦截', throttle_duration_sec=2.0)
+            return
         if not manual_velocity(msg.linear.x, msg.angular.z, self._core.track_m,
                                 allow_mixed=bool(
                                     self.get_parameter('manual_allow_mixed').value)):
@@ -342,6 +350,12 @@ class BaseBridgeNode(Node):
                                    1 - 2*(q.y*q.y + q.z*q.z))
         self._imu_yaw_rate = msg.angular_velocity.z
         self._last_imu_at = time.monotonic()
+
+    def _on_rear_blocked(self, msg: Bool) -> None:
+        """车尾超声守卫：true 表示后方近障，禁止后退。"""
+        if bool(msg.data) and not self._rear_blocked:
+            self.get_logger().warn('车尾近障：禁止后退')
+        self._rear_blocked = bool(msg.data)
 
     def _on_nav_status(self, kind: str, msg: GoalStatusArray) -> None:
         self._nav_active[kind] = any(

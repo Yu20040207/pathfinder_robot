@@ -58,6 +58,10 @@ def generate_launch_description():
         Node(package='fwr_bringup', executable='ultrasonic_rear',
              name='ultrasonic_rear', output='screen',
              parameters=[{'use_sim_time': use_sim_time}]),
+        # 车尾超声守卫：近障时禁止后退（不产生任何前进/倒车指令）
+        Node(package='fwr_bringup', executable='rear_guard',
+             name='rear_guard', output='screen',
+             parameters=[{'use_sim_time': use_sim_time}]),
         # 四只探头的静态 TF（安装见 docs/hardware/rear-a22-ultrasonic-layout.md）
         Node(package='tf2_ros', executable='static_transform_publisher',
              name='tf_ultrasonic_rear_left_out', output='log',

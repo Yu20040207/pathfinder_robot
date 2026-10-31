@@ -43,7 +43,11 @@ def test_real_slam_owns_map_to_odom_with_real_scan():
 def test_real_mapping_launch_has_no_simulator_or_fake_tf():
     source = (ROOT / 'launch' / 'real_mapping.launch.py').read_text()
     assert 'gazebo' not in source.lower()
-    assert 'static_transform_publisher' not in source
+    # 允许静态 TF，但只能是后向超声探头（2026-10-31 新增的四只 A22）；
+    # 其余任何 static_transform_publisher 仍视为伪造 TF。
+    import re
+    for block in re.findall(r'static_transform_publisher.*?\n\s*\n', source, re.S):
+        assert 'ultrasonic_rear_' in block, block[:200]
     assert "DeclareLaunchArgument('use_sim_time', default_value='false')" in source
     for package in ('fwr_bringup', 'fwr_imu', 'sllidar_ros2',
                     'robot_localization', 'slam_toolbox', 'robot_state_publisher'):

@@ -138,6 +138,11 @@ class UltrasonicRear(Node):
             'ultrasonic_rear_left_in',
             'ultrasonic_rear_right_in',
             'ultrasonic_rear_right_out'])
+        # 2026-10-31 实车标定（纸箱 0.20/0.30/0.50 m 三点）：
+        #   left_out 系统性偏大 +26~30 mm（近距 0.2 m 时 +59 mm，因朝外偏 10°斜射）
+        #   left_in / right_in 精度 ±3 mm，right_out 只读背景
+        # 偏移取"远中近距离的均值"，近距残差约 ±3 cm，够停车判断用。
+        self.declare_parameter('offsets_m', [0.028, 0.0, 0.0, 0.0])
         self.declare_parameter('min_range_m', 0.05)
         self.declare_parameter('max_range_m', 3.50)
         self.declare_parameter('field_of_view_rad', math.radians(60.0))
@@ -150,6 +155,10 @@ class UltrasonicRear(Node):
             raise ValueError('frames 必须是 4 个 frame_id')
         self._min = float(self.get_parameter('min_range_m').value)
         self._max = float(self.get_parameter('max_range_m').value)
+        offs = [float(x) for x in self.get_parameter('offsets_m').value]
+        if len(offs) != 4:
+            raise ValueError('offsets_m 必须是 4 个值')
+        self._offsets = offs
         self._fov = float(self.get_parameter('field_of_view_rad').value)
         self._stale = float(self.get_parameter('stale_timeout_s').value)
 
@@ -232,6 +241,7 @@ class UltrasonicRear(Node):
             metres = range_from_raw(raw, self._min, self._max)
             if metres is None:
                 continue                     # 无可靠读数：不发布，让其自然过期
+            metres = max(self._min, metres - self._offsets[i])
             msg = Range()
             msg.header.stamp = now.to_msg()
             msg.header.frame_id = self._frames[i]
