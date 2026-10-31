@@ -143,7 +143,21 @@ local_costmap:
       footprint_clearing_enabled: true
       plugins:
       - obstacle_layer
+      - range_layer          # 后向四路超声：只加占用，不清除激光障碍
       - inflation_layer
+      # 2026-10-31 后向 A22 超声（4 路 sensor_msgs/Range，见 ultrasonic_rear 节点）：
+      #   · clear_threshold: 0.0  → 永不清除已有障碍（激光发现的不会被超声抹掉）
+      #   · clear_on_max_reading: false → 读到超量程也不当"空地"
+      #   · 只把测到的近距障碍标记成占用 → 后退时能停车
+      range_layer:
+        plugin: nav2_costmap_2d::RangeSensorLayer
+        enabled: true
+        topics: ['/ultrasonic_rear/left_out', '/ultrasonic_rear/left_in',
+                 '/ultrasonic_rear/right_in', '/ultrasonic_rear/right_out']
+        input_sensor_type: INPUT_ULTRASOUND
+        clear_on_max_reading: false
+        clear_threshold: 0.0
+        no_readings_timeout: 2.0
       inflation_layer:
         plugin: nav2_costmap_2d::InflationLayer
         # 0.45 会让贴墙停车的机器人自身处于致命格（规划直接失败），改 0.30

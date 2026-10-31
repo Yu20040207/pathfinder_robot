@@ -127,9 +127,13 @@ def distances(rtu, addr):
 
 def info(rtu, addr):
     baud = read_regs(rtu, addr, REG['baud'])
-    print('版本(0x0000)     %s' % show(read_regs(rtu, addr, REG['version'])))
+    version = read_regs(rtu, addr, REG['version'])
+    if isinstance(version, list) and version:
+        print('%-16s %d (0x%04X)' % ('版本(0x0000)', version[0], version[0]))
+    else:
+        print('%-16s %s' % ('版本(0x0000)', show(version)))
     if isinstance(baud, list) and baud:
-        print('主口波特率       %s' % BAUD_CODES.get(baud[0], '未知'))
+        print('%-16s %s' % ('主口波特率', BAUD_CODES.get(baud[0], '未知')))
     for name, reg, table in (
         ('工作模式', REG['workmode'], WORK_MODES),
         ('输出模式', REG['outmode'], OUT_MODES),
@@ -140,19 +144,25 @@ def info(rtu, addr):
         if isinstance(values, list) and values:
             label = table.get(values[0], '未知') if table else '%d0ms' % values[0]
             print('%-16s %s' % (name, label))
+        elif table:
+            # 0x0202/0x0207/0x0216 只在 UART 或开关量输出模式下应答
+            print('%-16s (RS485 模式不应答该寄存器)' % name)
+    # 批量寄存器：读 1 个寄存器，返回 4 个值（对应接口 1~4）
     for name, reg, table in (
         ('接口角度等级', REG['angle'], ANGLES),
         ('接口量程等级', REG['range'], RANGES),
         ('接口降噪等级', REG['noise'], None),
+        ('接口波特率', REG['portbaud'], None),
     ):
-        values = read_regs(rtu, addr, reg, 4)
+        values = read_regs(rtu, addr, reg, 1)
         if isinstance(values, list) and values:
-            parts = [NO_DATA.get(v, table.get(v, str(v)) if table else str(v)) for v in values]
+            if reg == REG['portbaud']:
+                parts = [NO_DATA.get(v, '%d' % BAUD_CODES.get(v, v)) for v in values]
+            else:
+                parts = [NO_DATA.get(v, table.get(v, str(v)) if table else str(v)) for v in values]
             print('%-16s %s' % (name, ' | '.join(parts)))
-    pb = read_regs(rtu, addr, REG['portbaud'], 4)
-    if isinstance(pb, list) and pb:
-        parts = [NO_DATA.get(v, '%d' % BAUD_CODES.get(v, v)) for v in pb]
-        print('%-16s %s' % ('接口波特率', ' | '.join(parts)))
+        else:
+            print('%-16s %s' % (name, show(values)))
 
 
 def main():
