@@ -50,7 +50,8 @@ class WallFollower(Node):
         self.declare_parameter('open_gates', True)
         # 2026-10-30 平滑化：不再"停了再转"，改成边走边绕 + 加减速限幅
         # 1.45：1.10 时开始绕已经太晚（实测会撞）
-        self.declare_parameter('avoid_start_m', 1.45)   # 前方小于这个距离开始绕
+        # 1.85：1.45 在快速接近斜墙时来不及（实测撞上前右角）
+        self.declare_parameter('avoid_start_m', 1.85)   # 前方小于这个距离开始绕
         # 0.50：雷达装在前部，读数 0.50 意味着车头边缘距障碍约 0.41 m；
         # 太小会顶到墙 → 轮子打滑 → 固件失速自停。
         self.declare_parameter('emergency_m', 0.60)     # 小于这个距离才急停
@@ -68,10 +69,17 @@ class WallFollower(Node):
         self.declare_parameter('arc_min_speed_ratio', 0.60)
         self.declare_parameter('min_speed_mps', 0.07)   # 硬下限，低于它宁可不发
         # 2026-10-30：车尾是盲区，但地图里后方刚走过=空闲。倒车前查地图。
-        self.declare_parameter('rear_check_m', 0.90)    # 检查后方多远的格子
+        self.declare_parameter('rear_check_m', 0.60)    # 后退所需航迹长度
         self.declare_parameter('rear_half_width_m', 0.28)
         self.declare_parameter('reverse_speed_mps', 0.07)
-        self.declare_parameter('reverse_time_s', 2.2)
+        self.declare_parameter('reverse_time_s', 1.6)
+        # 2026-10-31：识别到门洞后，瞄准门洞中心直线穿过去
+        self.declare_parameter('door_min_width_deg', 22.0)
+        self.declare_parameter('door_max_width_deg', 70.0)
+        self.declare_parameter('door_clear_m', 1.30)      # 门洞内至少这么空
+        self.declare_parameter('door_frame_m', 2.20)      # 门框必须在 2.2 m 内（真门框）
+        self.declare_parameter('door_cooldown_s', 8.0)    # 穿完冷却，避免连击
+        self.declare_parameter('door_commit_s', 4.0)
         self.declare_parameter('max_accel_mps2', 0.25)  # 线加速度限幅
         self.declare_parameter('max_alpha_rads2', 1.2)  # 角加速度限幅
 
@@ -89,6 +97,7 @@ class WallFollower(Node):
         self._front_right = float('inf')
         self._side_min = float('inf')
         self._left_dist = float('inf')
+        self._scan_msg = None
         self._right_dist = float('inf')
         self._start = None
         self._started_at = None
@@ -108,6 +117,8 @@ class WallFollower(Node):
         self._reverse_until = 0.0
         # 刚走过的轨迹（倒车沿原路退回，走过的地方必然空闲）
         self._trail = []
+        self._door_until = 0.0
+        self._door_ready_at = 0.0
 
         q = QoSProfile(depth=5, reliability=ReliabilityPolicy.BEST_EFFORT)
         self.create_subscription(LaserScan, '/scan', self._on_scan, q)
@@ -140,7 +151,8 @@ class WallFollower(Node):
 
         # 雷达倒装：index 0 = 车头；scan 角 ±180 = 正前，-90 = 车左，+90 = 车右
         # ±35°：±20° 时斜前方 30~60° 的墙看不到，斜着靠近发现太晚 → 撞
-        self._front = min(sector(180.0, 35.0), sector(-180.0, 35.0))
+        self._front = min(sector(180.0, 45.0), sector(-180.0, 45.0))
+        self._scan_msg = msg
         self._front_left = sector(-140.0, 40.0)     # 覆盖 100°~180°
         self._front_right = sector(140.0, 40.0)     # 覆盖 100°~180°
         side_half = float(self.get_parameter('side_half_deg').value)
@@ -202,6 +214,56 @@ class WallFollower(Node):
                 return True
         return False
 
+    def _detect_door(self):
+        """在前方半圈里找“两侧有框、中间通透”的缺口，返回 (中心角°, 宽度°)。
+
+        角度约定：0° = 正前，负数 = 左，正数 = 右（和 scan 的 0°=车尾一致）。
+        """
+        msg = self._scan_msg
+        if msg is None:
+            return None
+        n = len(msg.ranges)
+        deg_per_idx = n / 360.0
+        clear = float(self.get_parameter('door_clear_m').value)
+        frame = float(self.get_parameter('door_frame_m').value)
+        # 按 1° 分箱取最小距离
+        bins = {}
+        for i in range(n):
+            r = msg.ranges[i]
+            if not math.isfinite(r) or r <= 0.20:
+                continue
+            a = math.degrees(msg.angle_min + i * msg.angle_increment)   # -180..180
+            sb = (180.0 - abs(a)) * (1.0 if a >= 0 else -1.0)           # 0=前, +=右
+            if abs(sb) > 90.0:
+                continue
+            k = int(round(sb))
+            bins[k] = min(bins.get(k, 99.0), r)
+        if len(bins) < 30:
+            return None
+        angles = sorted(bins)
+        best = None
+        run_start = None
+        for idx, ang in enumerate(angles):
+            is_open = bins[ang] > clear
+            if is_open and run_start is None:
+                run_start = ang
+            if (not is_open or idx == len(angles) - 1) and run_start is not None:
+                run_end = angles[idx - 1] if not is_open else ang
+                width = run_end - run_start
+                # 两侧要有门框（紧邻的格子较近）
+                left_ok = any(bins.get(a, 99.0) < frame
+                              for a in range(run_start - 6, run_start))
+                right_ok = any(bins.get(a, 99.0) < frame
+                               for a in range(run_end + 1, run_end + 7))
+                if (left_ok and right_ok and
+                        float(self.get_parameter('door_min_width_deg').value)
+                        <= width
+                        <= float(self.get_parameter('door_max_width_deg').value)):
+                    if best is None or width > best[1]:
+                        best = ((run_start + run_end) / 2.0, width)
+                run_start = None
+        return best
+
     # ---------- 控制 ----------
     def _on_fault(self, msg: Int32) -> None:
         self._fault = int(msg.data)
@@ -242,22 +304,25 @@ class WallFollower(Node):
         if self._recover_stage == 3 and st > 2.6:
             self._recover_stage = 4
             return
-        if self._recover_stage == 4 and st > 4.2:
-            # 原地转脱困：车尾是盲区，绝不倒车（实测倒车会撞后方墙面）
-            twist = Twist()
-            twist.angular.z = (1.0 if self._side == 'right' else -1.0) * self._turn
-            self._pub.publish(twist)
-            return
-        if self._recover_stage == 4 and st > 5.2:
-            self._pub.publish(Twist())
-            self._recover_stage = 0
-            self._fault = 0
-            self._v_cmd = self._w_cmd = 0.0
-            self.get_logger().info(
-                f'复位完成（累计 {self._recover_count} 次），继续沿墙')
-            if self._recover_count >= 3:
-                self.get_logger().warn('已连续复位 3 次，若再次失速建议人工检查环境')
-            return
+        if self._recover_stage == 4:
+            # 注意顺序：必须先判“结束”，否则 st>4.2 的分支会一直 return，
+            # 永远走不到“复位完成” → 表现为失速后无限原地转（2026-10-31 实测）。
+            if st > 5.4:
+                self._pub.publish(Twist())
+                self._recover_stage = 0
+                self._fault = 0
+                self._v_cmd = self._w_cmd = 0.0
+                self._pivot_at = 0.0
+                self._turn_dir = 0.0
+                self.get_logger().info(
+                    f'复位完成（累计 {self._recover_count} 次），继续沿墙')
+                return
+            if st > 4.2:
+                # 原地转脱困：车尾是盲区，倒车沿航迹判断后才用
+                twist = Twist()
+                twist.angular.z = (1.0 if self._side == 'right' else -1.0) * self._turn
+                self._pub.publish(twist)
+                return
 
     def _set_params(self, values) -> None:
         if not self._param_client.service_is_ready():
@@ -333,6 +398,24 @@ class WallFollower(Node):
         arc_ratio = float(self.get_parameter('arc_min_speed_ratio').value)
         side_sign = -1.0 if self._side == 'right' else 1.0   # 贴右墙时"离墙远"要右转
 
+        # ⓪ 门洞穿越：识别到“两侧有框、中间通透”的缺口就瞄准中心直线过去
+        door = self._detect_door()
+        if door is not None and now >= self._door_until and now >= self._door_ready_at:
+            self._door_until = now + float(self.get_parameter('door_commit_s').value)
+            self._door_ready_at = self._door_until + float(
+                self.get_parameter('door_cooldown_s').value)
+            self.get_logger().info(
+                f'识别到门洞：中心偏 {"左" if door[0] < 0 else "右"}'
+                f'{abs(door[0]):.0f}°，宽 {door[1]:.0f}°，对准中心穿越')
+        if now < self._door_until and door is not None:
+            center_rad = math.radians(door[0])
+            twist.linear.x = max(float(self.get_parameter('min_speed_mps').value),
+                                 self._speed * 0.8)
+            twist.angular.z = max(-self._turn,
+                                  min(self._turn, -2.2 * center_rad))
+            self._pub.publish(twist)
+            return
+
         # ①a 侧面出现门洞/大开口：主动转进去（否则会直接开过去）
         #     判据：贴墙那一侧测不到墙（或远到 > target+1.2 m），且前方是通的。
         #     限制：一次最多“进洞”2.5 秒，避免在空旷处一直转圈。
@@ -353,6 +436,8 @@ class WallFollower(Node):
         self._reverse_until = 0.0
         # 刚走过的轨迹（倒车沿原路退回，走过的地方必然空闲）
         self._trail = []
+        self._door_until = 0.0
+        self._door_ready_at = 0.0
 
         # ① 沿墙保持项
         #   2026-10-30：固定 0.75 m 在 0.86 m 门洞里必然撞门框（想离右墙 0.75，
@@ -389,7 +474,8 @@ class WallFollower(Node):
                 self.get_logger().info(
                     f'贴障脱困：朝{"左" if self._turn_dir > 0 else "右"}单向转 '
                     f'(前 {self._front:.2f} 左 {lf:.2f} 右 {rf:.2f})')
-            if (now - self._pivot_at > 6.0 and
+            # 优先沿原路后退（走过的路必然空闲），退不了才原地转
+            if (now - self._pivot_at > 1.5 and
                     now >= self._reverse_until and
                     self._rear_clear()):
                 self.get_logger().info('后方地图确认空闲，倒车脱困')
