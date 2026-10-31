@@ -37,10 +37,14 @@ class AutoMappingSupervisor(Node):
         self.declare_parameter('kick_max_backups', 3)
         # 被包围时后退到"前方够转弯"为止的上限（秒）
         self.declare_parameter('kick_back_max_s', 8.0)
+        # 2026-10-31：车尾暂时被挡（超声报警）时最多等这么久再退，
+        # 而不是立刻放弃（原地不动等障碍物移开/等车尾转向空档）。
+        self.declare_parameter('rear_wait_s', 3.0)
         self._cmd_manual = self.create_publisher(Twist, '/cmd_vel_manual', 10)
         self._state_pub = self.create_publisher(String, '/explore/state', 10)
         # 2026-10-31：踢一脚被包围时退到"前面够转弯"为止，车尾由超声守卫兜底
         self._rear_blocked = False
+        self._rear_blocked_at = None
         self.create_subscription(Bool, '/base/rear_blocked',
                                  lambda m: setattr(self, '_rear_blocked', bool(m.data)), 10)
         self._pause_pub = self.create_publisher(Bool, '/explore/pause', 10)
@@ -188,12 +192,26 @@ class AutoMappingSupervisor(Node):
             #   · 退满 kick_back_max_s → 停（安全上限）
             clear_m = float(self.get_parameter('front_clear_m').value)
             front_ok = self._front_min >= clear_m
-            if not front_ok and not self._rear_blocked and \
-                    now - self._leg_at < float(self.get_parameter('kick_back_max_s').value):
-                twist = Twist()
-                twist.linear.x = -0.10
-                self._cmd_manual.publish(twist)
-                return
+            if not front_ok:
+                if self._rear_blocked:
+                    # 车尾暂时被挡：原地等着，最多 rear_wait_s 秒再去退
+                    # （挡太久说明真的没退路，本次放弃）
+                    if self._rear_blocked_at is None:
+                        self._rear_blocked_at = now
+                        self.get_logger().info('kickstart: 车尾暂被挡，等待让位')
+                    if now - self._rear_blocked_at < float(
+                            self.get_parameter('rear_wait_s').value):
+                        self._cmd_manual.publish(Twist())
+                        return
+                    self.get_logger().warn('kickstart: 车尾持续被挡，放弃后退')
+                else:
+                    self._rear_blocked_at = None
+                    if now - self._leg_at < float(
+                            self.get_parameter('kick_back_max_s').value):
+                        twist = Twist()
+                        twist.linear.x = -0.10
+                        self._cmd_manual.publish(twist)
+                        return
             self._cmd_manual.publish(Twist())
             self._backups += 1
             self.get_logger().info(

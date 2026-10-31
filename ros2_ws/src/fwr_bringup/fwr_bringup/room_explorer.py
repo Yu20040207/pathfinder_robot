@@ -86,6 +86,13 @@ class RoomExplorer(Node):
         self.create_subscription(LaserScan, '/scan', self._on_scan, scan_qos)
         self.create_subscription(Bool, '/base/rear_blocked', self._on_rear_blocked, 10)
         self._param_cli = self.create_client(SetParameters, '/base_bridge/set_parameters')
+        # 2026-10-31：发目标前先在全局代价地图上验证，避开"注定失败"的目标
+        # （否则要浪费 2 次失败 + 一次脱困才发现它到不了）
+        self._costmap = None
+        cm_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                            reliability=ReliabilityPolicy.RELIABLE)
+        self.create_subscription(OccupancyGrid, '/global_costmap/costmap',
+                                 self._on_costmap, cm_qos)
         self._escape_until = 0.0
         self._escape_start = None
         self._escape_from = None
@@ -117,6 +124,37 @@ class RoomExplorer(Node):
                 if math.isfinite(r) and r > 0.20:
                     vals.append(r)
         self._front = min(vals) if vals else float('inf')
+
+    def _on_costmap(self, msg: OccupancyGrid) -> None:
+        self._costmap = msg
+
+    def _goal_traversable(self, x: float, y: float, radius_cells: int = 2):
+        """在全局代价地图上找目标附近可通行的点；找不到返回 None。
+
+        代价 99/100 = 致命（内切/障碍），>=90 也视为不可去。
+        """
+        m = self._costmap
+        if m is None:
+            return (x, y)          # 还没代价地图，先放行
+        res = m.info.resolution
+        ox, oy = m.info.origin.position.x, m.info.origin.position.y
+        w, h = m.info.width, m.info.height
+        data = np.array(m.data, dtype=np.int16).reshape(h, w)
+        cx, cy = int((x - ox) / res), int((y - oy) / res)
+        best = None
+        best_d = 1e9
+        for dy in range(-radius_cells, radius_cells + 1):
+            for dx in range(-radius_cells, radius_cells + 1):
+                nx, ny = cx + dx, cy + dy
+                if not (0 <= nx < w and 0 <= ny < h):
+                    continue
+                if int(data[ny, nx]) >= 90:
+                    continue
+                d = dx * dx + dy * dy
+                if d < best_d:
+                    best_d = d
+                    best = (ox + nx * res, oy + ny * res)
+        return best
 
     def _on_rear_blocked(self, msg: Bool) -> None:
         self._rear_blocked = bool(msg.data)
@@ -230,23 +268,41 @@ class RoomExplorer(Node):
                     self._start_escape(self.get_clock().now().nanoseconds * 1e-9)
         self._goal_xy = None
 
-    def _patrol_goal(self, free, room_mask, res, ox, oy, robot) -> tuple | None:
-        """房间内找一个"离机器人最远的角落"当巡逻点（换角度重扫）。"""
+    def _patrol_goal(self, free, room_mask, res, ox, oy, robot):
+        """房间内找一个"离机器人最远、且没被拉黑/可通行"的角落当巡逻点。
+
+        2026-10-31：原来只取最远的一个点，失败拉黑后仍会算出同一个点，
+        形成"发目标→失败→拉黑→再发同一个"的死循环。现在按评分降序尝试多个候选。
+        """
         cells = np.argwhere(free & room_mask)
         if len(cells) == 0:
             return None
         rx, ry = robot
         cy, cx = int((ry - oy) / res), int((rx - ox) / res)
         d2 = (cells[:, 0] - cy) ** 2 + (cells[:, 1] - cx) ** 2
-        # 取最远的 5% 里、比较"靠角落"的那个
-        far = cells[d2 >= np.percentile(d2, 95)]
+        far = cells[d2 >= np.percentile(d2, 90)]
         if len(far) == 0:
             return None
-        # 角落判据：到房间中心的方向上越靠边越好
         cen = cells.mean(axis=0)
         score = np.hypot(far[:, 0] - cen[0], far[:, 1] - cen[1])
-        pick = far[int(np.argmax(score))]
-        return (ox + pick[1] * res, oy + pick[0] * res)
+        order = np.argsort(-score)
+        tried = 0
+        for idx in order:
+            if tried >= 12:          # 最多试 12 个候选
+                break
+            tried += 1
+            pick = far[int(idx)]
+            gx, gy = ox + pick[1] * res, oy + pick[0] * res
+            if math.hypot(gx - rx, gy - ry) < 0.8:
+                continue
+            key = (round(gx, 1), round(gy, 1))
+            if self._blacklist.get(key, 0) >= 2:
+                continue
+            validated = self._goal_traversable(gx, gy)
+            if validated is None:
+                continue
+            return validated
+        return None
 
     # ---------- 主循环 ----------
     def _tick(self) -> None:
@@ -377,7 +433,16 @@ class RoomExplorer(Node):
                 f'距 {math.hypot(gx_m - rx, gy_m - ry):.1f} m，'
                 f'房间内前沿 {int(in_room.sum())} 格 / 全局 {int(frontier.sum())} 格')
             self._last_log = now
-        self._send_goal(gx_m, gy_m)
+        validated = self._goal_traversable(gx_m, gy_m)
+        if validated is None:
+            key = (round(gx_m, 1), round(gy_m, 1))
+            self._blacklist[key] = 99
+            if now - self._last_log > 5.0:
+                self.get_logger().info(
+                    f'前沿 ({gx_m:.1f},{gy_m:.1f}) 在代价地图上不可通行，直接跳过')
+                self._last_log = now
+            return
+        self._send_goal(*validated)
 
 
 def main():
