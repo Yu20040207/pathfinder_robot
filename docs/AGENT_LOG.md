@@ -3289,3 +3289,27 @@ Nav2 规划 → RPP 决定倒车 → base_bridge 因 rear_blocked 拒绝执行
 否则就是"规划了但执行不了"的死循环。要做自动倒车，正确做法是
 **规划阶段就用带车尾约束的代价地图**（车尾近障时把后方标成不可通行），
 或者只让"显式脱困动作"倒车（方案 A）。
+
+## 2026-10-31 15:40 · 方案 A：卡住后用"手动通道"短退脱困
+
+### 设计
+不做"规划层倒车"（会与车尾守卫冲突，见上一条），改为**卡住时的显式短退**：
+- 触发：同一前沿目标连续失败 `escape_after_failures`（默认 2）次
+- 动作：切到手动通道（`manual_enabled=true`）→ 发 `v=-0.06` 到 `/cmd_vel_manual`
+- 上限：`escape_max_m` 0.25 m / `escape_max_s` 2.5 s，先到者结束
+- 结束：清指令、关手动通道、把该目标拉黑，继续探索
+- **安全**：手动后退本来就受 `/base/rear_blocked` 守卫约束（已验证：有障 0.000 m）
+
+走手动通道的原因：nav 通道倒车需要恢复许可（`/base/recovery_permit` +
+`/explore/state=reversing`），而 `/explore/state` 由 supervisor 发布，
+多节点抢发布会互相打架；手动通道只受车尾守卫约束，且已实车验证。
+
+### 踩到的坑
+`if self._escaping or self._run_escape(now): return` —— `_escaping=True` 时
+**短路**，短退函数根本没被调用（日志只有"短退脱困"、没有"短退完成"）。
+改成显式 `if self._escaping: self._run_escape(now); return`。
+
+### 验证状态
+- 修复后重跑 180 秒：本轮**没有卡住**（patience exceeded 0、脱困 0），
+  机器人正常探索到 (2.03, -2.87)
+- 脱困链路**尚未在实车触发过**（只有代码路径 + 单次误触发的日志）

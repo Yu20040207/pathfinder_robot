@@ -24,7 +24,11 @@ import rclpy
 import tf2_ros
 from geometry_msgs.msg import PoseStamped
 from nav2_msgs.action import NavigateToPose
-from nav_msgs.msg import OccupancyGrid
+from geometry_msgs.msg import Twist
+from nav_msgs.msg import OccupancyGrid, Odometry
+from rcl_interfaces.msg import Parameter as RclParameter
+from rcl_interfaces.msg import ParameterType
+from rcl_interfaces.srv import SetParameters
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
@@ -44,7 +48,14 @@ class RoomExplorer(Node):
         self.declare_parameter('use_room_gate', True)
         # 房间扫完却找不到前沿（房间在图上被封死）时：沿房间四角巡逻换角度重扫，
         # 往往能发现之前没扫到的门口。0 = 关闭该兜底行为。
-        self.declare_parameter('patrol_on_stuck', True)    # 关掉 = 退化为全局探索
+        self.declare_parameter('patrol_on_stuck', True)
+        # 2026-10-31 方案 A：同一目标连续失败 N 次后，用"手动通道"短退脱困。
+        # 走手动通道是因为：手动后退只受车尾超声守卫约束（nav 通道还要恢复许可），
+        # 而且这条通路已经实车验证过（有障停、无障走）。
+        self.declare_parameter('escape_after_failures', 2)
+        self.declare_parameter('escape_speed_mps', 0.06)
+        self.declare_parameter('escape_max_m', 0.25)
+        self.declare_parameter('escape_max_s', 2.5)    # 关掉 = 退化为全局探索
 
         qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
                          reliability=ReliabilityPolicy.RELIABLE)
@@ -58,6 +69,14 @@ class RoomExplorer(Node):
         self._goal_xy = None
         self._goal_sent_at = 0.0
         self._blacklist = {}     # (x,y) -> 失败次数
+        self._odom = None
+        self._vel_pub = self.create_publisher(Twist, '/cmd_vel_manual', 20)
+        self.create_subscription(Odometry, '/wheel/odom', self._on_odom, 20)
+        self._param_cli = self.create_client(SetParameters, '/base_bridge/set_parameters')
+        self._escape_until = 0.0
+        self._escape_start = None
+        self._escape_from = None
+        self._escaping = False
         self._last_log = 0.0
         self.create_timer(float(self.get_parameter('replan_s').value), self._tick)
         self.get_logger().info('房间级探索器启动：先把当前房间扫完再出门')
@@ -65,6 +84,56 @@ class RoomExplorer(Node):
     def _on_map(self, msg: OccupancyGrid) -> None:
         self._map = msg
         self._map_at = self.get_clock().now().nanoseconds * 1e-9
+
+    def _on_odom(self, msg: Odometry) -> None:
+        p = msg.pose.pose.position
+        self._odom = (p.x, p.y)
+
+    def _set_manual(self, enabled: bool) -> None:
+        if not self._param_cli.service_is_ready():
+            return
+        req = SetParameters.Request()
+        for name, val in (('motion_enabled', True), ('manual_enabled', enabled),
+                          ('manual_allow_mixed', True)):
+            prm = RclParameter()
+            prm.name = name
+            prm.value.type = ParameterType.PARAMETER_BOOL
+            prm.value.bool_value = val
+            req.parameters.append(prm)
+        self._param_cli.call_async(req)
+
+    def _start_escape(self, now: float) -> None:
+        if self._odom is None:
+            return
+        self._escaping = True
+        self._escape_start = now
+        self._escape_from = self._odom
+        self._set_manual(True)
+        self.get_logger().warn(
+            f'连续失败 {int(self.get_parameter("escape_after_failures").value)} 次 → '
+            f'短退脱困（≤{float(self.get_parameter("escape_max_m").value):.2f} m）')
+
+    def _run_escape(self, now: float) -> bool:
+        """执行短退；返回 True 表示还在退。"""
+        if not self._escaping:
+            return False
+        moved = 0.0
+        if self._odom is not None and self._escape_from is not None:
+            moved = math.hypot(self._odom[0] - self._escape_from[0],
+                               self._odom[1] - self._escape_from[1])
+        done = (moved >= float(self.get_parameter('escape_max_m').value) or
+                now - self._escape_start >= float(self.get_parameter('escape_max_s').value))
+        if done:
+            self._vel_pub.publish(Twist())
+            self._set_manual(False)
+            self._escaping = False
+            self._escape_start = None
+            self.get_logger().info(f'短退完成，位移 {moved:.2f} m，继续探索')
+            return False
+        tw = Twist()
+        tw.linear.x = -abs(float(self.get_parameter('escape_speed_mps').value))
+        self._vel_pub.publish(tw)
+        return True
 
     # ---------- 工具 ----------
     def _robot_xy(self):
@@ -114,6 +183,9 @@ class RoomExplorer(Node):
             self._blacklist[key] = self._blacklist.get(key, 0) + 1
             if self._blacklist[key] >= 2:
                 self.get_logger().warn(f'目标 {key} 连续失败，拉黑')
+                if (self._blacklist[key] == int(
+                        self.get_parameter('escape_after_failures').value)):
+                    self._start_escape(self.get_clock().now().nanoseconds * 1e-9)
         self._goal_xy = None
 
     def _patrol_goal(self, free, room_mask, res, ox, oy, robot) -> tuple | None:
@@ -150,6 +222,10 @@ class RoomExplorer(Node):
             self._goal_xy = None
             return
         self._frozen_logged = False
+        # 脱困短退期间不派新目标
+        if self._escaping:
+            self._run_escape(now)      # 注意：这里必须真的调用（原来写成 or 短路了）
+            return
         # 目标还没走完就等
         if self._goal_xy is not None:
             if math.hypot(self._goal_xy[0] - robot[0],
