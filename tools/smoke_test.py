@@ -262,7 +262,15 @@ def check_plan(n, m):
             dd = math.hypot((yy - py_i) * res, (xx - px_i) * res)
             if dd < mind:
                 mind = dd
-    ok(f'规划成功：{len(path.poses)} 点，中段离障碍最近 {mind:.2f} m')
+    pts = [(ps.pose.position.x, ps.pose.position.y) for ps in path.poses]
+    length = sum(math.hypot(pts[i + 1][0] - pts[i][0], pts[i + 1][1] - pts[i][1])
+                 for i in range(len(pts) - 1))
+    straight = math.hypot(pts[-1][0] - pts[0][0], pts[-1][1] - pts[0][1])
+    ratio = length / max(straight, 1e-3)
+    ok(f'规划成功：{len(path.poses)} 点，中段离障碍最近 {mind:.2f} m，'
+       f'长度 {length:.1f} m / 直线 {straight:.1f} m = 绕行比 {ratio:.2f}')
+    if ratio > 2.0:
+        print(f'  ! 绕行比偏大（{ratio:.2f}），检查 cost_travel_multiplier 是否过高')
     # 0.25 m 是理想值；0.15~0.25 只告警（窄门/窄通道里无法更宽），
     # 低于 0.15 m 视为回归（历史上路径穿墙时是 0.00 m）。
     if mind < 0.15:

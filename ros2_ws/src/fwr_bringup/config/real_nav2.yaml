@@ -282,12 +282,15 @@ planner_server:
       # 2026-10-30：本版本 SmacPlanner2D 没有 cost_penalty 参数（设了也不生效），
       # 真正起作用的是 cost_travel_multiplier：搜索时对高代价格的放大倍数。
       # 3.0 时规划器几乎无视膨胀代价 → 路径贴着障碍（0.32~0.45 m）→ front_stop 停车。
-      # 提到 8.0，让它宁愿绕远也不进膨胀区。
-      cost_travel_multiplier: 8.0
+      # 8.0 又太怕障碍 → 到处绕远路（现场看到路线乱拐）。
+      # 2026-10-31：折中到 4.0，并加强平滑器的"贴合规划路径"权重。
+      cost_travel_multiplier: 4.0
       # 速度提高后网格阶梯路径会放大成左右摆动；加大平滑权重、略降数据贴合。
+      # w_data 提高（0.15→0.30）：平滑后更贴合规划器给的路径，避免被拉成大弧；
+      # w_smooth 降低（0.45→0.30）：减少过度平滑造成的"绕圈感"。
       smoother:
-        w_smooth: 0.45
-        w_data: 0.15
+        w_smooth: 0.30
+        w_data: 0.30
 smoother_server:
   ros__parameters:
     use_sim_time: false

@@ -74,10 +74,6 @@ def generate_launch_description():
              parameters=[str(share / 'config' / 'real_exploration.yaml'),
                          {'use_sim_time': use_sim_time, 'require_bridge_arm': True,
                           'static_map': use_saved_map}]),
-        # 车尾超声守卫：近障时禁止后退（不产生任何前进/倒车指令）
-        Node(package='fwr_bringup', executable='rear_guard',
-             name='rear_guard', output='screen',
-             parameters=[{'use_sim_time': use_sim_time}]),
         # 地图缝合：把 5~15 cm 的墙缝膨胀封住，供全局代价地图使用。
         # 2026-10-31 回归修复：原来只在建图模式启动，而静态层固定读 /map_sealed，
         # 导致导航模式下代价地图拿不到地图（只剩 5×5 m 滚动窗口，目标稍远就规划失败）。
