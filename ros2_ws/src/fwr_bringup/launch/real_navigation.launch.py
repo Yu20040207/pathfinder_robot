@@ -71,6 +71,11 @@ def generate_launch_description():
              parameters=[str(share / 'config' / 'real_exploration.yaml'),
                          {'use_sim_time': use_sim_time, 'require_bridge_arm': True,
                           'static_map': use_saved_map}]),
+        # 建图模式：把地图细缝封住给代价地图用（否则规划路径会穿墙）
+        Node(package='fwr_bringup', executable='map_seal', output='screen',
+             condition=IfCondition(PythonExpression(
+                 ["'", use_saved_map, "' != 'true'"])),
+             parameters=[{'use_sim_time': use_sim_time}]),
         # 启动后自动做一次全局雷达匹配并播种 AMCL（手动挪车/重启后的 kidnapped 恢复）。
         # slam localization 模式下每 2 分钟把地图（pgm/yaml + posegraph）存盘。
         # 2026-10-30：自动存档在建图模式下也要跑（原来只在 slam localization 模式），

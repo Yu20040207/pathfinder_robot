@@ -10,8 +10,9 @@ from pathlib import Path
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, ExecuteProcess
 from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
@@ -23,6 +24,8 @@ def generate_launch_description():
         DeclareLaunchArgument('use_sim_time', default_value='false'),
         # slam_engine: carto（默认，推荐） 或 slam
         DeclareLaunchArgument('slam_engine', default_value='carto'),
+        # 2026-10-31：自动建图必须同时把 RViz 打开（用户要求现场能看到地图和规划）
+        DeclareLaunchArgument('start_rviz', default_value='true'),
         # 建图 + Nav2 + 门控/碰撞监控/方向选择器（复用 real_navigation 的 use_saved_map:=false 分支）
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(str(share / 'launch' / 'real_navigation.launch.py')),
@@ -35,11 +38,24 @@ def generate_launch_description():
         Node(package='fwr_bringup', executable='map_free_around_robot',
              name='map_free_around_robot', output='screen',
              parameters=[{'use_sim_time': use_sim_time}]),
-        # 前沿探索：向 /navigate_to_pose 发送目标
-        Node(package='explore_lite', executable='explore',
-             name='explore_node', output='screen',
-             parameters=[str(share / 'config' / 'real_auto_mapping.yaml'),
+        # 前沿探索（2026-10-31 换成 frontier_exploration_ros2）：
+        # 比 explore_lite 强的地方：MRTSP 目标排序（不在原地折返）、
+        # 支持非 360° 雷达、前沿抑制（门进不去就不反复撞）、自带完成事件。
+        Node(package='frontier_exploration_ros2', executable='frontier_explorer',
+             name='frontier_explorer', output='screen',
+             parameters=[str(share / 'config' / 'real_frontier_exploration.yaml'),
                          {'use_sim_time': use_sim_time}]),
+        # 「停止建图」服务：停车 + 结束轨迹 + 保存 pbstream/pgm
+        Node(package='fwr_bringup', executable='mapping_save', output='screen',
+             parameters=[{'use_sim_time': use_sim_time}]),
+        # RViz：显示地图 / 激光 / 规划路径 / 沿墙规划 / 录制路线
+        Node(package='rviz2', executable='rviz2', name='rviz2', output='log',
+             condition=IfCondition(LaunchConfiguration('start_rviz')),
+             arguments=['-d', str(share / 'config' / 'real_localization.rviz')]),
+        # 链路看门狗：碰撞监控卡死时自动重启（老毛病，见 AGENTS.md）
+        ExecuteProcess(
+            cmd=['python3', str(Path(__file__).resolve().parents[4] / 'tools' / 'chain_watchdog.py')],
+            name='chain_watchdog', output='screen'),
         # 监督节点：踢一脚小方块让地图长轮廓 → 打开自动授权交给 explore_lite
         # （同时 10 Hz 发布 /explore/state=navigating 保持安全链）
         Node(package='fwr_bringup', executable='auto_mapping_supervisor',

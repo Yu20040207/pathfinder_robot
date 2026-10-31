@@ -105,7 +105,8 @@ controller_server:
       simulate_ahead_time: 1.0
       rotate_to_goal_heading: false
       # 2026-10-30：原 0.06 m/s 太慢（建图时设的），导航恢复 0.15。
-      desired_linear_vel: 0.15
+      # 2026-10-31 建图时降速：0.15→0.12，扫描拖影更少（重影主要来源之一）
+      desired_linear_vel: 0.12
       # 前视距离必须大于车长（0.60 m）才有稳定裕度：
       # 0.30 m 时车头前方只有半个车身，微小横向误差就产生大角速度 → 左右摆动。
       lookahead_dist: 0.55
@@ -150,10 +151,13 @@ local_costmap:
         # 真实障碍由 collision_monitor 用原始雷达兜底）。
         # 2026-10-30：0.20 时代价梯度过弱 → 规划器贴障碍走 → 碰撞监控停车。
         # 膨胀是“代价”不是“墙”，0.30 仍可穿过 0.86 m 门（只是代价高）。
-        inflation_radius: 0.30
+        # 2026-10-31：0.30 相对 0.215 m 内切半径只剩 0.085 m 缓冲，现场感觉贴太近。
+        # 提到 0.40；同时把 cost_scaling_factor 2.0→3.0，让代价衰减更快，
+        # 0.86 m 门洞仍可通行（否则 0.40 膨胀会把门洞压成不可通行）。
+        inflation_radius: 0.40
         # 2026-10-30：cost_scaling_factor 3.0 时代价衰减太快，缓冲区形同虚设；
         # 降到 2.0 让 0.30 m 缓冲带整体保持高代价，规划器才会绕开。
-        cost_scaling_factor: 2.0
+        cost_scaling_factor: 3.0
       obstacle_layer:
         plugin: nav2_costmap_2d::ObstacleLayer
         enabled: true
@@ -174,6 +178,8 @@ local_costmap:
       static_layer:
         plugin: nav2_costmap_2d::StaticLayer
         map_subscribe_transient_local: true
+        # 用缝合后的地图：细缝被封住，门洞不受影响
+        map_topic: /map_sealed
       always_send_full_costmap: true
       footprint_padding: 0.02
 global_costmap:
@@ -186,8 +192,8 @@ global_costmap:
       use_sim_time: false
       footprint: '[[0.30, 0.215], [0.30, -0.215], [-0.30, -0.215], [-0.30, 0.215]]'
       resolution: 0.05
-      # 未知格致命会挡住“到前沿探索”的目标点（前沿本身在未知里）；
-      # 关掉后未知=可通行，真实障碍仍由局部代价地图与碰撞监控拦截。
+      # 2026-10-31：这里保持 false（未知=可通行），否则前沿目标点会被拒；
+      # 「路径穿墙」改由 map_seal 节点缝合地图缺口来解决（静态层读 /map_sealed）。
       track_unknown_space: false
       plugins:
       - static_layer
@@ -212,6 +218,8 @@ global_costmap:
       static_layer:
         plugin: nav2_costmap_2d::StaticLayer
         map_subscribe_transient_local: true
+        # 用缝合后的地图：细缝被封住，门洞不受影响
+        map_topic: /map_sealed
       inflation_layer:
         plugin: nav2_costmap_2d::InflationLayer
         # 0.45 会让贴墙停车的机器人自身处于致命格（规划直接失败），改 0.30
@@ -221,10 +229,13 @@ global_costmap:
         # 取 0.20（与局部一致）；真实障碍由 collision_monitor（原始雷达）兜底。
         # 2026-10-30：0.20 时代价梯度过弱 → 规划器贴障碍走 → 碰撞监控停车。
         # 膨胀是“代价”不是“墙”，0.30 仍可穿过 0.86 m 门（只是代价高）。
-        inflation_radius: 0.30
+        # 2026-10-31：0.30 相对 0.215 m 内切半径只剩 0.085 m 缓冲，现场感觉贴太近。
+        # 提到 0.40；同时把 cost_scaling_factor 2.0→3.0，让代价衰减更快，
+        # 0.86 m 门洞仍可通行（否则 0.40 膨胀会把门洞压成不可通行）。
+        inflation_radius: 0.40
         # 2026-10-30：cost_scaling_factor 3.0 时代价衰减太快，缓冲区形同虚设；
         # 降到 2.0 让 0.30 m 缓冲带整体保持高代价，规划器才会绕开。
-        cost_scaling_factor: 2.0
+        cost_scaling_factor: 3.0
       always_send_full_costmap: true
       footprint_padding: 0.02
 planner_server:

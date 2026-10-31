@@ -2990,3 +2990,50 @@ base = (11.53, 8.30)  残差 0.009~0.010 m
 
 ### 当前运行状态
 - 建图栈按需启动；RViz 面板已带急停按钮
+
+## 2026-10-31 11:05 · 换成 frontier_exploration_ros2 + 穿墙/重影/存档修复
+
+### 会话目标
+放弃手写沿墙控制器，改用成熟开源探索包；修掉规划穿墙、重影、停止不存档。
+
+### 关键决策（重要）
+**教训**：项目规则要求"先调研成熟方案再设计"，但我先手写了 wall_follower，
+绕了整整两天。**下次做新功能前必须先搜现成包**。
+最终采用 [`frontier_exploration_ros2`](https://github.com/mertgulerx/frontier_exploration_ros2)
+（ROS 2 Humble，MRTSP 目标排序，支持非 360° 雷达，自带 RViz 面板和 stop 服务）。
+
+### 仓库改动
+- 新增第三方包 `ros2_ws/src/frontier_exploration_ros2`（git clone，非 vendored patch）
+- 新增 `fwr_bringup/map_seal.py`：把地图上 5~15 cm 的墙缝膨胀封住 → `/map_sealed`
+- 新增 `fwr_bringup/mapping_save.py`：服务 `/mapping/save`，停车+结束轨迹+存 pbstream+转栅格图
+  （**注意**：不能在服务回调里 `spin_once` 等 future，用定时器状态机）
+- `real_nav2.yaml`：`inflation_radius 0.30→0.40`、`cost_scaling_factor 2.0→3.0`
+  （否则 0.86 m 门洞不可通行）；全局代价地图 static_layer 改读 `/map_sealed`；
+  `desired_linear_vel 0.15→0.12`（减少扫描拖影）
+- `fwr_2d.lua`：`num_range_data 120→90`、`optimize_every_n_nodes 20→12`、
+  `constraint_builder.min_score 0.6→0.55`（减少重影）
+- `real_frontier_exploration.yaml`：视场 250°、抑制开启、关抢占、
+  `weight_distance_wd 2.5`（优先扫完当前房间）
+- `real_auto_mapping.launch.py`：换探索器、加 map_seal / mapping_save / chain_watchdog / **RViz**
+- `fwr_rviz_nav` 面板：「停止建图」改为调用 `/mapping/save`（停车+存档）
+- `real_rviz_nav` 面板新增「开始建图/停止建图」按钮
+
+### 已修复的坑
+1. **规划穿墙**：`track_unknown_space: false` 把未知当可通行，而地图墙上有很多未知小缺口。
+   实测路径终点离墙 **0.00 m**。→ map_seal 缝合 + 静态层读 /map_sealed 后 **0.35 m**。
+2. **目标被拒**：改成 `track_unknown_space: true` 后，前沿目标点在未知边界上 → Nav2 拒绝。
+3. **`ros2 topic hz` 对 TRANSIENT_LOCAL 话题报"未发布"**：实际有 2.2 Hz，是 CLI QoS 问题。
+4. **map_seal 只发一次**：用 header 时间戳去重，而 Cartographer 时间戳不变 → 去掉去重。
+5. **服务回调里 spin_once**：rclpy 单线程执行器无法完成 future → 改定时器状态机。
+
+### 已验证
+- 自动建图跑通：地图 **37.0×35.4 m、墙 2585、实心 82.3%、空闲 350.3 m²、
+  可放目标 140.0 m²、主块 98.9%**（历史最佳），存 `~/.carto_maps/test_run_1031.*`
+- 规划路径离墙 0.35 m（修复前 0.00 m）
+- `/mapping/save` 返回成功并生成 pbstream
+
+### 未验证 / 遗留
+- 房间未扫全：地图里有 **12 处被墙围住但没扫到的区域，共 62.3 m²**（最大 19.9 m²）
+- 重影：27 处窄缝共 17.3 m²（两片墙夹 8~16 cm），墙厚中位 0.10 m
+- 新参数（子图 90 帧、优化 12 节点、速度 0.12）尚未跑一轮验证
+- 探索器的 `weight_distance_wd 2.5` 是否真能"扫完房间再走"未验证

@@ -111,6 +111,7 @@ protected:
     manual_vel_pub_ = node_->create_publisher<geometry_msgs::msg::Twist>("/cmd_vel_manual", 10);
     base_param_client_ =
       std::make_shared<rclcpp::AsyncParametersClient>(node_, "/base_bridge");
+    mapping_save_client_ = node_->create_client<std_srvs::srv::Trigger>("/mapping/save");
     click_sub_ = node_->create_subscription<geometry_msgs::msg::PointStamped>(
       "/clicked_point", 10, [this](const geometry_msgs::msg::PointStamped::SharedPtr msg) {
         if (msg->header.frame_id != "map") {
@@ -198,12 +199,27 @@ protected:
     connect(start_button_, &QPushButton::clicked, this, [this]() {start_navigation();});
     connect(resume_button_, &QPushButton::clicked, this, [this]() {resume_navigation();});
     connect(map_stop_button_, &QPushButton::clicked, this, [this]() {
-      // 先发零速度，再把底盘两道门关掉（底盘收到任何指令都会丢弃）
+      // 先急停，再让 mapping_save 结束轨迹并存盘（pbstream + pgm）
       if (manual_vel_pub_) {
         manual_vel_pub_->publish(geometry_msgs::msg::Twist());
       }
       set_base_gates(false);
-      status_label_->setText("已发送停止：速度清零 + 关闭运动门");
+      if (!mapping_save_client_ || !mapping_save_client_->service_is_ready()) {
+        status_label_->setText("已停止；但 /mapping/save 服务不可用，地图未保存");
+        return;
+      }
+      status_label_->setText("已停止，正在保存地图…");
+      // 只调用一次！保存会结束轨迹，重复调用没有意义
+      auto future = mapping_save_client_->async_send_request(
+        std::make_shared<std_srvs::srv::Trigger::Request>(),
+        [this](rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture f) {
+          const auto response = f.get();
+          if (response) {
+            status_label_->setText(
+              QString::fromStdString("地图已保存：" + response->message));
+          }
+        });
+      (void)future;
     });
     connect(map_start_button_, &QPushButton::clicked, this, [this]() {
       set_base_gates(true);
@@ -876,6 +892,7 @@ private:
   rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr stop_client_;
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr manual_vel_pub_;
   std::shared_ptr<rclcpp::AsyncParametersClient> base_param_client_;
+  rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr mapping_save_client_;
   QPushButton * map_start_button_ = nullptr;
   QPushButton * map_stop_button_ = nullptr;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr ready_sub_;

@@ -62,12 +62,15 @@ TRAJECTORY_BUILDER_2D.motion_filter.max_angle_radians = math.rad(0.3)
 
 -- 子图与回环
 -- 每个子图收更多帧，直线墙的估计更稳（原 90）
-TRAJECTORY_BUILDER_2D.submaps.num_range_data = 120
+-- 2026-10-31 减少重影：子图 120→90 帧（更短 → 回环约束更多）
+TRAJECTORY_BUILDER_2D.submaps.num_range_data = 90
 TRAJECTORY_BUILDER_2D.submaps.grid_options_2d.resolution = 0.05
 
 -- 更频繁做位姿图优化，歪斜能更早被拉回（原 30）
-POSE_GRAPH.optimize_every_n_nodes = 20
-POSE_GRAPH.constraint_builder.min_score = 0.6
+-- 2026-10-31 减少重影：每 20→12 个节点优化一次位姿图
+POSE_GRAPH.optimize_every_n_nodes = 12
+-- 放宽一点(0.6→0.55)：真实环境回环更难匹配，太严会漏掉约束
+POSE_GRAPH.constraint_builder.min_score = 0.55
 POSE_GRAPH.constraint_builder.global_localization_min_score = 0.65
 POSE_GRAPH.constraint_builder.sampling_ratio = 0.3
 POSE_GRAPH.max_num_final_iterations = 200
