@@ -172,6 +172,8 @@ class UltrasonicRear(Node):
         self._last_code = [0] * 4         # 最近一次原始码（含异常码，便于诊断）
         self._link_ok = False
         self._next_open_at = 0.0
+        self._bad_frames = 0          # 连续坏帧计数（RS485 偶发帧错）
+        self.declare_parameter('max_bad_frames', 3)
         self._rtu = None
 
         period = 1.0 / max(0.5, float(self.get_parameter('poll_hz').value))
@@ -228,12 +230,26 @@ class UltrasonicRear(Node):
             return
         try:
             values = self._read_distances()
-        except (OSError, ValueError) as exc:
+        except OSError as exc:                 # 串口本身坏了 → 立刻重开
             self._drop_link(str(exc))
             return
-        if values is None:
-            self.get_logger().warn('四路读数为空（无应答）', throttle_duration_sec=10.0)
+        except ValueError as exc:              # CRC 错等偶发帧错 → 少量容忍
+            self._bad_frames += 1
+            limit = int(self.get_parameter('max_bad_frames').value)
+            if self._bad_frames >= limit:
+                self._drop_link(f'连续 {self._bad_frames} 次坏帧: {exc}')
+            else:
+                self.get_logger().warn(
+                    f'帧错（{self._bad_frames}/{limit}）：{exc}',
+                    throttle_duration_sec=10.0)
             return
+        if values is None:
+            self._bad_frames += 1
+            limit = int(self.get_parameter('max_bad_frames').value)
+            if self._bad_frames >= limit:
+                self._drop_link(f'连续 {self._bad_frames} 次无应答')
+            return
+        self._bad_frames = 0                    # 成功即清零
         now = self.get_clock().now()
         now_s = now.nanoseconds * 1e-9
         for i, raw in enumerate(values):
