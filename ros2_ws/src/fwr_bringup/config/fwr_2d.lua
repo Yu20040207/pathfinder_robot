@@ -41,7 +41,10 @@ MAP_BUILDER.use_trajectory_builder_2d = true
 -- 2026-10-30：0.12 会把车身自击（0.13~0.15 m）当成障碍画进地图；提到 0.20
 TRAJECTORY_BUILDER_2D.min_range = 0.20
 TRAJECTORY_BUILDER_2D.max_range = 12.0
-TRAJECTORY_BUILDER_2D.missing_data_ray_length = 3.0
+-- 2026-10-31：3.0 会把「没有回波」的激光束也画成 3 m 空闲，
+-- 地图上出现大片扇形假空闲（实测墙实心度只有 74%）。
+-- 收到 1.0，只在确实有回波的地方建墙/空闲。
+TRAJECTORY_BUILDER_2D.missing_data_ray_length = 1.0
 TRAJECTORY_BUILDER_2D.use_imu_data = true
 -- 走廊关键项：开启在线相关匹配（分支限界），平行墙场景比纯优化匹配稳
 TRAJECTORY_BUILDER_2D.use_online_correlative_scan_matching = true

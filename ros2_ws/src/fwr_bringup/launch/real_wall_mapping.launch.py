@@ -34,6 +34,12 @@ def generate_launch_description():
             PythonLaunchDescriptionSource(
                 str(share / 'launch' / 'real_mapping_cartographer.launch.py')),
             launch_arguments={'use_sim_time': use_sim_time}.items()),
+        # 每 2 分钟把 Cartographer 状态写盘（崩了也不至于全丢）
+        Node(package='fwr_bringup', executable='map_autosave', output='screen',
+             parameters=[{'use_sim_time': use_sim_time,
+                          'engine': 'carto',
+                          'map_name': 'wall_live',
+                          'period_s': 120.0}]),
         # 沿墙控制（自己打开运动门）
         Node(package='fwr_bringup', executable='wall_follower',
              name='wall_follower', output='screen',
