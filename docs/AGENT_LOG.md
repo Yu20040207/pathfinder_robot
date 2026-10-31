@@ -3451,3 +3451,27 @@ if (c->active && (uint32_t)(skips[i]-c->skipped[i])>8) fail(c, BASE_ENCODER);
 2. 检查电机线是否与编码器线并行捆扎（EMI）；必要时分开走线或加磁环
 3. 修好后：`ros2 service call /base/clear_fault` 需在**纯底盘栈**下执行
    （`explore_state` 不能是 navigating、Nav2 无活动目标、两道门都关）
+
+## 2026-10-31 18:20 · 雷达视场一直是 180°（launch 覆盖了代码默认值）
+
+### 问题
+用户觉得雷达"像 180 度"。查证：`/scan_mapping` 的 `rear_half_angle_rad` 实际生效值是
+**1.5708 rad = 90°**，即后方屏蔽 ±90°、有效视场只有 **180°**。
+
+根因：`real_mapping.launch.py` / `real_mapping_rtabmap.launch.py` 里**写死**
+`'rear_half_angle_rad': 1.5707963267948966`，优先级高于代码默认值
+（`scan_mapping_filter.py` 里的 `math.radians(55.0)`），所以上午改代码根本没生效。
+
+### 修复与验证
+两个 launch 都改成 `math.radians(50.0)`（实测车身只挡 ±45°，留 5° 余量）。
+实测屏蔽边界：
+```
+|角度| 0~40°   : 100% 屏蔽
+|角度| 40~50°  : 100% 屏蔽
+|角度| 50~60°  :   8%（自然无回波）
+|角度| 60~90°  :  11%（自然无回波）
+```
+⇒ 有效视场 **260°**（此前 180°）。
+
+这解释了长期以来的墙薄、重影、"侧面墙扫不到"等问题：**少了 80° 数据**。
+AGENTS.md 里的说法（250°）已同步更正，并注明"必须改 launch，不是改代码默认值"。

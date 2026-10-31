@@ -100,7 +100,12 @@ class Watchdog(Node):
             self._do(name, Transition.TRANSITION_DEACTIVATE, 'deactivate')
             self._do(name, Transition.TRANSITION_ACTIVATE, 'activate')
         else:
-            self.get_logger().warn('%s 状态 %s，尝试直接激活' % (name, state))
+            # unknown（get_state 没答上来）时不能只试 activate —— 节点很可能已经
+            # 是 active 但卡住，ACTIVATE 转换会报 "No transition matching 3"。
+            # 这时走已知有效的 deactivate->activate 周期。
+            self.get_logger().warn('%s 状态 %s，执行 deactivate->activate 周期'
+                                   % (name, state))
+            self._do(name, Transition.TRANSITION_DEACTIVATE, 'deactivate')
             self._do(name, Transition.TRANSITION_ACTIVATE, 'activate')
 
     def _health(self):

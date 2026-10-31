@@ -1,5 +1,6 @@
 """Real C1 + encoder + IMU mapping; base motion remains disabled by default."""
 
+import math
 from pathlib import Path
 
 from ament_index_python.packages import get_package_share_directory
@@ -42,7 +43,7 @@ def generate_launch_description():
         Node(package='fwr_bringup', executable='scan_mapping_filter',
              name='scan_mapping_filter', output='screen',
              parameters=[{'use_sim_time': use_sim_time,
-                          'rear_half_angle_rad': 1.5707963267948966}]),
+                          'rear_half_angle_rad': math.radians(50.0)}]),
         Node(package='robot_state_publisher', executable='robot_state_publisher',
              name='robot_state_publisher', output='screen',
              parameters=[{'robot_description': description, 'use_sim_time': use_sim_time}]),
