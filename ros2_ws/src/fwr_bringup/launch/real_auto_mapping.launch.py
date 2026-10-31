@@ -13,7 +13,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, ExecuteProcess
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.conditions import IfCondition
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 
 
@@ -28,6 +28,10 @@ def generate_launch_description():
         DeclareLaunchArgument('start_rviz', default_value='true'),
         # 2026-10-31：补扫模式用 —— 关掉自动探索，手动发目标
         DeclareLaunchArgument('use_explorer', default_value='true'),
+        # 2026-10-31：探索策略
+        #   room     = 房间级探索（先把当前房间扫完再出门，默认）
+        #   frontier = 全局前沿探索（frontier_exploration_ros2）
+        DeclareLaunchArgument('explorer', default_value='room'),
         DeclareLaunchArgument('load_state', default_value=''),
         # 建图 + Nav2 + 门控/碰撞监控/方向选择器（复用 real_navigation 的 use_saved_map:=false 分支）
         IncludeLaunchDescription(
@@ -45,9 +49,18 @@ def generate_launch_description():
         # 前沿探索（2026-10-31 换成 frontier_exploration_ros2）：
         # 比 explore_lite 强的地方：MRTSP 目标排序（不在原地折返）、
         # 支持非 360° 雷达、前沿抑制（门进不去就不反复撞）、自带完成事件。
+        # 房间级探索：先把当前房间扫完整再出门
+        Node(package='fwr_bringup', executable='room_explorer',
+             name='room_explorer', output='screen',
+             condition=IfCondition(PythonExpression([
+                 "'", LaunchConfiguration('use_explorer'), "' == 'true' and '",
+                 LaunchConfiguration('explorer'), "' == 'room'"])),
+             parameters=[{'use_sim_time': use_sim_time}]),
         Node(package='frontier_exploration_ros2', executable='frontier_explorer',
              name='frontier_explorer', output='screen',
-             condition=IfCondition(LaunchConfiguration('use_explorer')),
+             condition=IfCondition(PythonExpression([
+                 "'", LaunchConfiguration('use_explorer'), "' == 'true' and '",
+                 LaunchConfiguration('explorer'), "' == 'frontier'"])),
              parameters=[str(share / 'config' / 'real_frontier_exploration.yaml'),
                          {'use_sim_time': use_sim_time}]),
         # 「停止建图」服务：停车 + 结束轨迹 + 保存 pbstream/pgm

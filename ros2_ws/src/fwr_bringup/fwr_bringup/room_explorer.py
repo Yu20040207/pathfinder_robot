@@ -1,0 +1,233 @@
+#!/usr/bin/env python3
+"""房间级探索器：先把当前房间扫完整（前沿清空），再出门去下一个房间。
+
+为什么需要它（2026-10-31 现场反馈）：
+  全局前沿探索会"跳"着走 —— 刚进房间就发现别处有个更大的前沿，于是掉头出去，
+  房间的墙只扫了一半，地图上留下没封闭的缺口。
+
+做法：
+  1. 把空闲区域"腐蚀" door_closing_m 米 —— 门洞（0.8~0.9 m 宽）会断开，
+     房间被分成独立连通块
+  2. 找出机器人所在的那一块 = 当前房间
+  3. 在房间里找"空闲挨着未知"的前沿格；有就派导航目标（离机器人最近的）
+  4. 房间里的前沿全部消灭后，才允许去房间外的前沿（出门）
+
+接口：
+  · 订阅 /map（transient_local）、TF map→base_footprint
+  · 通过 Nav2 的 navigate_to_pose 发目标
+  · 参数：door_closing_m / goal_min_m / goal_max_m / replan_s / use_room_gate
+"""
+import math
+
+import numpy as np
+import rclpy
+import tf2_ros
+from geometry_msgs.msg import PoseStamped
+from nav2_msgs.action import NavigateToPose
+from nav_msgs.msg import OccupancyGrid
+from rclpy.action import ActionClient
+from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from scipy.ndimage import binary_erosion, binary_dilation, label
+
+
+class RoomExplorer(Node):
+    def __init__(self) -> None:
+        super().__init__('room_explorer')
+        self.declare_parameter('map_topic', '/map')
+        self.declare_parameter('door_closing_m', 0.42)   # 腐蚀半径：门洞断开
+        self.declare_parameter('goal_min_m', 0.8)        # 目标离机器人最近距离
+        self.declare_parameter('goal_max_m', 12.0)       # 最远
+        self.declare_parameter('replan_s', 3.0)          # 多久重新评估一次
+        self.declare_parameter('finish_unknown_m2', 0.6)  # 房间剩余未知小于此值算扫完
+        self.declare_parameter('goal_reached_m', 0.5)
+        self.declare_parameter('use_room_gate', True)    # 关掉 = 退化为全局探索
+
+        qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                         reliability=ReliabilityPolicy.RELIABLE)
+        self._map = None
+        self.create_subscription(OccupancyGrid, str(self.get_parameter('map_topic').value),
+                                 self._on_map, qos)
+        self._buf = tf2_ros.Buffer()
+        tf2_ros.TransformListener(self._buf, self)
+        self._client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
+        self._goal_xy = None
+        self._goal_sent_at = 0.0
+        self._blacklist = {}     # (x,y) -> 失败次数
+        self._last_log = 0.0
+        self.create_timer(float(self.get_parameter('replan_s').value), self._tick)
+        self.get_logger().info('房间级探索器启动：先把当前房间扫完再出门')
+
+    def _on_map(self, msg: OccupancyGrid) -> None:
+        self._map = msg
+
+    # ---------- 工具 ----------
+    def _robot_xy(self):
+        try:
+            tr = self._buf.lookup_transform('map', 'base_footprint',
+                                            rclpy.time.Time(),
+                                            timeout=rclpy.duration.Duration(seconds=0.2))
+            return tr.transform.translation.x, tr.transform.translation.y
+        except Exception:                               # noqa: BLE001
+            return None
+
+    def _send_goal(self, x: float, y: float) -> None:
+        if not self._client.wait_for_server(timeout_sec=2.0):
+            self.get_logger().warn('navigate_to_pose 不在线')
+            return
+        goal = NavigateToPose.Goal()
+        goal.pose = PoseStamped()
+        goal.pose.header.frame_id = 'map'
+        goal.pose.header.stamp = rclpy.time.Time().to_msg()   # 0 = 最新，避免外推错误
+        goal.pose.pose.position.x = float(x)
+        goal.pose.pose.position.y = float(y)
+        goal.pose.pose.orientation.w = 1.0
+        fut = self._client.send_goal_async(goal)
+        self._goal_xy = (x, y)
+        self._goal_sent_at = self.get_clock().now().nanoseconds * 1e-9
+        fut.add_done_callback(self._goal_done)
+
+    def _goal_done(self, future) -> None:
+        try:
+            handle = future.result()
+            if handle is not None and handle.accepted:
+                handle.get_result_async().add_done_callback(self._result_done)
+            else:
+                self._goal_xy = None
+        except Exception:                               # noqa: BLE001
+            self._goal_xy = None
+
+    def _result_done(self, future) -> None:
+        # 记录失败次数：同一目标失败两次就拉黑，避免死循环重发
+        try:
+            res = future.result()
+            ok = res is not None and res.status == 4
+        except Exception:                               # noqa: BLE001
+            ok = False
+        if not ok and self._goal_xy is not None:
+            key = (round(self._goal_xy[0], 1), round(self._goal_xy[1], 1))
+            self._blacklist[key] = self._blacklist.get(key, 0) + 1
+            if self._blacklist[key] >= 2:
+                self.get_logger().warn(f'目标 {key} 连续失败，拉黑')
+        self._goal_xy = None
+
+    # ---------- 主循环 ----------
+    def _tick(self) -> None:
+        m = self._map
+        robot = self._robot_xy()
+        if m is None or robot is None:
+            return
+        now = self.get_clock().now().nanoseconds * 1e-9
+        # 目标还没走完就等
+        if self._goal_xy is not None:
+            if math.hypot(self._goal_xy[0] - robot[0],
+                          self._goal_xy[1] - robot[1]) < float(
+                              self.get_parameter('goal_reached_m').value):
+                self._goal_xy = None
+            elif now - self._goal_sent_at > 60.0:
+                self.get_logger().warn('目标 60 秒没到，换一个')
+                self._goal_xy = None
+            else:
+                return
+
+        res = m.info.resolution
+        ox, oy = m.info.origin.position.x, m.info.origin.position.y
+        w, h = m.info.width, m.info.height
+        d = np.array(m.data, dtype=np.int16).reshape(h, w)
+        free = d == 0
+        if not free.any():
+            return
+        rx, ry = robot
+        cxp, cyp = int((rx - ox) / res), int((ry - oy) / res)
+        if not (0 <= cxp < w and 0 <= cyp < h):
+            return
+
+        # 1) 房间分割：腐蚀掉门洞宽度的一半 → 房间独立
+        r = max(1, int(round(float(self.get_parameter('door_closing_m').value) / res)))
+        core = binary_erosion(free, np.ones((2 * r + 1, 2 * r + 1)))
+        lab, _ = label(core, structure=np.ones((3, 3)))
+        room_id = lab[cyp, cxp]
+        if room_id == 0:
+            # 机器人不在任何"房间芯"里（在门口/窄处）→ 找最近的芯
+            ys, xs = np.where(lab > 0)
+            if len(ys) == 0:
+                return
+            idx = int(np.argmin((ys - cyp) ** 2 + (xs - cxp) ** 2))
+            room_id = lab[ys[idx], xs[idx]]
+        # 把房间芯膨胀回去（恢复房间的被腐蚀边界）
+        room_mask = binary_dilation(lab == room_id, np.ones((2 * r + 1, 2 * r + 1)))
+
+        # 2) 房间内的前沿：空闲且邻接未知
+        unknown = d < 0
+        pad = np.pad(unknown, 1, constant_values=False)
+        nb_unknown = np.zeros_like(unknown)
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                if dy == 0 and dx == 0:
+                    continue
+                nb_unknown |= pad[1 + dy:1 + dy + h, 1 + dx:1 + dx + w]
+        frontier = free & nb_unknown
+        in_room = frontier & room_mask
+        use_gate = bool(self.get_parameter('use_room_gate').value)
+
+        cand = np.argwhere(in_room if (use_gate and in_room.any()) else frontier)
+        free_area = float(free.sum()) * res * res
+        if len(cand) == 0:
+            # 地图刚起来时 free 很小、前沿为 0 是正常的，不能立刻判结束。
+            if free_area < 5.0:
+                self._empty_count = 0
+                return
+            self._empty_count = getattr(self, '_empty_count', 0) + 1
+            if self._empty_count == 5 and not getattr(self, '_done_logged', False):
+                self.get_logger().info(
+                    f'连续 5 次没有前沿（空闲 {free_area:.0f} m²），探索结束')
+                self._done_logged = True
+            return
+        self._empty_count = 0
+        self._done_logged = False
+
+        # 3) 选目标：房间内离机器人最近、且距离合适的那一类
+        dist = np.hypot((cand[:, 0] - cyp) * res, (cand[:, 1] - cxp) * res)
+        lo = float(self.get_parameter('goal_min_m').value)
+        hi = float(self.get_parameter('goal_max_m').value)
+        sel = np.where((dist >= lo) & (dist <= hi))[0]
+        if len(sel) == 0:
+            sel = np.argsort(dist)[:20]
+        # 房间内优先：选距离分位数 30% 的点，避免总奔最远
+        order = sel[np.argsort(dist[sel])]
+        idx = int(order[min(len(order) - 1, max(0, int(len(order) * 0.3)))])
+        # 跳过被拉黑的目标
+        tries = 0
+        while tries < len(order):
+            gy, gx = int(cand[idx][0]), int(cand[idx][1])
+            key = (round(ox + gx * res, 1), round(oy + gy * res, 1))
+            if self._blacklist.get(key, 0) < 2:
+                break
+            tries += 1
+            idx = int(order[min(len(order) - 1, idx + 1)])
+        gx_m, gy_m = ox + gx * res, oy + gy * res
+        scope = '房间内' if (use_gate and in_room.any()) else '房间外'
+        if now - self._last_log > 10.0:
+            self.get_logger().info(
+                f'{scope}前沿：目标 ({gx_m:.2f},{gy_m:.2f}) '
+                f'距 {math.hypot(gx_m - rx, gy_m - ry):.1f} m，'
+                f'房间内前沿 {int(in_room.sum())} 格 / 全局 {int(frontier.sum())} 格')
+            self._last_log = now
+        self._send_goal(gx_m, gy_m)
+
+
+def main():
+    rclpy.init()
+    node = RoomExplorer()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
