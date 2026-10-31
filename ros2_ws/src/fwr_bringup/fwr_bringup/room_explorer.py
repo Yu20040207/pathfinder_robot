@@ -97,6 +97,8 @@ class RoomExplorer(Node):
         self._escape_start = None
         self._escape_from = None
         self._escaping = False
+        # 连续"目标不可通行"计数：连续多次说明车被堵在死角，必须脱困
+        self._skip_streak = 0
         self._last_log = 0.0
         self.create_timer(float(self.get_parameter('replan_s').value), self._tick)
         self.get_logger().info('房间级探索器启动：先把当前房间扫完再出门')
@@ -437,11 +439,21 @@ class RoomExplorer(Node):
         if validated is None:
             key = (round(gx_m, 1), round(gy_m, 1))
             self._blacklist[key] = 99
+            self._skip_streak += 1
             if now - self._last_log > 5.0:
                 self.get_logger().info(
-                    f'前沿 ({gx_m:.1f},{gy_m:.1f}) 在代价地图上不可通行，直接跳过')
+                    f'前沿 ({gx_m:.1f},{gy_m:.1f}) 在代价地图上不可通行，直接跳过'
+                    f'（连续 {self._skip_streak} 次）')
                 self._last_log = now
+            # 2026-10-31：连续 3 次都不可通行 = 车被堵在死角，
+            # 光跳过永远不会触发脱困 → 主动后退。
+            if self._skip_streak >= 3:
+                self.get_logger().warn(
+                    f'连续 {self._skip_streak} 个目标都不可通行，车可能被堵 → 脱困')
+                self._skip_streak = 0
+                self._start_escape(now)
             return
+        self._skip_streak = 0
         self._send_goal(*validated)
 
 
