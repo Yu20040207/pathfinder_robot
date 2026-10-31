@@ -3475,3 +3475,40 @@ if (c->active && (uint32_t)(skips[i]-c->skipped[i])>8) fail(c, BASE_ENCODER);
 
 这解释了长期以来的墙薄、重影、"侧面墙扫不到"等问题：**少了 80° 数据**。
 AGENTS.md 里的说法（250°）已同步更正，并注明"必须改 launch，不是改代码默认值"。
+
+## 2026-10-31 18:50 · 四房间仿真环境搭好（Gazebo Fortress + ros_gz）
+
+### 目标
+用户要求：先在仿真里把自动建图跑通（4 个房间 + 家具 + 模拟雷达/超声），再上实机。
+
+### 新增文件
+- `sim/worlds/four_rooms.sdf` — 2×2 四房间（14×14 m），每间有家具（桌椅/柜子/沙发/书架/桶等），
+  房间之间有 0.9 m 门洞
+- `sim/models/fwr_bot/model.sdf` — 差速底盘（0.60×0.43、轮距 0.262）、
+  **360° gpu_lidar 倒装 180°**（scan 角 0 = 车尾，与实车一致）、
+  4 个后向 3 束窄 lidar 模拟超声、IMU、DiffDrive 插件
+- `sim/config/bridge.yaml` — ros_gz_bridge 11 条映射
+- `sim/config/sim_2d.lua` — 与 `fwr_2d.lua` 相同，仅 `tracking_frame` 改为 `base_link`
+- `sim/launch/sim_bringup.launch.py` — 一键起 Gazebo + 机器人 + 桥接 +
+  静态 TF + `scan_mapping_filter`(±50°) + `ultrasonic_sim` + EKF + Cartographer + RViz
+- `ros2_ws/src/fwr_bringup/fwr_bringup/ultrasonic_sim.py` — LaserScan→`sensor_msgs/Range`
+  （接口与实车 `/ultrasonic_rear/*` 完全一致，上层代码不用改）
+
+### 踩到的坑（都记下来）
+1. **`type="lidar"` 在 Fortress 不生效** → 必须用 `type="gpu_lidar"`
+2. **EGL 建不出 dri2 screen**（`libEGL warning: egl: failed to create dri2 screen`）→
+   GPU 传感器静默无数据；设 `LIBGL_ALWAYS_SOFTWARE=1 MESA_GL_VERSION_OVERRIDE=3.3
+   GALLIUM_DRIVER=llvmpipe` 后正常
+3. **IMU 需要独立的 `imu-system` 插件**，否则 `/imu_raw` 不发布
+4. **`tracking_frame` 必须是 IMU 的 frame**：实车是 `imu_link`，仿真里 IMU 的 frame 是
+   `base_link` → Cartographer 直接 `FATAL Check failed: sensor_to_tracking` 崩溃。
+   仿真用单独 `sim_2d.lua`（tracking_frame=base_link），不动实机配置
+5. **gazebo 进程清理**：`ign gazebo` 实际进程名是 `ruby ign gazebo server/gui`，
+   按 "four_rooms" 匹配杀不掉 → 残留 5 个实例同时往相同 gz 话题发数据。
+   按 comm 为 ruby/ign/gz + 排除自身祖先进程来清理
+
+### 已验证
+- `ros2 launch sim/launch/sim_bringup.launch.py` → 传感器全部有数据：
+  `/scan_mapping` 222 条/6s、`/odom` 150 条/6s、`/ultrasonic_rear/*` 204 条/6s×4、`/imu/data_raw` 100 Hz
+- 手动发 `/cmd_vel` 前进 6 s（0.15 m/s）→ 位移 0.87 m，**地图空闲区 8 → 35.6 m²** ✓
+- RViz 能看到地图和车

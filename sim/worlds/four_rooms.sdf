@@ -1,0 +1,215 @@
+<?xml version="1.0" ?>
+<!-- 四房间仿真世界：2×2 房间，每个房间有家具，房间之间有 0.9 m 门洞。
+     为 2D 建图设计：墙高 1.0 m（雷达在 0.25 m 高度能扫到），家具高度各异。 -->
+<sdf version="1.8">
+  <world name="four_rooms">
+
+    <physics name="1ms" type="ignored">
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+
+    <plugin filename="ignition-gazebo-physics-system"
+            name="ignition::gazebo::systems::Physics"/>
+    <plugin filename="ignition-gazebo-user-commands-system"
+            name="ignition::gazebo::systems::UserCommands"/>
+    <plugin filename="ignition-gazebo-scene-broadcaster-system"
+            name="ignition::gazebo::systems::SceneBroadcaster"/>
+    <!-- 传感器渲染系统：没有它 lidar/imu 都不会出数据（headless 尤其需要注意） -->
+    <plugin filename="ignition-gazebo-sensors-system"
+            name="ignition::gazebo::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+    <!-- IMU 在 Fortress 里要单独的 Imu 系统，否则 /imu_raw 不发布 -->
+    <plugin filename="ignition-gazebo-imu-system"
+            name="ignition::gazebo::systems::Imu"/>
+
+    <light type="directional" name="sun">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 10 0 0 0</pose>
+      <diffuse>0.9 0.9 0.9 1</diffuse>
+      <specular>0.2 0.2 0.2 1</specular>
+      <direction>-0.3 0.2 -1</direction>
+    </light>
+
+    <scene>
+      <ambient>0.6 0.6 0.6 1</ambient>
+      <background>0.85 0.87 0.9 1</background>
+    </scene>
+
+    <!-- ============ 地面 ============ -->
+    <model name="ground">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry><plane><normal>0 0 1</normal><size>40 40</size></plane></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><plane><normal>0 0 1</normal><size>40 40</size></plane></geometry>
+          <material><ambient>0.75 0.75 0.75 1</ambient><diffuse>0.75 0.75 0.75 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ============ 外墙（14×14 m，厚 0.2，高 1.0）============ -->
+    <model name="wall_south">
+      <static>true</static>
+      <pose>0 -7 0.5 0 0 0</pose>
+      <link name="l"><collision name="c"><geometry><box><size>14.4 0.2 1.0</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>14.4 0.2 1.0</size></box></geometry>
+          <material><ambient>0.55 0.55 0.6 1</ambient><diffuse>0.55 0.55 0.6 1</diffuse></material></visual></link>
+    </model>
+    <model name="wall_north">
+      <static>true</static>
+      <pose>0 7 0.5 0 0 0</pose>
+      <link name="l"><collision name="c"><geometry><box><size>14.4 0.2 1.0</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>14.4 0.2 1.0</size></box></geometry>
+          <material><ambient>0.55 0.55 0.6 1</ambient><diffuse>0.55 0.55 0.6 1</diffuse></material></visual></link>
+    </model>
+    <model name="wall_west">
+      <static>true</static>
+      <pose>-7 0 0.5 0 0 0</pose>
+      <link name="l"><collision name="c"><geometry><box><size>0.2 14.4 1.0</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.2 14.4 1.0</size></box></geometry>
+          <material><ambient>0.55 0.55 0.6 1</ambient><diffuse>0.55 0.55 0.6 1</diffuse></material></visual></link>
+    </model>
+    <model name="wall_east">
+      <static>true</static>
+      <pose>7 0 0.5 0 0 0</pose>
+      <link name="l"><collision name="c"><geometry><box><size>0.2 14.4 1.0</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.2 14.4 1.0</size></box></geometry>
+          <material><ambient>0.55 0.55 0.6 1</ambient><diffuse>0.55 0.55 0.6 1</diffuse></material></visual></link>
+    </model>
+
+    <!-- ============ 内墙：x=0，中间 0.9 m 门洞 ============ -->
+    <model name="inner_x_south">
+      <static>true</static>
+      <pose>0 -3.95 0.5 0 0 0</pose>
+      <link name="l"><collision name="c"><geometry><box><size>0.2 5.9 1.0</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.2 5.9 1.0</size></box></geometry>
+          <material><ambient>0.6 0.6 0.65 1</ambient><diffuse>0.6 0.6 0.65 1</diffuse></material></visual></link>
+    </model>
+    <model name="inner_x_north">
+      <static>true</static>
+      <pose>0 3.95 0.5 0 0 0</pose>
+      <link name="l"><collision name="c"><geometry><box><size>0.2 5.9 1.0</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.2 5.9 1.0</size></box></geometry>
+          <material><ambient>0.6 0.6 0.65 1</ambient><diffuse>0.6 0.6 0.65 1</diffuse></material></visual></link>
+    </model>
+
+    <!-- ============ 内墙：y=0，中间 0.9 m 门洞 ============ -->
+    <model name="inner_y_west">
+      <static>true</static>
+      <pose>-3.95 0 0.5 0 0 0</pose>
+      <link name="l"><collision name="c"><geometry><box><size>5.9 0.2 1.0</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>5.9 0.2 1.0</size></box></geometry>
+          <material><ambient>0.6 0.6 0.65 1</ambient><diffuse>0.6 0.6 0.65 1</diffuse></material></visual></link>
+    </model>
+    <model name="inner_y_east">
+      <static>true</static>
+      <pose>3.95 0 0.5 0 0 0</pose>
+      <link name="l"><collision name="c"><geometry><box><size>5.9 0.2 1.0</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>5.9 0.2 1.0</size></box></geometry>
+          <material><ambient>0.6 0.6 0.65 1</ambient><diffuse>0.6 0.6 0.65 1</diffuse></material></visual></link>
+    </model>
+
+    <!-- ============ 房间 A（左下）：桌 + 两把椅子 + 柜子 ============ -->
+    <model name="a_table">
+      <static>true</static><pose>-4.0 -4.0 0.38 0 0 0</pose>
+      <link name="l"><collision name="c"><geometry><box><size>1.4 0.9 0.75</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>1.4 0.9 0.75</size></box></geometry>
+          <material><ambient>0.55 0.4 0.25 1</ambient><diffuse>0.55 0.4 0.25 1</diffuse></material></visual></link>
+    </model>
+    <model name="a_chair1">
+      <static>true</static><pose>-4.0 -3.2 0.25 0 0 0</pose>
+      <link name="l"><collision name="c"><geometry><cylinder><radius>0.22</radius><length>0.5</length></cylinder></geometry></collision>
+        <visual name="v"><geometry><cylinder><radius>0.22</radius><length>0.5</length></cylinder></geometry>
+          <material><ambient>0.3 0.35 0.45 1</ambient><diffuse>0.3 0.35 0.45 1</diffuse></material></visual></link>
+    </model>
+    <model name="a_chair2">
+      <static>true</static><pose>-4.0 -4.8 0.25 0 0 0</pose>
+      <link name="l"><collision name="c"><geometry><cylinder><radius>0.22</radius><length>0.5</length></cylinder></geometry></collision>
+        <visual name="v"><geometry><cylinder><radius>0.22</radius><length>0.5</length></cylinder></geometry>
+          <material><ambient>0.3 0.35 0.45 1</ambient><diffuse>0.3 0.35 0.45 1</diffuse></material></visual></link>
+    </model>
+    <model name="a_cabinet">
+      <static>true</static><pose>-6.4 -2.0 0.5 0 0 0</pose>
+      <link name="l"><collision name="c"><geometry><box><size>0.6 2.0 1.0</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.6 2.0 1.0</size></box></geometry>
+          <material><ambient>0.4 0.4 0.3 1</ambient><diffuse>0.4 0.4 0.3 1</diffuse></material></visual></link>
+    </model>
+
+    <!-- ============ 房间 B（右下）：沙发 + 茶几 + 柱子 ============ -->
+    <model name="b_sofa">
+      <static>true</static><pose>4.5 -5.5 0.35 0 0 0</pose>
+      <link name="l"><collision name="c"><geometry><box><size>2.2 0.9 0.7</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>2.2 0.9 0.7</size></box></geometry>
+          <material><ambient>0.35 0.45 0.5 1</ambient><diffuse>0.35 0.45 0.5 1</diffuse></material></visual></link>
+    </model>
+    <model name="b_tea">
+      <static>true</static><pose>4.5 -4.2 0.22 0 0 0</pose>
+      <link name="l"><collision name="c"><geometry><box><size>1.0 0.6 0.44</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>1.0 0.6 0.44</size></box></geometry>
+          <material><ambient>0.6 0.5 0.4 1</ambient><diffuse>0.6 0.5 0.4 1</diffuse></material></visual></link>
+    </model>
+    <model name="b_pillar">
+      <static>true</static><pose>2.2 -2.2 0.5 0 0 0</pose>
+      <link name="l"><collision name="c"><geometry><cylinder><radius>0.3</radius><length>1.0</length></cylinder></geometry></collision>
+        <visual name="v"><geometry><cylinder><radius>0.3</radius><length>1.0</length></cylinder></geometry>
+          <material><ambient>0.5 0.5 0.5 1</ambient><diffuse>0.5 0.5 0.5 1</diffuse></material></visual></link>
+    </model>
+
+    <!-- ============ 房间 C（左上）：书架 + 两个箱子 ============ -->
+    <model name="c_shelf">
+      <static>true</static><pose>-6.4 4.0 0.6 0 0 0</pose>
+      <link name="l"><collision name="c"><geometry><box><size>0.4 3.0 1.2</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.4 3.0 1.2</size></box></geometry>
+          <material><ambient>0.45 0.35 0.3 1</ambient><diffuse>0.45 0.35 0.3 1</diffuse></material></visual></link>
+    </model>
+    <model name="c_box1">
+      <static>true</static><pose>-3.0 5.5 0.3 0 0 0</pose>
+      <link name="l"><collision name="c"><geometry><box><size>0.6 0.6 0.6</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.6 0.6 0.6</size></box></geometry>
+          <material><ambient>0.65 0.55 0.35 1</ambient><diffuse>0.65 0.55 0.35 1</diffuse></material></visual></link>
+    </model>
+    <model name="c_box2">
+      <static>true</static><pose>-2.2 5.5 0.25 0 0 0</pose>
+      <link name="l"><collision name="c"><geometry><box><size>0.5 0.5 0.5</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.5 0.5 0.5</size></box></geometry>
+          <material><ambient>0.65 0.55 0.35 1</ambient><diffuse>0.65 0.55 0.35 1</diffuse></material></visual></link>
+    </model>
+    <model name="c_table">
+      <static>true</static><pose>-3.5 2.5 0.38 0 0.4 0</pose>
+      <link name="l"><collision name="c"><geometry><box><size>1.2 0.8 0.75</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>1.2 0.8 0.75</size></box></geometry>
+          <material><ambient>0.55 0.4 0.25 1</ambient><diffuse>0.55 0.4 0.25 1</diffuse></material></visual></link>
+    </model>
+
+    <!-- ============ 房间 D（右上）：长桌 + 3 个桶 + 矮台阶 ============ -->
+    <model name="d_desk">
+      <static>true</static><pose>4.0 4.5 0.38 0 0 0</pose>
+      <link name="l"><collision name="c"><geometry><box><size>2.6 0.8 0.75</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>2.6 0.8 0.75</size></box></geometry>
+          <material><ambient>0.5 0.45 0.4 1</ambient><diffuse>0.5 0.45 0.4 1</diffuse></material></visual></link>
+    </model>
+    <model name="d_bin1">
+      <static>true</static><pose>6.0 2.5 0.3 0 0 0</pose>
+      <link name="l"><collision name="c"><geometry><cylinder><radius>0.25</radius><length>0.6</length></cylinder></geometry></collision>
+        <visual name="v"><geometry><cylinder><radius>0.25</radius><length>0.6</length></cylinder></geometry>
+          <material><ambient>0.35 0.5 0.35 1</ambient><diffuse>0.35 0.5 0.35 1</diffuse></material></visual></link>
+    </model>
+    <model name="d_bin2">
+      <static>true</static><pose>6.0 3.3 0.3 0 0 0</pose>
+      <link name="l"><collision name="c"><geometry><cylinder><radius>0.25</radius><length>0.6</length></cylinder></geometry></collision>
+        <visual name="v"><geometry><cylinder><radius>0.25</radius><length>0.6</length></cylinder></geometry>
+          <material><ambient>0.35 0.5 0.35 1</ambient><diffuse>0.35 0.5 0.35 1</diffuse></material></visual></link>
+    </model>
+    <model name="d_step">
+      <static>true</static><pose>2.5 6.2 0.1 0 0 0</pose>
+      <link name="l"><collision name="c"><geometry><box><size>2.0 0.8 0.2</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>2.0 0.8 0.2</size></box></geometry>
+          <material><ambient>0.6 0.6 0.6 1</ambient><diffuse>0.6 0.6 0.6 1</diffuse></material></visual></link>
+    </model>
+
+  </world>
+</sdf>
