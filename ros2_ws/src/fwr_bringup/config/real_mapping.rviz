@@ -9,6 +9,18 @@ Panels:
 Visualization Manager:
   Class: ""
   Displays:
+    - Class: rviz_default_plugins/Path
+      Name: 沿墙规划路径
+      Enabled: true
+      Topic:
+        Value: /wall_plan
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+      Color: 255; 200; 0
+      Line Style: Lines
+      Line Width: 0.06
     - Class: rviz_default_plugins/Grid
       Name: Grid
       Enabled: true
