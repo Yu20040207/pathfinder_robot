@@ -40,6 +40,12 @@ class AutoCommandGate:
         if mode == 'selecting' and self._saw_stop and not self._manual_enabled:
             self._manual = False
             self._saw_stop = False
+        # 2026-10-31：脱困短退会临时打开 manual_enabled，把 _manual 锁存成 True；
+        # 若之后只等"stopped→selecting"序列才解锁，导航链路就永远被挡
+        # （现场表现：/cmd_vel 有输出、/cmd_vel_auto_unchecked 恒 0、车不动）。
+        # 只要手动通道已关闭且模式回到 navigating，就解除锁存。
+        if mode == 'navigating' and not self._manual_enabled:
+            self._manual = False
         self.mode, self.mode_at = mode, now_s
 
     def observe_nav(self, cmd, now_s):
