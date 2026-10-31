@@ -41,11 +41,15 @@ class RoomExplorer(Node):
         self.declare_parameter('replan_s', 3.0)          # 多久重新评估一次
         self.declare_parameter('finish_unknown_m2', 0.6)  # 房间剩余未知小于此值算扫完
         self.declare_parameter('goal_reached_m', 0.5)
-        self.declare_parameter('use_room_gate', True)    # 关掉 = 退化为全局探索
+        self.declare_parameter('use_room_gate', True)
+        # 房间扫完却找不到前沿（房间在图上被封死）时：沿房间四角巡逻换角度重扫，
+        # 往往能发现之前没扫到的门口。0 = 关闭该兜底行为。
+        self.declare_parameter('patrol_on_stuck', True)    # 关掉 = 退化为全局探索
 
         qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
                          reliability=ReliabilityPolicy.RELIABLE)
         self._map = None
+        self._map_at = 0.0
         self.create_subscription(OccupancyGrid, str(self.get_parameter('map_topic').value),
                                  self._on_map, qos)
         self._buf = tf2_ros.Buffer()
@@ -60,6 +64,7 @@ class RoomExplorer(Node):
 
     def _on_map(self, msg: OccupancyGrid) -> None:
         self._map = msg
+        self._map_at = self.get_clock().now().nanoseconds * 1e-9
 
     # ---------- 工具 ----------
     def _robot_xy(self):
@@ -111,6 +116,24 @@ class RoomExplorer(Node):
                 self.get_logger().warn(f'目标 {key} 连续失败，拉黑')
         self._goal_xy = None
 
+    def _patrol_goal(self, free, room_mask, res, ox, oy, robot) -> tuple | None:
+        """房间内找一个"离机器人最远的角落"当巡逻点（换角度重扫）。"""
+        cells = np.argwhere(free & room_mask)
+        if len(cells) == 0:
+            return None
+        rx, ry = robot
+        cy, cx = int((ry - oy) / res), int((rx - ox) / res)
+        d2 = (cells[:, 0] - cy) ** 2 + (cells[:, 1] - cx) ** 2
+        # 取最远的 5% 里、比较"靠角落"的那个
+        far = cells[d2 >= np.percentile(d2, 95)]
+        if len(far) == 0:
+            return None
+        # 角落判据：到房间中心的方向上越靠边越好
+        cen = cells.mean(axis=0)
+        score = np.hypot(far[:, 0] - cen[0], far[:, 1] - cen[1])
+        pick = far[int(np.argmax(score))]
+        return (ox + pick[1] * res, oy + pick[0] * res)
+
     # ---------- 主循环 ----------
     def _tick(self) -> None:
         m = self._map
@@ -118,6 +141,15 @@ class RoomExplorer(Node):
         if m is None or robot is None:
             return
         now = self.get_clock().now().nanoseconds * 1e-9
+        # 2026-10-31：地图 5 秒没更新 = 建图已结束（按了停止按钮）或 Cartographer 挂了。
+        # 这时继续发目标只会让 Nav2 原地打转，必须停手。
+        if self._map_at > 0.0 and now - self._map_at > 5.0:
+            if not getattr(self, '_frozen_logged', False):
+                self.get_logger().warn('地图已停止更新（建图结束？），探索器暂停')
+                self._frozen_logged = True
+            self._goal_xy = None
+            return
+        self._frozen_logged = False
         # 目标还没走完就等
         if self._goal_xy is not None:
             if math.hypot(self._goal_xy[0] - robot[0],
@@ -178,9 +210,23 @@ class RoomExplorer(Node):
                 self._empty_count = 0
                 return
             self._empty_count = getattr(self, '_empty_count', 0) + 1
-            if self._empty_count == 5 and not getattr(self, '_done_logged', False):
+            if (self._empty_count >= 2
+                    and bool(self.get_parameter('patrol_on_stuck').value)):
+                # 房间里没有前沿（可能在图上被封死）→ 去房间角落换角度重扫
+                goal = self._patrol_goal(free, room_mask, res, ox, oy, robot)
+                if goal is not None and math.hypot(goal[0] - rx,
+                                                   goal[1] - ry) > 0.8:
+                    if now - self._last_log > 10.0:
+                        self.get_logger().info(
+                            f'房间内暂无前沿（空闲 {free_area:.0f} m²），'
+                            f'巡逻换角度：( {goal[0]:.2f},{goal[1]:.2f})')
+                        self._last_log = now
+                    self._send_goal(*goal)
+                    return
+            if self._empty_count == 8 and not getattr(self, '_done_logged', False):
                 self.get_logger().info(
-                    f'连续 5 次没有前沿（空闲 {free_area:.0f} m²），探索结束')
+                    f'连续 8 次没有前沿且巡逻无可去点（空闲 {free_area:.0f} m²），'
+                    f'探索结束')
                 self._done_logged = True
             return
         self._empty_count = 0

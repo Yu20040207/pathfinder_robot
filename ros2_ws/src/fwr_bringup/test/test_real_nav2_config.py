@@ -22,10 +22,10 @@ def test_real_frames_speed_and_recovery_policy():
     assert shim['rotate_to_heading_angular_vel'] <= 1.5
     assert shim['rotate_to_goal_heading'] is False
     assert shim['desired_linear_vel'] <= 0.20
-    # 2026-10-31：车尾四路超声 + 守卫就绪后允许沿路径倒退（方案 B）。
-    # 安全性由 base_bridge 的 nav_reverse_ok 把关（rear_blocked 时必须拒绝），
-    # 对应单测见 test_nav_reverse.py。
-    assert shim['allow_reversing'] is True
+    # 2026-10-31：方案 B（沿路径倒退）与车尾守卫冲突，已回退为 false。
+    # 倒退只用于显式脱困动作；nav_reverse_ok 仍保留（作为那类动作的门槛），
+    # 单测见 test_nav_reverse.py。
+    assert shim['allow_reversing'] is False
     assert shim['desired_linear_vel'] <= 0.20
     # 航向对准交给 Rotation Shim；RPP 再开 rotate_to_heading 会和它形成极限环
     assert shim['use_rotate_to_heading'] is False

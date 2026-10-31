@@ -117,10 +117,12 @@ controller_server:
       # 极限环，表现为转弯一顿一顿。路径跟踪只保留前进 + 小角速度修正。
       use_rotate_to_heading: false
       rotate_to_heading_min_angle: 0.35
-      # 2026-10-31：车尾四路超声 + 守卫就绪后允许沿路径倒退（方案 B）。
-      # 安全由 base_bridge 把关：rear_blocked=true 时任何倒退都被拒绝，
-      # 且倒退速度被 max_reverse_mps(0.12) 限制。
-      allow_reversing: true
+      # 2026-10-31 回退：曾把 allow_reversing 设为 true（方案 B），但实测出问题 ——
+      # 规划器不知道车尾守卫会拒绝倒车：RPP 选择倒车 → base_bridge 拒绝 →
+      # 车不动 → "Controller patience exceeded" → 目标失败 → 探索器重发 → 死循环
+      # （现场表现为"一直在原地左右转"）。
+      # 改为 false：Nav2 只走前进路径，需要脱困时由专门的恢复动作显式倒车。
+      allow_reversing: false
       # 2026-10-30：局部膨胀 0.20 < 内切半径 0.215，RPP 的碰撞预测频繁误判
       # （“detected collision ahead!” → patience exceeded → Goal failed）。
       # 真实障碍由 collision_monitor（原始雷达，30-45 cm 停车区）兜底，关掉 RPP 的重复判定。
