@@ -3186,3 +3186,9 @@ E08 上电待机；`/dev/ttyUSB1` 为 CH340；未启动任何 ROS 节点。
 - 解除条件（把纸箱移走 → 允许后退）未实测
 - 装车后四只同时触发的串扰未复测（桌面 + 纸箱环境无 FFFE）
 - 地面/矮障碍误回波未测（需要摆矮箱）
+
+### 补充：冒烟测试抓到的回归（已修）
+`base_bridge` 加了 `/base/rear_blocked` 订阅后**启动即崩**：
+`AttributeError: 'BaseBridgeNode' object has no attribute '_rear_blocked'` ——
+属性只在回调里赋值，手动指令路径先用到它。已在 `__init__` 里初始化并订阅。
+（这条要是没测就是"车完全不动"，而且是接超声引起的）

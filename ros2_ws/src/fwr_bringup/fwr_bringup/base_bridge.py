@@ -94,6 +94,9 @@ class BaseBridgeNode(Node):
         self._ready = self.create_publisher(Bool, '/base/ready', 10)
         self._manual_mode = self.create_publisher(Bool, '/base/manual_enabled', 10)
         self._auto_arm_pub = self.create_publisher(Bool, '/base/auto_armed', 10)
+        # 2026-10-31：车尾超声守卫（rear_guard 发布；true = 后方近障，禁止后退）
+        self._rear_blocked = False
+        self.create_subscription(Bool, '/base/rear_blocked', self._on_rear_blocked, 10)
         self.create_subscription(Twist, '/cmd_vel_auto_safe', self._on_velocity, 10)
         self.create_subscription(String, '/explore/state', self._on_explore_state, 10)
         self.create_service(RecoveryPermit, '/base/recovery_permit', self._on_recovery_permit)
