@@ -13,6 +13,7 @@
 #include <QVBoxLayout>
 
 #include <geometry_msgs/msg/point_stamped.hpp>
+#include <geometry_msgs/msg/twist.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <nav2_msgs/action/compute_path_to_pose.hpp>
 #include <nav2_msgs/action/navigate_to_pose.hpp>
@@ -77,6 +78,9 @@ protected:
     resume_button_ = new QPushButton("继续导航", this);
     reset_button_ = new QPushButton("清除选择", this);
     recover_button_ = new QPushButton("清空状态 / 复位故障", this);
+    // 2026-10-31：建图时现场需要一个「马上停」的按钮（沿墙建图是自动跑的）
+    map_start_button_ = new QPushButton("开始建图(自动行走)", this);
+    map_stop_button_ = new QPushButton("■ 停止建图(急停)", this);
     start_button_->setEnabled(false);
     preview_button_->setEnabled(false);
     for (auto * widget : {start_label_, goal_label_, status_label_}) {
@@ -93,6 +97,8 @@ protected:
     if (guarded_) {layout->addWidget(resume_button_);}
     if (guarded_) {layout->addWidget(recover_button_);}
     layout->addWidget(reset_button_);
+    layout->addWidget(map_start_button_);
+    layout->addWidget(map_stop_button_);
     layout->addStretch();
 
     auto qos = rclcpp::QoS(1).transient_local();
@@ -102,6 +108,9 @@ protected:
     // when the operator clears the two points. Only the RViz Path display
     // subscribes to /plan; planner_server overwrites it on the next plan.
     plan_clear_pub_ = node_->create_publisher<nav_msgs::msg::Path>("/plan", rclcpp::QoS(1));
+    manual_vel_pub_ = node_->create_publisher<geometry_msgs::msg::Twist>("/cmd_vel_manual", 10);
+    base_param_client_ =
+      std::make_shared<rclcpp::AsyncParametersClient>(node_, "/base_bridge");
     click_sub_ = node_->create_subscription<geometry_msgs::msg::PointStamped>(
       "/clicked_point", 10, [this](const geometry_msgs::msg::PointStamped::SharedPtr msg) {
         if (msg->header.frame_id != "map") {
@@ -188,6 +197,18 @@ protected:
     connect(preview_button_, &QPushButton::clicked, this, [this]() {request_preview();});
     connect(start_button_, &QPushButton::clicked, this, [this]() {start_navigation();});
     connect(resume_button_, &QPushButton::clicked, this, [this]() {resume_navigation();});
+    connect(map_stop_button_, &QPushButton::clicked, this, [this]() {
+      // 先发零速度，再把底盘两道门关掉（底盘收到任何指令都会丢弃）
+      if (manual_vel_pub_) {
+        manual_vel_pub_->publish(geometry_msgs::msg::Twist());
+      }
+      set_base_gates(false);
+      status_label_->setText("已发送停止：速度清零 + 关闭运动门");
+    });
+    connect(map_start_button_, &QPushButton::clicked, this, [this]() {
+      set_base_gates(true);
+      status_label_->setText("已打开运动门（motion/manual/mixed），可继续建图");
+    });
     connect(stop_button_, &QPushButton::clicked, this, [this]() {
       if (guarded_) {stop_real_navigation("已请求停止导航，底盘运动门已关闭");}
     });
@@ -361,6 +382,20 @@ private:
       }
     }
     return std::nullopt;
+  }
+
+  // 2026-10-31：建图急停/恢复用，直接改 base_bridge 的三道开关
+  void set_base_gates(bool enabled)
+  {
+    if (!base_param_client_ || !base_param_client_->service_is_ready()) {
+      status_label_->setText("base_bridge 参数服务不可用");
+      return;
+    }
+    std::vector<rclcpp::Parameter> params{
+      rclcpp::Parameter("motion_enabled", enabled),
+      rclcpp::Parameter("manual_enabled", enabled),
+      rclcpp::Parameter("manual_allow_mixed", enabled)};
+    base_param_client_->set_parameters(params);
   }
 
   void recover_state()
@@ -839,6 +874,10 @@ private:
   rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr clear_fault_client_;
   rclcpp::Client<rcl_interfaces::srv::SetParameters>::SharedPtr speed_client_;
   rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr stop_client_;
+  rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr manual_vel_pub_;
+  std::shared_ptr<rclcpp::AsyncParametersClient> base_param_client_;
+  QPushButton * map_start_button_ = nullptr;
+  QPushButton * map_stop_button_ = nullptr;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr ready_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr state_sub_;
   PointSelection points_;

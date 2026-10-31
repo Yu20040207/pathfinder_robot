@@ -1,4 +1,7 @@
 Panels:
+  # 2026-10-31：加上带「停止建图(急停)」按钮的面板
+  - Class: fwr_rviz_nav/RealTwoPointNavPanel
+    Name: 导航/建图控制
   - Class: rviz_common/Displays
     Name: Displays
   - Class: rviz_common/Views

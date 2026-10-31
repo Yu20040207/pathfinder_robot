@@ -2939,3 +2939,54 @@ base = (11.53, 8.30)  残差 0.009~0.010 m
 - Cartographer 需要 remap：`scan:=/scan_mapping odom:=/odom imu:=/imu/data_raw`，
   否则一直 "Queue waiting for data: (0, imu)"，不出图。
 - bag 放完后 `/clock` 停止，`use_sim_time` 的 map_saver 会卡死 → 存图要用系统时钟。
+
+## 2026-10-31 09:10 · 沿墙自动建图：门洞识别、急停按钮、性能修复
+
+### 会话目标
+把自动建图从「前沿探索」改成「沿墙走」，并解决现场撞墙、卡门口、CPU 卡顿等问题。
+
+### 仓库改动
+- 新增 `fwr_bringup/wall_follower.py`：沿墙建图控制器
+  - 保持固定距离 + 弧线绕障（只在 <0.45 m 才原地转）
+  - 方向锁定 1.5 s（消除左右摆动）
+  - 窄通道（左右合计 <1.70 m）自动改为**走中间** → 能过 0.86 m 门洞
+  - 每 8 m 交换贴墙侧（否则只走一侧，另一侧房间进不去）
+  - 门洞识别：前方 22~95°（现收紧到 22~70°）通透弧 + 两侧 2.2 m 内有框
+    → 瞄准中心直线穿越，8 s 冷却
+  - 卡住时优先**沿自己的航迹后退**（走过的地方必然空闲），退不了才原地转
+  - 失速自恢复：关门→clear_fault→开门→脱困→继续
+  - 最低速度 0.07 m/s（4 cm/s 克服不了静摩擦，固件判失速）
+- 新增 `launch/real_wall_mapping.launch.py`（Cartographer + wall_follower + 自动存档）
+- 新增 `tools/continue_mapping.sh`（在已有 pbstream 上续建）
+- `base_bridge_core.manual_velocity` 增加 `allow_mixed`，`base_bridge` 增加
+  `manual_allow_mixed` 参数（默认 false，键盘行为不变）
+- `scan_mapping_filter` 后方屏蔽 ±90° → **±55°**（实测车身只挡 ±45°，视场 180°→250°）
+- `fwr_2d.lua`：`min_range 0.12→0.20`（滤掉车身自击）、`missing_data_ray_length 3.0→1.0`
+- `real_navigation.launch.py` 增加 `slam_engine:=slam|carto`
+- `map_autosave` 支持 Cartographer（`/write_state`）
+- `fwr_rviz_nav` 面板新增「开始建图 / 停止建图(急停)」按钮，`real_mapping.rviz` 启用该面板
+
+### 已修复的坑（都会复现，务必记住）
+1. **CPU 跑飞**：给 wall_follower 加 `/map`(9 万格) + TF 监听 → **276% CPU**，
+   雷达卡顿、地图不重合。改看自己的航迹后降到 **5%**。
+2. **失速后无限原地转**：复位状态机 `if st>4.2 → 转(return)` 写在 `if st>5.4 → 结束` 之前，
+   后者永远不执行。顺序必须反过来。
+3. **`_pivot_at` 初始 0**：ROS 时间是 1.79e9，`now - 0` 立刻 > 25 s → 一进墙角就自停。
+4. **侧向测距窗口太宽**：±50° 会把前方障碍混进来（正右真实 1.68 m 读成 0.44 m），
+   收窄到 ±18°。
+5. **手动通道只许单轴**：沿墙要边走边转，指令被丢 → 车不动。加 `manual_allow_mixed`。
+6. **USBU 掉线**：一晚上出现 3 次（三个设备同时消失），重插恢复。
+
+### 已验证
+- 沿墙建图跑通：地图 22.8×21.3 m，主块 98.4%，失速 2 次（改参数后）
+- `map_align_check` 多次 0.0~7.1 cm
+- 门洞穿越识别成功（日志「识别到门洞」），窄通道居中触发
+- 208 个单测通过
+
+### 未验证 / 遗留
+- 门洞识别在开阔区仍会误触发（24 次/160 s），已收紧判据但未长时间验证
+- 进房间成功率仍未统计（需要连续观察多轮）
+- `wall_live.pbstream` 每 2 分钟自动写盘，但**崩溃后 resume 流程**未实测
+
+### 当前运行状态
+- 建图栈按需启动；RViz 面板已带急停按钮
