@@ -157,7 +157,9 @@ local_costmap:
         inflation_radius: 0.40
         # 2026-10-30：cost_scaling_factor 3.0 时代价衰减太快，缓冲区形同虚设；
         # 降到 2.0 让 0.30 m 缓冲带整体保持高代价，规划器才会绕开。
-        cost_scaling_factor: 3.0
+        # 2026-10-31 二次调整：3.0 衰减太快 → 规划器觉得"贴墙便宜"，
+        # 实测路径离墙只有 0.18 m。回到 2.0，让 0.40 m 缓冲带整体保持高代价。
+        cost_scaling_factor: 2.0
       obstacle_layer:
         plugin: nav2_costmap_2d::ObstacleLayer
         enabled: true
@@ -180,6 +182,10 @@ local_costmap:
         map_subscribe_transient_local: true
         # 用缝合后的地图：细缝被封住，门洞不受影响
         map_topic: /map_sealed
+        # 2026-10-31：Humble 里 footprint_clearing 在图层命名空间下。
+        # 打开后静态层会清掉机器人自身足迹 → 贴墙时不会把自己判成致命格(99)，
+        # 否则规划器无法从致命格起步，报"规划失败（找不到路径）"。
+        footprint_clearing_enabled: true
       always_send_full_costmap: true
       footprint_padding: 0.02
 global_costmap:
@@ -220,6 +226,10 @@ global_costmap:
         map_subscribe_transient_local: true
         # 用缝合后的地图：细缝被封住，门洞不受影响
         map_topic: /map_sealed
+        # 2026-10-31：Humble 里 footprint_clearing 在图层命名空间下。
+        # 打开后静态层会清掉机器人自身足迹 → 贴墙时不会把自己判成致命格(99)，
+        # 否则规划器无法从致命格起步，报"规划失败（找不到路径）"。
+        footprint_clearing_enabled: true
       inflation_layer:
         plugin: nav2_costmap_2d::InflationLayer
         # 0.45 会让贴墙停车的机器人自身处于致命格（规划直接失败），改 0.30
@@ -235,13 +245,11 @@ global_costmap:
         inflation_radius: 0.40
         # 2026-10-30：cost_scaling_factor 3.0 时代价衰减太快，缓冲区形同虚设；
         # 降到 2.0 让 0.30 m 缓冲带整体保持高代价，规划器才会绕开。
-        cost_scaling_factor: 3.0
+        # 2026-10-31 二次调整：3.0 衰减太快 → 规划器觉得"贴墙便宜"，
+        # 实测路径离墙只有 0.18 m。回到 2.0，让 0.40 m 缓冲带整体保持高代价。
+        cost_scaling_factor: 2.0
       always_send_full_costmap: true
       footprint_padding: 0.02
-      # 2026-10-31 关键修复：车贴近墙时，全局代价地图把「机器人自身位置」判成
-      # 致命格(99)，规划器无法从致命格起步 → 报"规划失败（找不到路径）"。
-      # 打开自身足迹清除（局部代价地图一直是开的）。
-      footprint_clearing_enabled: true
 planner_server:
   ros__parameters:
     expected_planner_frequency: 20.0
