@@ -22,7 +22,7 @@ from fwr_interfaces.srv import RecoveryPermit
 from .base_bridge_core import (BaseBridgeCore, RecoveryPermitCore, ScanWatchdog, SensorStampGuard,
                                scale_velocity_to_wheel_limit, manual_velocity,
                                command_source_allowed, safe_command_gap_action,
-                               fault_clear_allowed)
+                               fault_clear_allowed, nav_reverse_ok)
 from .base_protocol import MAX_LINE, parse_state_line
 from .base_serial import open_exclusive_serial
 from .wheel_odometry_node import DEFAULT_DEVICE
@@ -75,6 +75,8 @@ class BaseBridgeNode(Node):
         # 2026-10-31：后向超声守卫。true 时拒绝任何"后退"指令（v<0）。
         # 只限制后退，不产生前进/倒车指令；不改变自动倒车许可。
         self.declare_parameter('rear_guard_enabled', True)
+        # 导航倒退限速（绝对值）：车尾 4 点超声覆盖有限，慢一点更稳
+        self.declare_parameter('max_reverse_mps', 0.12)
         self.declare_parameter('heading_hold_gain', 1.5)
         self.declare_parameter('heading_hold_limit_rad_s', .12)
         self._heading_hold = HeadingHold(
@@ -251,11 +253,22 @@ class BaseBridgeNode(Node):
             # 倒车与非法值仍然拒绝；两轮超固件上限时同比缩放 v、w，
             # 保留 Nav2 请求的曲率，避免夹小角速度后转弯半径变大。
             if (not math.isfinite(msg.linear.x) or
-                    not math.isfinite(msg.angular.z) or msg.linear.x < 0):
+                    not math.isfinite(msg.angular.z)):
                 self._core.halt()
                 return
+            nav_v = msg.linear.x
+            if nav_v < 0.0:
+                # 2026-10-31：允许 Nav2 倒退，但必须"车尾守卫开启且无近障"
+                if not nav_reverse_ok(nav_v, self._rear_blocked,
+                                      bool(self.get_parameter('rear_guard_enabled').value)):
+                    self._core.halt()
+                    self.get_logger().warn('导航后退被车尾守卫拦截',
+                                           throttle_duration_sec=2.0)
+                    return
+                cap = abs(float(self.get_parameter('max_reverse_mps').value))
+                nav_v = max(nav_v, -cap)
             auto_v, auto_w = scale_velocity_to_wheel_limit(
-                msg.linear.x, msg.angular.z, self._core.track_m)
+                nav_v, msg.angular.z, self._core.track_m)
         else:
             self._reject_motion('mode-' + str(self._explore_mode))
             return

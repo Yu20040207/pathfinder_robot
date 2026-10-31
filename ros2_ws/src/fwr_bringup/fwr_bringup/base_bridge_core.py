@@ -120,6 +120,18 @@ def manual_velocity(v_mps: float, omega_rps: float, track_m: float,
                abs(v_mps + omega_rps * track_m / 2)) <= max_linear_mps + 1e-6
 
 
+def nav_reverse_ok(v_mps: float, rear_blocked: bool, guard_enabled: bool) -> bool:
+    """导航链路能不能执行这条"倒退"指令。
+
+    2026-10-31：后向四路超声 + 守卫就绪后，允许 Nav2 沿路径倒退，
+    但必须满足：车尾守卫开启且当前没有近障（rear_blocked=False）。
+    守卫关闭时不允许倒退（等于回到"车尾盲区"的旧状态）。
+    """
+    if v_mps >= 0.0:
+        return True
+    return bool(guard_enabled) and not bool(rear_blocked)
+
+
 def command_source_allowed(source: str, manual_enabled: bool,
                            nav_active: bool) -> bool:
     if source == 'manual':

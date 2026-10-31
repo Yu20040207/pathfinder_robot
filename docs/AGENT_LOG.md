@@ -3192,3 +3192,28 @@ E08 上电待机；`/dev/ttyUSB1` 为 CH340；未启动任何 ROS 节点。
 `AttributeError: 'BaseBridgeNode' object has no attribute '_rear_blocked'` ——
 属性只在回调里赋值，手动指令路径先用到它。已在 `__init__` 里初始化并订阅。
 （这条要是没测就是"车完全不动"，而且是接超声引起的）
+
+## 2026-10-31 15:20 · 方案 B：允许 Nav2 沿路径倒退（车尾守卫把关）
+
+### 决策
+用户选择方案 B（允许规划器生成含倒退的路径），而非只做"脱困短退"。
+
+### 改动
+- `real_nav2.yaml`：`allow_reversing: false → true`
+- `base_bridge_core.nav_reverse_ok(v, rear_blocked, guard_enabled)`：
+  前进永远放行；倒退必须 **守卫开启且 `rear_blocked=False`**
+- `base_bridge`：`navigating` 模式不再一律拒绝 v<0，改为
+  1) 过 `nav_reverse_ok`（否则 halt + 告警）
+  2) 倒退速度被 `max_reverse_mps`（默认 0.12 m/s）截断
+- 新增 `test/test_nav_reverse.py`（3 例）；`test_real_nav2_config` 改为断言 true
+
+### 已验证
+- 全量单测 **223 通过**
+- 实车导航链路：`arm_auto=armed`、`rear_blocked=False`，
+  向 `/cmd_vel_auto_safe` 发 -0.05 m/s × 1.2 s → **位移 0.077 m** ✓
+- 手动链路拦截（此前已验证）：箱在 0.2 m 时 2 s 后退 → 位移 0.000 m
+
+### 未验证 / 遗留
+- **导航链路在"后方近障"时是否真的被拦**：只用单测覆盖了 `nav_reverse_ok`，
+  实车未复测（需要再把箱子放回车尾）
+- Nav2 实际生成倒退路径的行为（RPP 通常会掉头而不是倒车）
