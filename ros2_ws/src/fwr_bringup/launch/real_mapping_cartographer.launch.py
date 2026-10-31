@@ -11,8 +11,9 @@ from pathlib import Path
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 
 
@@ -21,15 +22,32 @@ def generate_launch_description():
     use_sim_time = LaunchConfiguration('use_sim_time')
     return LaunchDescription([
         DeclareLaunchArgument('use_sim_time', default_value='false'),
+        # 2026-10-31：加载已有 pbstream 继续扩建（空字符串 = 从头建）
+        DeclareLaunchArgument('load_state', default_value=''),
         # 底盘/雷达/IMU/EKF 照旧，但不启动 slam_toolbox
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(str(share / 'launch' / 'real_mapping.launch.py')),
             launch_arguments={'use_sim_time': use_sim_time,
                               'start_slam': 'false'}.items()),
+        # 从头建（没有 load_state）
         Node(package='cartographer_ros', executable='cartographer_node', name='cartographer_node',
              output='screen',
+             condition=IfCondition(PythonExpression(
+                 ["'", LaunchConfiguration('load_state'), "' == ''"])),
              arguments=['-configuration_directory', str(share / 'config'),
                         '-configuration_basename', 'fwr_2d.lua'],
+             parameters=[{'use_sim_time': use_sim_time}],
+             remappings=[('scan', '/scan_mapping'),
+                         ('odom', '/odom'),
+                         ('imu', '/imu/data_raw')]),
+        # 加载 pbstream 续建（两个独立参数，避免被当成一个 argv）
+        Node(package='cartographer_ros', executable='cartographer_node', name='cartographer_node',
+             output='screen',
+             condition=IfCondition(PythonExpression(
+                 ["'", LaunchConfiguration('load_state'), "' != ''"])),
+             arguments=['-configuration_directory', str(share / 'config'),
+                        '-configuration_basename', 'fwr_2d.lua',
+                        '-load_state_filename', LaunchConfiguration('load_state')],
              parameters=[{'use_sim_time': use_sim_time}],
              remappings=[('scan', '/scan_mapping'),
                          ('odom', '/odom'),

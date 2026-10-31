@@ -26,6 +26,9 @@ def generate_launch_description():
         DeclareLaunchArgument('slam_engine', default_value='carto'),
         # 2026-10-31：自动建图必须同时把 RViz 打开（用户要求现场能看到地图和规划）
         DeclareLaunchArgument('start_rviz', default_value='true'),
+        # 2026-10-31：补扫模式用 —— 关掉自动探索，手动发目标
+        DeclareLaunchArgument('use_explorer', default_value='true'),
+        DeclareLaunchArgument('load_state', default_value=''),
         # 建图 + Nav2 + 门控/碰撞监控/方向选择器（复用 real_navigation 的 use_saved_map:=false 分支）
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(str(share / 'launch' / 'real_navigation.launch.py')),
@@ -33,7 +36,8 @@ def generate_launch_description():
                               'use_sim_time': use_sim_time,
                               'start_explorer': 'false',
                               # 2026-10-30：离线 bag 对比后确定用 Cartographer
-                              'slam_engine': LaunchConfiguration('slam_engine')}.items()),
+                              'slam_engine': LaunchConfiguration('slam_engine'),
+                              'load_state': LaunchConfiguration('load_state')}.items()),
         # 把机器人脚下涂成空闲再给探索器（见节点 docstring）
         Node(package='fwr_bringup', executable='map_free_around_robot',
              name='map_free_around_robot', output='screen',
@@ -43,6 +47,7 @@ def generate_launch_description():
         # 支持非 360° 雷达、前沿抑制（门进不去就不反复撞）、自带完成事件。
         Node(package='frontier_exploration_ros2', executable='frontier_explorer',
              name='frontier_explorer', output='screen',
+             condition=IfCondition(LaunchConfiguration('use_explorer')),
              parameters=[str(share / 'config' / 'real_frontier_exploration.yaml'),
                          {'use_sim_time': use_sim_time}]),
         # 「停止建图」服务：停车 + 结束轨迹 + 保存 pbstream/pgm

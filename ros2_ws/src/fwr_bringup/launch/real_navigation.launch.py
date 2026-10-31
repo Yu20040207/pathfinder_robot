@@ -34,6 +34,8 @@ def generate_launch_description():
         # 2026-10-30：建图引擎可选 slam（slam_toolbox）或 carto（Cartographer）。
         # 离线 bag 回放对比结论：Cartographer 墙更实（87.7% vs 84%）、方向更一致（6° vs 13.5°）。
         DeclareLaunchArgument('slam_engine', default_value='slam'),
+        # 2026-10-31：加载已有 pbstream 继续建图（空 = 从头建）
+        DeclareLaunchArgument('load_state', default_value=''),
         # 自动建图时不需要 frontier_explorer（它抢发 /explore/state=stopped 会解除授权）
         DeclareLaunchArgument('start_explorer', default_value='true'),
         # amcl（地图图片）或 slam（slam_toolbox localization + posegraph）
@@ -55,7 +57,8 @@ def generate_launch_description():
                  LaunchConfiguration('slam_engine'), "' == 'carto'"])),
             launch_arguments={'use_sim_time': use_sim_time,
                               'lidar_port': LaunchConfiguration('lidar_port'),
-                              'start_imu': LaunchConfiguration('start_imu')}.items()),
+                              'start_imu': LaunchConfiguration('start_imu'),
+                              'load_state': LaunchConfiguration('load_state')}.items()),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(str(share / 'launch' / 'real_localization.launch.py')),
             condition=IfCondition(use_saved_map),
@@ -71,10 +74,11 @@ def generate_launch_description():
              parameters=[str(share / 'config' / 'real_exploration.yaml'),
                          {'use_sim_time': use_sim_time, 'require_bridge_arm': True,
                           'static_map': use_saved_map}]),
-        # 建图模式：把地图细缝封住给代价地图用（否则规划路径会穿墙）
+        # 地图缝合：把 5~15 cm 的墙缝膨胀封住，供全局代价地图使用。
+        # 2026-10-31 回归修复：原来只在建图模式启动，而静态层固定读 /map_sealed，
+        # 导致导航模式下代价地图拿不到地图（只剩 5×5 m 滚动窗口，目标稍远就规划失败）。
+        # 现在两种模式都启动这个中继。
         Node(package='fwr_bringup', executable='map_seal', output='screen',
-             condition=IfCondition(PythonExpression(
-                 ["'", use_saved_map, "' != 'true'"])),
              parameters=[{'use_sim_time': use_sim_time}]),
         # 启动后自动做一次全局雷达匹配并播种 AMCL（手动挪车/重启后的 kidnapped 恢复）。
         # slam localization 模式下每 2 分钟把地图（pgm/yaml + posegraph）存盘。

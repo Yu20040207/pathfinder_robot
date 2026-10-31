@@ -238,6 +238,10 @@ global_costmap:
         cost_scaling_factor: 3.0
       always_send_full_costmap: true
       footprint_padding: 0.02
+      # 2026-10-31 关键修复：车贴近墙时，全局代价地图把「机器人自身位置」判成
+      # 致命格(99)，规划器无法从致命格起步 → 报"规划失败（找不到路径）"。
+      # 打开自身足迹清除（局部代价地图一直是开的）。
+      footprint_clearing_enabled: true
 planner_server:
   ros__parameters:
     expected_planner_frequency: 20.0
