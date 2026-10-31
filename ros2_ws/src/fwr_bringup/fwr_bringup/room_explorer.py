@@ -29,6 +29,8 @@ from nav_msgs.msg import OccupancyGrid, Odometry
 from rcl_interfaces.msg import Parameter as RclParameter
 from rcl_interfaces.msg import ParameterType
 from rcl_interfaces.srv import SetParameters
+from sensor_msgs.msg import LaserScan
+from std_msgs.msg import Bool
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
@@ -53,9 +55,15 @@ class RoomExplorer(Node):
         # 走手动通道是因为：手动后退只受车尾超声守卫约束（nav 通道还要恢复许可），
         # 而且这条通路已经实车验证过（有障停、无障走）。
         self.declare_parameter('escape_after_failures', 2)
-        self.declare_parameter('escape_speed_mps', 0.06)
-        self.declare_parameter('escape_max_m', 0.25)
-        self.declare_parameter('escape_max_s', 2.5)    # 关掉 = 退化为全局探索
+        self.declare_parameter('escape_speed_mps', 0.08)
+        # 2026-10-31 用户要求：卡住就退，**退到前面够转弯为止**，退多远由现场决定。
+        # 停止条件（任一）：
+        #   · 前方净空 >= escape_front_clear_m（够掉头/转弯）
+        #   · 车尾超声守卫报警（后方近障，不能再退）
+        #   · 退满 escape_max_m 或 escape_max_s（安全上限）
+        self.declare_parameter('escape_front_clear_m', 0.85)
+        self.declare_parameter('escape_max_m', 1.20)
+        self.declare_parameter('escape_max_s', 8.0)    # 关掉 = 退化为全局探索
 
         qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
                          reliability=ReliabilityPolicy.RELIABLE)
@@ -70,8 +78,13 @@ class RoomExplorer(Node):
         self._goal_sent_at = 0.0
         self._blacklist = {}     # (x,y) -> 失败次数
         self._odom = None
+        self._front = float('inf')
+        self._rear_blocked = False
         self._vel_pub = self.create_publisher(Twist, '/cmd_vel_manual', 20)
         self.create_subscription(Odometry, '/wheel/odom', self._on_odom, 20)
+        scan_qos = QoSProfile(depth=5, reliability=ReliabilityPolicy.BEST_EFFORT)
+        self.create_subscription(LaserScan, '/scan', self._on_scan, scan_qos)
+        self.create_subscription(Bool, '/base/rear_blocked', self._on_rear_blocked, 10)
         self._param_cli = self.create_client(SetParameters, '/base_bridge/set_parameters')
         self._escape_until = 0.0
         self._escape_start = None
@@ -84,6 +97,29 @@ class RoomExplorer(Node):
     def _on_map(self, msg: OccupancyGrid) -> None:
         self._map = msg
         self._map_at = self.get_clock().now().nanoseconds * 1e-9
+
+    def _on_scan(self, msg: LaserScan) -> None:
+        """只取正前方 ±30° 的最小距离，用于判断"够不够转弯"。"""
+        n = len(msg.ranges)
+        if n == 0:
+            return
+        deg = n / 360.0
+        vals = []
+        for c in (180.0, -180.0):
+            a0 = int((c - 30 + 180) * deg) % n
+            a1 = int((c + 30 + 180) * deg) % n
+            if a0 <= a1:
+                idx = range(a0, a1)
+            else:
+                idx = list(range(a0, n)) + list(range(0, a1))
+            for i in idx:
+                r = msg.ranges[i]
+                if math.isfinite(r) and r > 0.20:
+                    vals.append(r)
+        self._front = min(vals) if vals else float('inf')
+
+    def _on_rear_blocked(self, msg: Bool) -> None:
+        self._rear_blocked = bool(msg.data)
 
     def _on_odom(self, msg: Odometry) -> None:
         p = msg.pose.pose.position
@@ -121,14 +157,20 @@ class RoomExplorer(Node):
         if self._odom is not None and self._escape_from is not None:
             moved = math.hypot(self._odom[0] - self._escape_from[0],
                                self._odom[1] - self._escape_from[1])
-        done = (moved >= float(self.get_parameter('escape_max_m').value) or
+        front_ok = self._front >= float(self.get_parameter('escape_front_clear_m').value)
+        done = (front_ok or self._rear_blocked or
+                moved >= float(self.get_parameter('escape_max_m').value) or
                 now - self._escape_start >= float(self.get_parameter('escape_max_s').value))
         if done:
             self._vel_pub.publish(Twist())
             self._set_manual(False)
             self._escaping = False
             self._escape_start = None
-            self.get_logger().info(f'短退完成，位移 {moved:.2f} m，继续探索')
+            why = ('前方已够转弯' if self._front >= float(
+                self.get_parameter('escape_front_clear_m').value) else
+                '车尾近障停退' if self._rear_blocked else '到达上限')
+            self.get_logger().info(
+                f'短退完成（{why}）：位移 {moved:.2f} m，前方净空 {self._front:.2f} m')
             return False
         tw = Twist()
         tw.linear.x = -abs(float(self.get_parameter('escape_speed_mps').value))

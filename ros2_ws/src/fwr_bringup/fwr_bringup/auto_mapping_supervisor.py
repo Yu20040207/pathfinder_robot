@@ -35,8 +35,14 @@ class AutoMappingSupervisor(Node):
         # 2026-10-30：踢一脚最多跑这么久，超时就交给探索器（否则墙角死循环）
         self.declare_parameter('kick_timeout_s', 90.0)
         self.declare_parameter('kick_max_backups', 3)
+        # 被包围时后退到"前方够转弯"为止的上限（秒）
+        self.declare_parameter('kick_back_max_s', 8.0)
         self._cmd_manual = self.create_publisher(Twist, '/cmd_vel_manual', 10)
         self._state_pub = self.create_publisher(String, '/explore/state', 10)
+        # 2026-10-31：踢一脚被包围时退到"前面够转弯"为止，车尾由超声守卫兜底
+        self._rear_blocked = False
+        self.create_subscription(Bool, '/base/rear_blocked',
+                                 lambda m: setattr(self, '_rear_blocked', bool(m.data)), 10)
         self._pause_pub = self.create_publisher(Bool, '/explore/pause', 10)
         self._param_client = self.create_client(SetParameters, '/base_bridge/set_parameters')
         self._arm_client = self.create_client(Trigger, '/base/arm_auto')
@@ -176,10 +182,16 @@ class AutoMappingSupervisor(Node):
             self._kick_started_at = None
             return
         if self._phase == 'kick_back':
-            # 三面都堵（墙角/贴墙）：倒车 0.5 m 脱困再重新判断
-            if now - self._leg_at < 6.0:
+            # 2026-10-31：被包围时改为**自适应后退** —— 退到前方够转弯为止：
+            #   · 前方 >= front_clear_m（够掉头/转弯）→ 停
+            #   · 车尾超声守卫报警 → 停（不能再退）
+            #   · 退满 kick_back_max_s → 停（安全上限）
+            clear_m = float(self.get_parameter('front_clear_m').value)
+            front_ok = self._front_min >= clear_m
+            if not front_ok and not self._rear_blocked and \
+                    now - self._leg_at < float(self.get_parameter('kick_back_max_s').value):
                 twist = Twist()
-                twist.linear.x = -0.15
+                twist.linear.x = -0.10
                 self._cmd_manual.publish(twist)
                 return
             self._cmd_manual.publish(Twist())

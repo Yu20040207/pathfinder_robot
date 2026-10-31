@@ -3342,3 +3342,14 @@ navigating 就解除锁存"。新增 `test_gate_manual_latch.py` 3 例覆盖。
 ### 现场遗留
 机器人卡在约 0.6 m 宽的墙角（前 0.40 / 左 0.39 / 右 0.38，仅左后 2.94 m 开阔），
 supervisor 踢一脚判定"被包围"放弃。**需要人工挪出**后再验证新参数。
+
+### 补充：看门狗升级（unconfigured 恢复）+ 自适应后退验证
+- 现场再次出现"规划有、车不动"：两个 `collision_monitor` 处于 **unconfigured**，
+  而看门狗只会 deactivate/activate（unconfigured 下两个转换都会失败）→ 永久断开。
+  已升级 `tools/chain_watchdog.py`：查 `get_state`，按状态执行
+  configure→activate / activate / deactivate→activate，并新增 5 秒周期健康检查。
+  重启后两个监控均为 **active**，车恢复移动。
+- **自适应后退实车验证**：手动执行"退到前方够转弯"逻辑 ——
+  前方 0.32 m → 后退 0.62 m → 前方 **0.88 m**（达到阈值 0.85）停止 ✓
+- 遗留：`left_in` / `right_in` 两路超声出现 **stale**（探头无应答 0xFFFF 或链路问题），
+  需要检查这两只探头的接线/供电。

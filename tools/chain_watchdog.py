@@ -21,7 +21,7 @@ import rclpy
 from rclpy.lifecycle import TransitionCallbackReturn  # noqa: F401  (类型存在性检查)
 from geometry_msgs.msg import Twist
 from lifecycle_msgs.msg import Transition
-from lifecycle_msgs.srv import ChangeState
+from lifecycle_msgs.srv import ChangeState, GetState
 from rclpy.node import Node
 
 
@@ -43,7 +43,11 @@ class Watchdog(Node):
         self._change_clients = {
             m: self.create_client(ChangeState, f'/{m}/change_state') for m in MONITORS
         }
+        self._state_clients = {
+            m: self.create_client(GetState, f'/{m}/get_state') for m in MONITORS
+        }
         self.create_timer(1.0, self._check)
+        self.create_timer(5.0, self._health)
         self.get_logger().info(
             f'看门狗启动（{"只报告" if dry_run else "自动重启"}）：{IN_TOPIC} → {OUT_TOPIC}')
 
@@ -55,18 +59,59 @@ class Watchdog(Node):
         self._out += 1
         self._last_out = time.monotonic()
 
-    def _restart(self, name: str) -> None:
+    def _state_of(self, name):
+        cli = self._state_clients.get(name)
+        if cli is None or not cli.service_is_ready():
+            return 'unknown'
+        future = cli.call_async(GetState.Request())
+        rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
+        res = future.result()
+        return res.current_state.label if res is not None else 'unknown'
+
+    def _do(self, name, transition_id, label):
         client = self._change_clients[name]
         if not client.service_is_ready():
-            self.get_logger().warn(f'{name} change_state 不可用')
+            return False
+        req = ChangeState.Request()
+        req.transition.id = transition_id
+        future = client.call_async(req)
+        rclpy.spin_until_future_complete(self, future, timeout_sec=3.0)
+        res = future.result()
+        ok = res is not None and res.success
+        self.get_logger().info('%s %s %s' % (name, label, '完成' if ok else '失败'))
+        return ok
+
+    def _restart(self, name):
+        """按当前状态恢复。2026-10-31：新增 unconfigured 处理。
+
+        原实现只做 deactivate->activate；当节点处于 unconfigured（lifecycle
+        manager 掉线、bond 断裂）时两个转换都失败，整条自动链路永久断开 —
+        现场表现是"规划有、车不动、目标全失败"。
+        """
+        if name not in self._change_clients:
             return
-        for transition_id, label in ((Transition.TRANSITION_DEACTIVATE, 'deactivate'),
-                                     (Transition.TRANSITION_ACTIVATE, 'activate')):
-            req = ChangeState.Request()
-            req.transition.id = transition_id
-            future = client.call_async(req)
-            rclpy.spin_until_future_complete(self, future, timeout_sec=3.0)
-            self.get_logger().info(f'{name} {label} 完成')
+        state = self._state_of(name)
+        if state == 'unconfigured':
+            self._do(name, Transition.TRANSITION_CONFIGURE, 'configure')
+            self._do(name, Transition.TRANSITION_ACTIVATE, 'activate')
+        elif state == 'inactive':
+            self._do(name, Transition.TRANSITION_ACTIVATE, 'activate')
+        elif state == 'active':
+            self._do(name, Transition.TRANSITION_DEACTIVATE, 'deactivate')
+            self._do(name, Transition.TRANSITION_ACTIVATE, 'activate')
+        else:
+            self.get_logger().warn('%s 状态 %s，尝试直接激活' % (name, state))
+            self._do(name, Transition.TRANSITION_ACTIVATE, 'activate')
+
+    def _health(self):
+        """周期健康检查：任何监控不是 active 就恢复。"""
+        if self._dry:
+            return
+        for name in MONITORS:
+            state = self._state_of(name)
+            if state not in ('active', 'unknown'):
+                self.get_logger().warn('%s 处于 %s，自动恢复' % (name, state))
+                self._restart(name)
 
     def _check(self) -> None:
         now = time.monotonic()
