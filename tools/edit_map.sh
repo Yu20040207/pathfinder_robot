@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 只起 RViz 来编辑地图：先停掉导航栈（否则 map_server 会覆盖你的修改），
 # 再把 RViz 单独拉起来。此时 /map 只有地图编辑器一个发布者，改动才保得住。
-set -u
+set +u   # ROS 的 setup.bash 会引用未定义变量，不能开 nounset
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export DISPLAY="${DISPLAY:-:1}"
 export FASTRTPS_DEFAULT_PROFILES_FILE="${FASTRTPS_DEFAULT_PROFILES_FILE:-$HOME/.config/fwr/fastdds_udp_only.xml}"
