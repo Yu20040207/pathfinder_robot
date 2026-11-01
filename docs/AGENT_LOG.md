@@ -3650,3 +3650,13 @@ clear_on_max_reading: false      ← 读到 max_range（无目标）时**不清�
 - ros-navigation/navigation2 issue #3313：社区讨论"只禁平移不禁旋转"的 stop 区
 - 代码：`directional_safety_core.select()`、`real_collision_monitor_reverse.yaml`、
   `real_nav2.yaml` 的 `range_layer` / Smac 段
+
+## 2026-11-01 09:10 · 交接：仿真是下一步的调试主战场
+
+已写 `docs/sim-handover.md`（完整交接文档）。要点：
+- 四房间仿真 + 我们的建图栈已跑通到"传感器/建图/RViz 全部正常"，
+  卡在 **Nav2 规划失败**（`Robot is out of bounds of the costmap`），探索器反复失败、车不动。
+- 已修：超声装到车壳内部导致自击（x −0.26 → −0.33）、生成点贴着桌子（改 −2.5,−5.5）。
+- 仿真特有适配：`tracking_frame=base_link`、选择器 `require_manual_status=False`、
+  用 `auto_explore_state` 代替 supervisor。
+- 实机退化分析见上一节（reverse 监控否决旋转 / range_layer 假墙 / map_sealed 抖动）。
