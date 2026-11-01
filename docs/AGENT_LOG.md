@@ -3824,3 +3824,34 @@ into +X front`）判断"0 = 车尾"，把仿真雷达转 180° 是错的。
 3. `num_range_data`(90) 与子图完成速度：子图不完成时 /map 只显示增量
 4. 直接用 `cartographer_ros` 的示例配置（`backpack_2d.lua`）跑同一份扫描做对照，
    区分"我们的参数问题"还是"仿真的数据问题"
+
+## 2026-11-01 11:05 · 实车跑当前参数：原地抖动 → 定位到两个点
+
+### 现场现象
+车在当前位置**一直左转右转**，不前进。
+
+### 修掉的两处
+1. **`chain_watchdog` 还在管理已被移除的 `collision_monitor_reverse`**
+   → `MONITORS` 改为只含 `collision_monitor_forward`。
+   （日志里持续 `collision_monitor_reverse 状态 unknown，执行 deactivate`）
+2. **前停区太深，否决"原地转身"**：
+   `front_stop` 由 `0.32~0.45` → **`0.28~0.33`**（车体前缘 0.30 m）。
+   0.34~0.39 m 的障碍不再阻止原地旋转，0.33 以外交给 `front_slow`（0.30~0.75）减速。
+   修复后 supervisor 的 kickstart 能走完并 `handing over to explore` ✓
+
+### 现在的卡点（新）
+supervisor 交接后，探索器每个目标都被判"在代价地图上不可通行"：
+```
+[room_explorer] 前沿 (-2.5,2.7) 在代价地图上不可通行，直接跳过
+[room_explorer] 连续 3 个目标都不可通行，车可能被堵 → 脱困
+```
+根因：**地图只有 5×7 m、空闲 9 m²** → 全局代价地图大部分是未知/致命 →
+前沿点全部判不可通行。
+
+### ⚠️ 关键发现：仿真和实机是同一个症状
+- 仿真：走 1.2 m，空闲只从 2 → 4 m²
+- 实机：跑了这么久，空闲只有 9 m²
+
+**两边都是"Cartographer 自由空间几乎不增长"** —— 这不是环境或探索算法的问题，
+而是**建图配置的共性问题**，优先级应提到最高。下一轮从
+`range_data_inserter`（hit/miss probability）和 `missing_data_ray_length` 查起。

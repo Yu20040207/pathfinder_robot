@@ -27,7 +27,7 @@ from rclpy.node import Node
 
 IN_TOPIC = '/cmd_vel_auto_unchecked'
 OUT_TOPIC = '/cmd_vel_auto_forward_filtered'
-MONITORS = ('collision_monitor_forward', 'collision_monitor_reverse')
+MONITORS = ('collision_monitor_forward',)
 
 
 class Watchdog(Node):
