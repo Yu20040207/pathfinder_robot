@@ -76,6 +76,11 @@ class DirectionalSafetySelector(Node):
         # 2026-11-01：/explore/pause 以前**没有任何节点订阅**（supervisor 在发，
         # 但没人接收），所以按"暂停"车照走。这里接上：暂停 = 输出 0。
         self._paused = False
+        # 2026-11-01（用户要求）卡住脱困：原地转身**转过为止**，角度不写死，
+        # 哪怕 10° 够用就 10°。每帧检查前方是否已空旷，一空就交回 Nav2。
+        self.declare_parameter('escape_turn_rate', 0.35)
+        self._escape_active = False
+        self._escape_dir = 1.0
         self.create_subscription(Bool, '/explore/pause', self._on_pause, 10)
         self.create_subscription(String, '/explore/state',
                                  lambda msg: self.core.observe_explore_state(msg.data, time.monotonic()), 10)
@@ -169,6 +174,33 @@ class DirectionalSafetySelector(Node):
         self.core.blocked_rotate_same = blocked and requested >= clear
         self.core.blocked_rotate_ok = blocked and (not self.core.blocked_rotate_same) and opposite >= clear
         linear_x, angular_z = self.core.select(now)
+
+        # ---- 2026-11-01 卡住脱困 ----
+        # 场景：Nav2 给了速度，但碰撞监控因为正前方 < 前进停车距离把它清零，
+        # 于是车原地不动（监控在选择器之前，选择器无法翻案）。
+        # 处理：只要 Nav2 **想要动**、前方确实被挡、且有一侧转身空间足够，
+        # 就由选择器自己原地转过去，转到前方空旷为止（角度自适应，10° 也行）。
+        front_block_m = float(self.get_parameter('forward_block_m').value)
+        raw_lin = abs(self.core.raw[0]) if self.core.raw else 0.0
+        wants_motion = raw_lin > 0.02 or abs(cmd_w) > 0.05
+        newer = self._left_min_m if cmd_w >= 0 else self._right_min_m
+        other = self._right_min_m if cmd_w >= 0 else self._left_min_m
+        best_side = max(self._left_min_m, self._right_min_m)
+        if self._escape_active:
+            if self._front_min_m >= front_block_m:
+                self._escape_active = False          # 前方已空，交回 Nav2
+            else:
+                linear_x = 0.0
+                angular_z = self._escape_dir * float(
+                    self.get_parameter('escape_turn_rate').value)
+        elif wants_motion and self._front_min_m < front_block_m and best_side >= clear:
+            self._escape_active = True
+            self._escape_dir = 1.0 if self._left_min_m >= self._right_min_m else -1.0
+            linear_x = 0.0
+            angular_z = self._escape_dir * float(
+                self.get_parameter('escape_turn_rate').value)
+        # ---- 脱困结束 ----
+
         if os.environ.get('FWR_SELECTOR_DEBUG'):
             reason = self.core.last_reason
             if reason != getattr(self, '_last_reason', None):
