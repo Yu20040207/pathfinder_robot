@@ -73,6 +73,10 @@ class DirectionalSafetySelector(Node):
 
         self.create_subscription(LaserScan, self.get_parameter('scan_topic').value,
                                  _on_scan, qos_profile_sensor_data)
+        # 2026-11-01：/explore/pause 以前**没有任何节点订阅**（supervisor 在发，
+        # 但没人接收），所以按"暂停"车照走。这里接上：暂停 = 输出 0。
+        self._paused = False
+        self.create_subscription(Bool, '/explore/pause', self._on_pause, 10)
         self.create_subscription(String, '/explore/state',
                                  lambda msg: self.core.observe_explore_state(msg.data, time.monotonic()), 10)
         self.create_subscription(Bool, '/base/manual_enabled',
@@ -141,6 +145,9 @@ class DirectionalSafetySelector(Node):
                 vals.append(r)
         return min(vals) if vals else float('inf')
 
+    def _on_pause(self, msg) -> None:
+        self._paused = bool(msg.data)
+
     def _tick(self):
         now = time.monotonic()
         self.core.observe_tf(self._tf_ready(), now)
@@ -167,6 +174,9 @@ class DirectionalSafetySelector(Node):
             if reason != getattr(self, '_last_reason', None):
                 self._last_reason = reason
                 print(f'[selector] {reason}', flush=True)
+        if self._paused:
+            linear_x = 0.0
+            angular_z = 0.0
         command = Twist()
         command.linear.x = linear_x
         command.angular.z = angular_z

@@ -22,8 +22,11 @@ def generate_launch_description():
     use_sim_time = LaunchConfiguration('use_sim_time')
     return LaunchDescription([
         DeclareLaunchArgument('use_sim_time', default_value='false'),
-        # slam_engine: carto（默认，推荐） 或 slam
-        DeclareLaunchArgument('slam_engine', default_value='carto'),
+        # slam_engine: slam（slam_toolbox，**默认**）或 carto
+        # 2026-11-01：实车对比后改用 slam_toolbox —— 用户反馈 Cartographer 走过的地方
+        # 形不成闭环（墙对不上），slam_toolbox 用 scan matching + 位姿图，闭环正常。
+        # carto 仍可用 `slam_engine:=carto` 切回。
+        DeclareLaunchArgument('slam_engine', default_value='slam'),
         # 2026-10-31：自动建图必须同时把 RViz 打开（用户要求现场能看到地图和规划）
         DeclareLaunchArgument('start_rviz', default_value='true'),
         # 2026-10-31：补扫模式用 —— 关掉自动探索，手动发目标

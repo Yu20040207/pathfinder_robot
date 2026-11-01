@@ -4005,3 +4005,38 @@ POSE_GRAPH.constraint_builder.fast_correlative_scan_matcher.branch_and_bound_dep
 | 回环约束消息 | — | **929 条** |
 
 地图覆盖面积接近翻倍，说明回环约束确实在生效并把漂移拉回来了。
+
+## 2026-11-01 15:10 · 改用 slam_toolbox 作为建图引擎（闭环正常）+ 暂停键修复
+
+### 1. 建图引擎：Cartographer → **slam_toolbox**（新的默认）
+用户实测对比：Cartographer 即使放宽回环参数，走过的地方仍形不成闭环；
+**slam_toolbox 的闭环明显更好**（地图 8.6×7.6 → 覆盖多房间、墙线连续）。
+- `real_auto_mapping.launch.py` 的 `slam_engine` 默认由 `carto` 改为 **`slam`**
+- 需要时可 `slam_engine:=carto` 切回
+
+### 2. 暂停键之前是**空的**
+`/explore/pause` 由 `auto_mapping_supervisor` 发布，但**没有任何节点订阅** ——
+按"暂停"车照走。
+修复：`directional_safety_selector` 订阅 `/explore/pause`，为 true 时输出 (0,0)。
+
+### 3. 本轮所有调好的参数（供手动建图沿用）
+**`config/fwr_2d.lua`（Cartographer，留作备用）**
+- `miss_probability = 0.45`（原默认 0.49 → 空闲永远写不进去）★ 最关键
+- `missing_data_ray_length = 3.0`
+- 回环：`optimize_every_n_nodes 8`、`min_score 0.48`、`global_localization_min_score 0.55`、
+  `max_constraint_distance 25`、`sampling_ratio 0.4`、
+  搜索窗口 `linear 12 m / angular 45°`、`branch_and_bound_depth 7`
+
+**`config/real_nav2.yaml`**
+- `inflation_radius 0.36`、`cost_scaling_factor 1.5`（路径离墙远）
+- `angular_dist_threshold 0.35`（先转正再走，治左右徘徊）
+- `lookahead_dist 0.60`、`min_lookahead_dist 0.40`
+- 全局代价地图写死 `880×800 @ (-24,-32)`（44×40 m，防 resize/崩溃）
+- `range_layer.clear_on_max_reading: true`
+
+**安全链**
+- 只保留 `collision_monitor_forward`（front_stop 0.32~0.45）
+- `rear_guard.stop_m 0.15`、`outer_blocks false`（外侧超声只提示）
+- 选择器：纯旋转放行（`rotate_clear_m 0.16`）、前进被挡改原地转（`forward_block_m 0.45`）、
+  请求方向优先 / 被挡则转反方向
+- `map_seal`：固定画布 44×40 @ (-2,-12)、`dilate_cells 0`（仿真）/ 1（实机）、周期 2 s
