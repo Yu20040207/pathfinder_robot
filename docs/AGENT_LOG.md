@@ -3886,3 +3886,32 @@ TRAJECTORY_BUILDER_2D.missing_data_ray_length = 2.0 → 3.0
 ros2 run fwr_bringup keyboard_teleop     # w/s 前后, a/d 左右转, q 退出
 # 速度固定 0.10 m/s，可用 -p forward_speed_mps:=0.15 调整（0.02~0.20）
 ```
+
+## 2026-11-01 11:50 · 实车自动建图：已修 9 项，剩余"旋转对齐路径"一项
+
+### 今天修好并验证的
+1. **Cartographer 空闲格不写入**（`miss_probability` 0.49→0.45 + `missing_data_ray_length` 3.0）
+   → 空闲 9.7 → **47.6 m²**，房间内部由灰变白。**这是最关键的一条。**
+2. 目标预验证：半径 2→8 格、阈值 90→99（前沿天生贴障碍，原来全被判不可通行）
+3. `chain_watchdog` 不再管理已删除的 `collision_monitor_reverse`
+4. 外侧超声（±10° 朝外）改为只提示，不再禁止倒车
+5. 倒车阈值 0.30→0.15（倒车是正常手段）
+6. 前停区 0.28~0.33 → 恢复 0.32~0.45（0.28 太浅，实车撞墙）
+7. 膨胀 0.36 / 代价衰减 1.5（路径远离墙面）
+8. 新增"纯旋转放行"（`directional_safety_core.rotate_clear_ok`）+ 3 个单测
+9. 新增 `stuck_reverser` 节点（前停区持续拦截 + 车尾空旷 → 倒车自救）
+
+### 剩余问题（下一步就做这个）
+实车当前仍卡住，实测：`/cmd_vel` 有旋转指令、`forward_filtered` 被前停区清零。
+用户观察："右转明明有空间；而且**路径随车转向不停变化**，车头永远对不齐"。
+
+两个待办：
+1. **`stuck_reverser` 走错通道**：它发 `/cmd_vel_manual`，但自动模式下
+   `manual_enabled=false` → base_bridge 拒绝。应改走已设计好的自动倒车许可：
+   `/base/recovery_permit` + `/explore/state='reversing'`（`nav_reverse_ok` 已实现）。
+2. **旋转放行门槛仍偏严**：已从 0.38 降到 0.34，但现场车头距离仍小于它。
+   需要把"当前车头距离"打日志（selector 每帧 print 一次），确认到底是多少，
+   再决定门槛；或者改成"旋转时只看 ±20° 窄扇区"（车头正前方，不含侧前方）。
+3. 路径抖动：`bt_navigator` 每秒重规划 + 车在转 → 目标航向一直变。
+   可把重规划周期从 1 s 放宽（`controller_frequency` / BT 的 rate），
+   或在 BT 里加"先对齐航向再走"的节点（我们已有 rotate_to_heading）。

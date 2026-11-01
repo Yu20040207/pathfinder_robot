@@ -25,6 +25,10 @@ class DirectionalSafetyCore:
         self.filtered = {}
         self.direction = None
         self.require_reverse_monitor = True
+        # 2026-11-01：纯旋转放行。前停区（0.32~0.45 m）是为"前进"设计的，
+        # 但它把整帧清零 → "车头没对准路径、只需原地右转"也被拦死。
+        # 车体半对角线约 0.37 m：车头障碍更远时，原地旋转不可能撞到。
+        self.rotate_clear_ok = False
         self.scan_at = None
         self.tf_at = None
         self.monitor_active_since = {}
@@ -119,6 +123,11 @@ class DirectionalSafetyCore:
                 return fail('stale-manual')
         if self.manual or self.state != ('reversing' if self.direction == 'reverse' else 'navigating'):
             return fail('mode')
+        # 纯旋转 + 车头够远 → 直接放行角速度（不要求监控回执）
+        if (self.rotate_clear_ok and self.direction == 'rotate' and
+                abs(raw_x) < 1e-3 and abs(raw_z_eff) > 0):
+            self.last_reason = 'rotate-clear'
+            return (0.0, raw_z_eff)
         # 2026-11-01：原来"原地旋转"要求 forward 和 reverse 两个监控都给出
         # 非零角速度回执。但 reverse 监控的后方停车区在贴墙时必然触发，
         # 车尾 0.3~0.45 m 内有 3 个激光点就否决一切旋转 →

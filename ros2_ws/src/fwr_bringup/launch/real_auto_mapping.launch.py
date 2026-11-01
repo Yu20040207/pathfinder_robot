@@ -70,6 +70,11 @@ def generate_launch_description():
         Node(package='rviz2', executable='rviz2', name='rviz2', output='log',
              condition=IfCondition(LaunchConfiguration('start_rviz')),
              arguments=['-d', str(share / 'config' / 'real_localization.rviz')]),
+        # 卡死自救：前停区持续拦截且车尾空旷时，主动倒 0.4 m 再交还导航。
+        # （脱困原来要等两次目标失败，现场表现为长时间卡死）
+        Node(package='fwr_bringup', executable='stuck_reverser',
+             name='stuck_reverser', output='screen',
+             parameters=[{'use_sim_time': use_sim_time}]),
         # 链路看门狗：碰撞监控卡死时自动重启（老毛病，见 AGENTS.md）
         ExecuteProcess(
             cmd=['python3', str(Path(__file__).resolve().parents[4] / 'tools' / 'chain_watchdog.py')],

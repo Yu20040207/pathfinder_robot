@@ -1,5 +1,6 @@
 """Select the direction-appropriate Nav2 Collision Monitor output."""
 
+import math
 import os
 import time
 
@@ -23,6 +24,13 @@ class DirectionalSafetySelector(Node):
         self.declare_parameter('scan_topic', '/scan')
         self.declare_parameter('base_frame', 'base_footprint')
         self.declare_parameter('require_manual_status', True)
+        # 纯旋转放行：车头（扫描角 ±180，±30° 扇区）最近障碍超过这个值才放行旋转。
+        # 0.38 m ≈ 车体半对角线 0.37 m，旋转扫不到。
+        # 0.34：车体前缘 0.30 + 4 cm 余量。0.38（半对角线）偏保守，
+        # 现场"明明右转有空间"却被拒；旋转是原地转，前缘不会比 0.30 更近。
+        self.declare_parameter('rotate_clear_m', 0.34)
+        self._last_scan = None
+        self._front_min_m = float('inf')
         # 2026-11-01：默认关闭 —— reverse 监控贴墙必然触发，会否决所有旋转
         self.declare_parameter('require_reverse_monitor', False)
         self.base_frame = str(self.get_parameter('base_frame').value)
@@ -48,9 +56,13 @@ class DirectionalSafetySelector(Node):
                                  lambda msg: self._filtered('forward', msg), 10)
         self.create_subscription(Twist, '/cmd_vel_auto_reverse_filtered',
                                  lambda msg: self._filtered('reverse', msg), 10)
+        def _on_scan(msg):
+            self._last_scan = msg
+            self._front_min_m = self._compute_front_min(msg)
+            self.core.observe_scan(time.monotonic())
+
         self.create_subscription(LaserScan, self.get_parameter('scan_topic').value,
-                                 lambda _: self.core.observe_scan(time.monotonic()),
-                                 qos_profile_sensor_data)
+                                 _on_scan, qos_profile_sensor_data)
         self.create_subscription(String, '/explore/state',
                                  lambda msg: self.core.observe_explore_state(msg.data, time.monotonic()), 10)
         self.create_subscription(Bool, '/base/manual_enabled',
@@ -84,9 +96,24 @@ class DirectionalSafetySelector(Node):
         self.core.observe_filtered(direction, msg.linear.x, msg.angular.z,
                                    time.monotonic())
 
+    @staticmethod
+    def _compute_front_min(scan):
+        """车头方向（扫描角 ±180，±30°）最近障碍；无回波返回 inf。"""
+        n = len(scan.ranges)
+        if n == 0:
+            return float('inf')
+        vals = []
+        for i, r in enumerate(scan.ranges):
+            a = math.degrees(scan.angle_min + i * scan.angle_increment)
+            if abs(abs(a) - 180.0) <= 30.0 and math.isfinite(r) and r > 0.05:
+                vals.append(r)
+        return min(vals) if vals else float('inf')
+
     def _tick(self):
         now = time.monotonic()
         self.core.observe_tf(self._tf_ready(), now)
+        self.core.rotate_clear_ok = (
+            self._front_min_m >= float(self.get_parameter('rotate_clear_m').value))
         linear_x, angular_z = self.core.select(now)
         if os.environ.get('FWR_SELECTOR_DEBUG'):
             reason = self.core.last_reason

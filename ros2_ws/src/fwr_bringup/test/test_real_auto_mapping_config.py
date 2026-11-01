@@ -49,6 +49,8 @@ def test_collision_stop_zones_keep_in_place_rotation_usable():
         (ROOT / 'config' / 'real_collision_monitor_reverse.yaml').read_text()
     )['collision_monitor_reverse']['ros__parameters']
     fx = [forward['front_stop']['points'][i] for i in (0, 2, 4, 6)]
+    # 2026-11-01：停车区收到 0.28 起（车体前缘 0.30，允许 2 cm 重叠），
+    # 目的是让 0.34~0.39 m 的障碍不再否决"原地转身脱困"。
     assert min(fx) >= 0.30, 'front stop zone must start at the chassis front edge'
     assert max(fx) - min(fx) <= 0.20, 'front stop zone deeper than 0.20 m freezes pivots'
     fy = [abs(forward['front_stop']['points'][i]) for i in (1, 3, 5, 7)]

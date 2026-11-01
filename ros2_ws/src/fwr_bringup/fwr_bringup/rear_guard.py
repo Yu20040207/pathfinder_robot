@@ -39,9 +39,13 @@ def update_hits(median_m, stop_m, resume_m, hits, confirm):
 class RearGuard(Node):
     def __init__(self) -> None:
         super().__init__('rear_guard')
-        self.declare_parameter('stop_m', 0.30)
+        self.declare_parameter('stop_m', 0.15)
         self.declare_parameter('resume_m', 0.45)      # 滞后：离开到这么远才解除
         self.declare_parameter('median_window', 5)
+        # 2026-11-01：外侧两只（left_out/right_out）朝外偏 10°，贴着墙停车时
+        # 必然读到 0.13 m 的侧墙 → 把"原路倒车"也禁掉了（现场卡死的主因之一）。
+        # 它们只做提示，不再参与"禁止后退"的判断；正对后方的内侧两只负责拦截。
+        self.declare_parameter('outer_blocks', False)
         self.declare_parameter('confirm_frames', 3)
         self.declare_parameter('stale_timeout_s', 1.0)
         self.declare_parameter('fail_safe_block', True)
@@ -59,6 +63,7 @@ class RearGuard(Node):
         self._hits = {n: 0 for n in NAMES}
         self._blocked = False
         self._active = {n: False for n in NAMES}
+        self._outer_blocks = bool(self.get_parameter('outer_blocks').value)
 
         for name in NAMES:
             self.create_subscription(
@@ -98,7 +103,9 @@ class RearGuard(Node):
             med = statistics.median(self._samples[name])
             self._hits[name], hit = update_hits(
                 med, self._stop, self._resume, self._hits[name], self._confirm)
-            blocked = blocked or hit
+            is_outer = name.endswith('_out')
+            if hit and (self._outer_blocks or not is_outer):
+                blocked = True
             parts.append(f'{name}={med:.2f}{"!" if hit else ""}')
 
         if degraded and not any(self._active.values()):

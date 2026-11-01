@@ -130,10 +130,13 @@ class RoomExplorer(Node):
     def _on_costmap(self, msg: OccupancyGrid) -> None:
         self._costmap = msg
 
-    def _goal_traversable(self, x: float, y: float, radius_cells: int = 2):
+    def _goal_traversable(self, x: float, y: float, radius_cells: int = 8):
         """在全局代价地图上找目标附近可通行的点；找不到返回 None。
 
-        代价 99/100 = 致命（内切/障碍），>=90 也视为不可去。
+        2026-11-01 修正：前沿点天生就在"已知/未知"边界上，紧贴障碍 →
+        膨胀后代价必然 >=90。原来阈值 90 + 半径 2 格(10 cm) 把绝大多数
+        合法前沿都判成不可通行，导致"连续 3 次跳过 → 脱困"的循环。
+        现在：半径 8 格(40 cm) 找个代价低的落点，只排除真正的致命格(>=99)。
         """
         m = self._costmap
         if m is None:
@@ -150,7 +153,7 @@ class RoomExplorer(Node):
                 nx, ny = cx + dx, cy + dy
                 if not (0 <= nx < w and 0 <= ny < h):
                     continue
-                if int(data[ny, nx]) >= 90:
+                if int(data[ny, nx]) >= 99:
                     continue
                 d = dx * dx + dy * dy
                 if d < best_d:
