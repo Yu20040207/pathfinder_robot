@@ -127,6 +127,11 @@ def generate_launch_description() -> LaunchDescription:
         cmd=['python3', os.path.join(REPO, 'tools', 'chain_watchdog.py')],
         name='chain_watchdog', output='screen')
 
+    # 引导驱动：先把地图"点着"，否则空闲面积不够，room_explorer 不会发目标
+    bootstrap = Node(package='fwr_bringup', executable='sim_bootstrap_drive',
+                     name='bootstrap_drive', output='screen',
+                     parameters=[{'use_sim_time': use_sim_time}])
+
     free_around = Node(package='fwr_bringup', executable='map_free_around_robot',
                        name='map_free_around_robot', output='screen',
                        parameters=[{'use_sim_time': use_sim_time}])
@@ -141,6 +146,6 @@ def generate_launch_description() -> LaunchDescription:
         map_seal, activate,
         gate, selector, cm_fwd, cm_mgr,
         rear_guard, cmd_router,
-        watchdog,
+        watchdog, bootstrap,
         free_around, room_explorer, state_pub,
     ])

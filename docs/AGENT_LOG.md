@@ -3793,3 +3793,34 @@ into +X front`）判断"0 = 车尾"，把仿真雷达转 180° 是错的。
 ### 结论
 "能自己探索、不卡死、不崩溃"已达成；**"地图质量达标"未达成**，卡在 Cartographer
 在仿真里的位姿估计上。目标保持 active。
+
+## 2026-11-01 10:45 · 新世界（2 m 走廊 + 左右四房间）+ 引导驱动
+
+### 世界改成用户要求的布局
+`sim/tools/make_world.py` 生成，已替换 `sim/worlds/four_rooms.sdf`：
+- 16×16 m 场地，**中央 2 m 宽走廊**沿 Y 贯通
+- 走廊左右各两个房间（左上/左下/右上/右下），**每间在走廊侧开 1.0 m 门**
+- **墙高 5 m**、厚 0.2 m；房间内有家具
+- 出生点在走廊 (0,−6)，朝 +Y
+
+### 仿真补上"引导驱动"
+实机由 `auto_mapping_supervisor` 踢一脚把地图点着；仿真里之前被我换成纯状态发布，
+没有这一步 → 地图一开始只有出生点几平方米空闲，`room_explorer` 达不到最低空闲面积
+阈值就不发目标，形成**"要动才能建图、要建图才肯动"的死锁**。
+新增 `sim_bootstrap_drive`：等 25 s → 前进 1.2 m → 交给探索器。
+- 踩坑：一开始它发 `/cmd_vel_sim`，被 `sim_cmd_router` 的 20 Hz 输出覆盖 →
+  必须走**手动通道** `/cmd_vel_manual`（路由器优先）。改成手动通道后实测前进 1.20 m ✓
+
+### 仍未解决：地图空闲面积增长极慢
+引导驱动走了 1.2 m，地图空闲只从 2 → **4 m²**（按 2 m 宽走廊算，走 1.2 m 至少该有
+2.4 m² 的走廊条带 + 260° 扇形）。说明 **Cartographer 的自由空间「擦除」几乎没生效**。
+
+下一轮优先查（按可能性排序）：
+1. `TRAJECTORY_BUILDER_2D.submaps.range_data_inserter` 的
+   `hit_probability` / `miss_probability` / `free_space_max_probability` ——
+   空闲格概率没跨过阈值，就会全部留在 unknown
+2. `missing_data_ray_length`(2.0) 与 `max_range`(12) 的配合：仿真里墙距离 0.5~8 m，
+   命中射线的擦除长度是否被限制
+3. `num_range_data`(90) 与子图完成速度：子图不完成时 /map 只显示增量
+4. 直接用 `cartographer_ros` 的示例配置（`backpack_2d.lua`）跑同一份扫描做对照，
+   区分"我们的参数问题"还是"仿真的数据问题"

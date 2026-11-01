@@ -60,7 +60,7 @@ def generate_launch_description() -> LaunchDescription:
     spawn = TimerAction(period=12.0, actions=[ExecuteProcess(
         cmd=['ros2', 'run', 'ros_gz_sim', 'create',
              '-name', 'fwr_bot', '-file', model,
-             '-x', '-2.5', '-y', '-5.5', '-z', '0.06'],
+             '-x', '0.0', '-y', '-6.0', '-z', '0.06', '-Y', '1.5708'],
         output='screen',
         name='spawn_robot')])
 

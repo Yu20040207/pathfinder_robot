@@ -23,8 +23,10 @@ ros2 launch sim/launch/sim_auto_mapping.launch.py start_rviz:=false
 
 ## 世界
 
-`sim/worlds/four_rooms.sdf`：14×14 m，2×2 四个房间（各约 6.5×6.5 m），
-中间十字内墙各留 0.9 m 门洞，每个房间有家具（桌椅/柜子/沙发/书架/桶/台阶）。
+`sim/worlds/four_rooms.sdf`（由 `sim/tools/make_world.py` 生成）：
+16×16 m 场地，**中央 2 m 宽走廊**（沿 Y 方向贯通），走廊两侧各两个房间
+（左上/左下/右上/右下），**每个房间在走廊一侧开 1.0 m 门**，墙高 5 m。
+房间内有家具（桌椅/柜子/沙发/书架/桶/柱子）。机器人从走廊 (0,−6) 朝 +Y 出发。
 
 ## 机器人
 
