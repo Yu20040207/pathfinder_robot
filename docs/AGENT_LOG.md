@@ -3660,3 +3660,50 @@ clear_on_max_reading: false      ← 读到 max_range（无目标）时**不清�
 - 仿真特有适配：`tracking_frame=base_link`、选择器 `require_manual_status=False`、
   用 `auto_explore_state` 代替 supervisor。
 - 实机退化分析见上一节（reverse 监控否决旋转 / range_layer 假墙 / map_sealed 抖动）。
+
+## 2026-11-01 09:35 · 按 handover 清单修复（A2 + C1~C4）+ 仿真里程计先验
+
+### C1 去掉 collision_monitor_reverse（回归修复，影响实机）
+`directional_safety_selector` 原来对"原地旋转"要求 forward 和 reverse **两个**
+监控都给出非零角速度回执；而 reverse 的后方停车区在贴墙时必然触发（车尾 0.3~0.45 m
+内有 3 个激光点）→ **一切旋转被否决**，现场表现就是"规划出转弯但底盘停住"。
+- 选择器新增 `require_reverse_monitor`（默认 **false**）：旋转只要求 forward 回执
+- `real_navigation.launch.py` / `sim_auto_mapping.launch.py` 不再启动 reverse 监控
+- 倒车安全改由 `base_bridge` 的车尾超声联锁负责（**只拦后退，不拦旋转**）
+
+### C2 range_layer clear_on_max_reading: false → true
+超声读到 max（无目标）不再"什么都不做"，而是清除该方向旧标记。
+否则车尾会长出一堵永不消失的墙，膨胀 0.30 m 后把路径一直往前挤。
+
+### C3 map_sealed 刷新 2 Hz → 0.5 Hz
+BT 每秒重规划，而 `/map_sealed` 每 0.5 s 变一次 → 路径频繁跳变。降到 2 s。
+
+### C4 RPP 速度自适应前视
+`use_velocity_scaled_lookahead_dist: true`，前视 0.45（0.30~0.75）。
+0.10 m/s 巡航时前视约 0.30~0.45 m，窄处不再"抄近路"贴障碍。
+
+### A2 全局代价地图写死尺寸（解决 out of bounds / 规划器段错误）
+原来不给 `width/height`，StaticLayer 跟着 `/map_sealed` 尺寸走；地图每长一次就
+`Resizing costmap`，最终 `planner_server` **segfault (exit -11)**，并出现
+`Sensor origin at (-30,0) is out of map bounds`。
+- `real_nav2.yaml` 全局代价地图：`width 880 × height 800 @ (-24,-32)` = 44×40 m
+  （实机地图覆盖 x[-20.2,16.7] y[-29.6,5.8] ✓ 留余量；仿真 14×14 m 世界也够）
+- `map_seal` 固定画布同步为 44×40 @ (-2,-12) → 原点 (-24,-32)，两者严格一致
+- 实测：`/map_sealed` 与 `/global_costmap/costmap` 均 880×800，`out_of_bounds=0`、`lethal=0`
+
+### 仿真：开启 Cartographer 里程计先验（关键）
+`sim_2d.lua` 的 `use_odometry = false → true`。
+Gazebo 的里程计是"真值"，作为先验能显著抑制位姿漂移 —— 之前间歇性出现
+`/map` 变成 506×178 m、空闲 0 m² 的退化图，开启后稳定在 14×14 m。
+
+### 实测（11 分钟，启用里程计先验后）
+| 指标 | 结果 |
+| --- | --- |
+| 地图 | **14×14 m**（= 世界尺寸 ✓）|
+| 空闲 / 障碍 | 42 m² / 5 m² |
+| 四房间覆盖 | 房A 5 / 房B 3 / 房C 11 / 房D 24 m²（四间都进过）|
+| 目标 | 房间内 22、房间外 14 |
+| 脱困 | 7 |
+| patience / lethal | **0 / 0** ✓ |
+
+单测 226 通过。

@@ -20,7 +20,8 @@ options = {
   -- 2026-10-29 实测：IMU 绝对航向与轮式航向都有约 2% 尺度误差（转 360° 丢 5-7°），
   -- 把它喂给 cartographer 会污染 map→odom（实测累积到 43°）。改为只用雷达 + 陀螺：
   -- 扫描匹配持续修正航向，不依赖带尺度误差的绝对航向。
-  use_odometry = false,
+  -- 仿真里 gazebo 里程计是"真值"，用它做先验能显著抑制位姿漂移
+  use_odometry = true,
   use_nav_sat = false,
   use_landmarks = false,
   num_laser_scans = 1,

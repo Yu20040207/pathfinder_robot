@@ -78,8 +78,14 @@ def generate_launch_description():
         # 2026-10-31 回归修复：原来只在建图模式启动，而静态层固定读 /map_sealed，
         # 导致导航模式下代价地图拿不到地图（只剩 5×5 m 滚动窗口，目标稍远就规划失败）。
         # 现在两种模式都启动这个中继。
+        # 固定画布，与 real_nav2.yaml 全局代价地图的 width/height/origin 严格一致
+        # （否则 StaticLayer 会跟着 /map_sealed 尺寸反复 Resizing → Smac 崩溃）
         Node(package='fwr_bringup', executable='map_seal', output='screen',
-             parameters=[{'use_sim_time': use_sim_time}]),
+             parameters=[{'use_sim_time': use_sim_time,
+                          'fixed_width_m': 44.0,
+                          'fixed_height_m': 40.0,
+                          'fixed_center_x': -2.0,
+                          'fixed_center_y': -12.0}]),
         # 启动后自动做一次全局雷达匹配并播种 AMCL（手动挪车/重启后的 kidnapped 恢复）。
         # slam localization 模式下每 2 分钟把地图（pgm/yaml + posegraph）存盘。
         # 2026-10-30：自动存档在建图模式下也要跑（原来只在 slam localization 模式），
@@ -114,15 +120,11 @@ def generate_launch_description():
              name='collision_monitor_forward', output='screen',
              parameters=[str(share / 'config' / 'real_collision_monitor_forward.yaml'),
                          {'use_sim_time': use_sim_time}]),
-        Node(package='nav2_collision_monitor', executable='collision_monitor',
-             name='collision_monitor_reverse', output='screen',
-             parameters=[str(share / 'config' / 'real_collision_monitor_reverse.yaml'),
-                         {'use_sim_time': use_sim_time}]),
         Node(package='nav2_lifecycle_manager', executable='lifecycle_manager',
              name='lifecycle_manager_collision', output='screen',
              parameters=[{'use_sim_time': use_sim_time,
                           'autostart': True,
-                          'node_names': ['collision_monitor_forward', 'collision_monitor_reverse']}]),
+                          'node_names': ['collision_monitor_forward']}]),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(str(nav2_share / 'launch' / 'navigation_launch.py')),
             launch_arguments={'use_sim_time': use_sim_time,

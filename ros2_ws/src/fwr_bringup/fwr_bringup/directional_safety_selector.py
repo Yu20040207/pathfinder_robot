@@ -23,9 +23,13 @@ class DirectionalSafetySelector(Node):
         self.declare_parameter('scan_topic', '/scan')
         self.declare_parameter('base_frame', 'base_footprint')
         self.declare_parameter('require_manual_status', True)
+        # 2026-11-01：默认关闭 —— reverse 监控贴墙必然触发，会否决所有旋转
+        self.declare_parameter('require_reverse_monitor', False)
         self.base_frame = str(self.get_parameter('base_frame').value)
         self.core = DirectionalSafetyCore(
             require_manual_status=bool(self.get_parameter('require_manual_status').value))
+        self.core.require_reverse_monitor = bool(
+            self.get_parameter('require_reverse_monitor').value)
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
         self.monitor_clients = {

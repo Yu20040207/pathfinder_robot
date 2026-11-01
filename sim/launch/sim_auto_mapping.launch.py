@@ -65,8 +65,11 @@ def generate_launch_description() -> LaunchDescription:
     map_seal = Node(package='fwr_bringup', executable='map_seal',
                     name='map_seal', output='screen',
                     parameters=[{'use_sim_time': use_sim_time,
-                                 'fixed_width_m': 24.0,
-                                 'fixed_height_m': 24.0,
+                                 # 与 real_nav2.yaml 的全局代价地图窗口严格对齐
+                                 'fixed_width_m': 44.0,
+                                 'fixed_height_m': 40.0,
+                                 'fixed_center_x': -2.0,
+                                 'fixed_center_y': -12.0,
                                  # 仿真的 Cartographer 地图很干净（没有实机那种 1~3 格缝），
                                  # 不需要膨胀；膨胀会把"离墙 5 cm 的机器人脚下"也标成障碍，
                                  # 规划器随即报 Starting point in lethal space。
@@ -90,15 +93,10 @@ def generate_launch_description() -> LaunchDescription:
                   name='collision_monitor_forward', output='screen',
                   parameters=[os.path.join(fwr, 'config', 'real_collision_monitor_forward.yaml'),
                               {'use_sim_time': use_sim_time}])
-    cm_rev = Node(package='nav2_collision_monitor', executable='collision_monitor',
-                  name='collision_monitor_reverse', output='screen',
-                  parameters=[os.path.join(fwr, 'config', 'real_collision_monitor_reverse.yaml'),
-                              {'use_sim_time': use_sim_time}])
     cm_mgr = Node(package='nav2_lifecycle_manager', executable='lifecycle_manager',
                   name='lifecycle_manager_collision', output='screen',
                   parameters=[{'use_sim_time': use_sim_time, 'autostart': True,
-                               'node_names': ['collision_monitor_forward',
-                                              'collision_monitor_reverse']}])
+                               'node_names': ['collision_monitor_forward']}])
 
     # ---- 车尾守卫 + 底盘入口
     rear_guard = Node(package='fwr_bringup', executable='rear_guard',
@@ -131,7 +129,7 @@ def generate_launch_description() -> LaunchDescription:
         sim,
         nav2,
         map_seal, activate,
-        gate, selector, cm_fwd, cm_rev, cm_mgr,
+        gate, selector, cm_fwd, cm_mgr,
         rear_guard, cmd_router,
         free_around, room_explorer, state_pub,
     ])

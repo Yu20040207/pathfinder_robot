@@ -24,6 +24,7 @@ class DirectionalSafetyCore:
         self.repeated_raw_at = None
         self.filtered = {}
         self.direction = None
+        self.require_reverse_monitor = True
         self.scan_at = None
         self.tf_at = None
         self.monitor_active_since = {}
@@ -118,7 +119,16 @@ class DirectionalSafetyCore:
                 return fail('stale-manual')
         if self.manual or self.state != ('reversing' if self.direction == 'reverse' else 'navigating'):
             return fail('mode')
-        required = ('forward', 'reverse') if self.direction == 'rotate' else (self.direction,)
+        # 2026-11-01：原来"原地旋转"要求 forward 和 reverse 两个监控都给出
+        # 非零角速度回执。但 reverse 监控的后方停车区在贴墙时必然触发，
+        # 车尾 0.3~0.45 m 内有 3 个激光点就否决一切旋转 →
+        # "规划出转弯但底盘停住"。倒车安全改由 base_bridge 的车尾超声联锁负责
+        # （它只拦后退，不拦旋转）。
+        if self.direction == 'rotate':
+            required = (('forward', 'reverse') if self.require_reverse_monitor
+                        else ('forward',))
+        else:
+            required = (self.direction,)
         for direction in required:
             active_since = self.monitor_active_since.get(direction)
             confirmed_at = self.monitor_confirmed_at.get(direction)

@@ -28,7 +28,9 @@ class MapSeal(Node):
         self.declare_parameter('out_topic', '/map_sealed')
         self.declare_parameter('dilate_cells', 1)
         self.declare_parameter('occupied_threshold', 60)
-        self.declare_parameter('period_s', 0.5)
+        # 2026-11-01：原 0.5 s（2 Hz）。BT 每秒重规划，地图每秒都在变 → 路径频繁跳变。
+        # 降到 2 s（0.5 Hz），让规划看到稳定的世界。
+        self.declare_parameter('period_s', 2.0)
         # 2026-11-01：Cartographer 的地图尺寸一直变（每新增子图就更大），
         # 全局代价地图跟着反复 "Resizing costmap"，最终把 SmacPlanner 搞成
         # segfault（planner_server exit -11）。固定输出尺寸即可根治。
