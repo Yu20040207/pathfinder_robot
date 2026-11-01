@@ -32,6 +32,12 @@ class MapSeal(Node):
         # 墙体被切成 146 个碎片，规划器就从碎片缝隙钻过去。
         # 先删掉小于 min_cluster_cells 的障碍连通块（噪点），再膨胀封缝。
         self.declare_parameter('min_cluster_cells', 4)
+        # 2026-11-01（用户反复反映"规划穿墙"）：
+        # 手动建图里墙段常常是**未知（灰）**而不是障碍（黑），
+        # 而 track_unknown_space=false 把未知当可通行 → 规划直接穿过。
+        # 这里让**墙向未知区生长** unknown_fill_cells 格：灰色缝隙被封死，
+        # 但大片未探索区域（离墙远）仍然是未知/可通行，不影响探索。
+        self.declare_parameter('unknown_fill_cells', 8)
         # 2026-11-01：2 s 太慢 —— 代价地图在这 2 秒内可能是空的，
         # 此时算出来的路径是"直穿墙"（因为整张图都当自由空间）。
         # 预览一旦算成这样，RViz 会一直显示那条线，看起来像规划器坏了。
@@ -97,6 +103,21 @@ class MapSeal(Node):
                     src = occ[max(0, -dy):h - max(0, dy), max(0, -dx):w - max(0, dx)]
                     out[ys, xs] = np.where(src, 100, out[ys, xs])
             data = out
+        # 3) 让障碍向"未知"区域生长（只吞未知，不吞已确认的空闲）
+        uf = int(self.get_parameter('unknown_fill_cells').value)
+        if uf > 0:
+            unknown_mask = (data < 0) | (data >= 100)
+            occ_now = data >= thr
+            grown = occ_now.copy()
+            for _ in range(uf):
+                nb = grown.copy()
+                nb[1:, :] |= grown[:-1, :]
+                nb[:-1, :] |= grown[1:, :]
+                nb[:, 1:] |= grown[:, :-1]
+                nb[:, :-1] |= grown[:, 1:]
+                grown = nb & unknown_mask
+                data = np.where(grown, 100, data).astype(np.int8)
+
         sealed = OccupancyGrid()
         sealed.header = msg.header
         sealed.info = msg.info
