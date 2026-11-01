@@ -82,10 +82,12 @@ def generate_launch_description():
         # （否则 StaticLayer 会跟着 /map_sealed 尺寸反复 Resizing → Smac 崩溃）
         Node(package='fwr_bringup', executable='map_seal', output='screen',
              parameters=[{'use_sim_time': use_sim_time,
-                          'fixed_width_m': 44.0,
-                          'fixed_height_m': 40.0,
-                          'fixed_center_x': -2.0,
-                          'fixed_center_y': -12.0,
+                          # 2026-11-01：固定画布搬移有 bug（实测密封图与真实地图
+                          # 0/201 对不上，导致代价地图里的墙在错误位置 → 规划穿墙）。
+                          # 先改回直通：尺寸随地图，配合代价地图的固定窗口由静态层
+                          # 自行对齐（静态层用地图自带 origin，天然正确）。
+                          'fixed_width_m': 0.0,
+                          'fixed_height_m': 0.0,
                           # 2026-11-01：手动地图有噪点和缝隙 → 先清噪点，再膨胀 2 格封缝
                           'min_cluster_cells': 4,
                           'dilate_cells': 3}]),
