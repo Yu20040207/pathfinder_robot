@@ -33,6 +33,7 @@ def generate_launch_description() -> LaunchDescription:
     nav2_share = get_package_share_directory('nav2_bringup')
     use_sim_time = LaunchConfiguration('use_sim_time')
     start_rviz = LaunchConfiguration('start_rviz')
+    gui = LaunchConfiguration('gui')
     explorer = LaunchConfiguration('explorer')
 
     params = RewrittenYaml(
@@ -50,6 +51,7 @@ def generate_launch_description() -> LaunchDescription:
     sim = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(SIM, 'launch', 'sim_bringup.launch.py')),
         launch_arguments={'start_rviz': start_rviz,
+                          'gui': gui,
                           'use_sim_time': use_sim_time}.items())
 
     # Nav2（不自动激活：交给 auto_activate_nav 等地图就绪）
@@ -132,6 +134,7 @@ def generate_launch_description() -> LaunchDescription:
     return LaunchDescription([
         DeclareLaunchArgument('use_sim_time', default_value='true'),
         DeclareLaunchArgument('start_rviz', default_value='true'),
+        DeclareLaunchArgument('gui', default_value='false'),
         DeclareLaunchArgument('explorer', default_value='true'),
         sim,
         nav2,

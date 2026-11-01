@@ -3758,3 +3758,38 @@ into +X front`）判断"0 = 车尾"，把仿真雷达转 180° 是错的。
 在车头正前方 ~1 m 放一个箱子，读 `/scan`，看箱子出现在 **0°** 还是 **180°**。
 - 出现在 0° → 遮罩方向是错的，应改成以 180° 为中心（很可能是建图质量差的重大原因）
 - 出现在 180° → 现状正确，仿真再改回 180°
+
+## 2026-11-01 10:20 · 仿真第二轮：修掉 4 个环境问题，但**地图质量仍不达标**
+
+### 本轮修掉的（都已验证）
+1. **雷达朝向**：按用户确认，扫描角 0 = **车头**。仿真模型去掉历史 180° 补偿
+   （`laser_front_joint` rpy 与静态 TF 都改 0）。实测车头 ±25° 有 138 个回波、车尾 0 个。
+2. **万向轮自转**：转向轴 damping 8.0/friction 2.0、滚动轴 0.05/0.01 → 静止时 0.000 rad/s。
+3. **Gazebo GUI 在软件渲染下会卡死**：server 不响应，`ros_gz_sim create` 一直
+   "Requesting list of world names" 直到超时。**默认改 headless**（`-s --headless-rendering`），
+   `gui:=true` 才开 3D 窗口。headless 下 42 个 gz 服务、传感器全正常。
+4. **真实雷达节点残留污染 `/scan`**：我此前为测方向手动起的 `sllidar_node` 一直在发
+   真实时间戳的 `/scan`，与仿真时间戳混在一起 → 一半时间戳倒退 →
+   Cartographer 报 `Ignored subdivision ... because the scan time decreased`，
+   地图完全出不来的直接原因。杀掉后 `/scan` 时间倒退 **0 次**。
+5. 仿真补上 `chain_watchdog`（实机有、仿真漏了）。
+
+### 仍未解决：地图质量
+8 分钟运行结果：`地图 10.8×22.7 m、空闲 21 m²`，四象限都有空闲区（6/6/6/3 m²），
+但渲染出来是**拉长的楔形条纹，看不到四房间结构**。
+
+已排除：雷达朝向、重复发布者、GUI 卡死、代价地图尺寸、self-hit、遮罩破坏。
+待查（下一轮优先级）：
+- **Gazebo IMU 的姿态参考系**：gz IMU 输出的是世界系姿态，Cartographer 期望相对
+  tracking frame；用 `tracking_frame=base_link` 时可能被曲解。可试：
+  `tracking_frame=imu_link` + 给 imu_link 建静态 TF，或用 `use_imu_data=false` 配
+  `use_odometry=true`（本轮 `use_odometry` 已开）。
+- **odom 来源**：现在喂 `/odom`（EKF 输出，带协方差）；可试直接喂 gz 的 `/wheel/odom`
+  （真值，无协方差问题）。
+- **楔形伪影**：像是单帧超长射线（12 m）打穿墙造成的；可把仿真雷达 `max` 从 12 m 降到
+  8 m，或给世界加 2.5 m 高外墙避免穿透。
+- 世界本身：墙高只有 1.0 m，而家具/桌面高度接近，2D 扫描可能把桌面当墙。
+
+### 结论
+"能自己探索、不卡死、不崩溃"已达成；**"地图质量达标"未达成**，卡在 Cartographer
+在仿真里的位姿估计上。目标保持 active。

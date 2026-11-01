@@ -15,7 +15,7 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (DeclareLaunchArgument, ExecuteProcess,
                             SetEnvironmentVariable, TimerAction)
-from launch.conditions import IfCondition
+from launch.conditions import IfCondition, UnlessCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
@@ -28,6 +28,7 @@ def generate_launch_description() -> LaunchDescription:
     use_sim_time = LaunchConfiguration('use_sim_time')
     nav = LaunchConfiguration('nav')
     rviz = LaunchConfiguration('start_rviz')
+    gui = LaunchConfiguration('gui')
 
     world = os.path.join(SIM, 'worlds', 'four_rooms.sdf')
     # 用真实 URDF 转出来的 SDF（含 STL 网格、正确轮距/轮径），与 RViz 里的模型一致
@@ -41,10 +42,20 @@ def generate_launch_description() -> LaunchDescription:
         SetEnvironmentVariable('GALLIUM_DRIVER', 'llvmpipe'),
     ]
 
+    # 2026-11-01：**默认 headless**。这台机器用软件渲染（EGL 建不出 dri2 screen），
+    # 打开 Gazebo GUI 会让 server 迟迟不响应（spawn 一直 "Requesting list of world names"
+    # 直到超时），整条链路因此起不来。headless + 软件渲染下传感器完全正常。
+    # 需要看 3D 画面时用 gui:=true（会比较慢）。
     gz = ExecuteProcess(
-        cmd=['ign', 'gazebo', '-r', world],
+        cmd=['ign', 'gazebo', '-r', '-s', '--headless-rendering', world],
+        condition=UnlessCondition(gui),
         output='screen',
         name='gazebo')
+    gz_gui = ExecuteProcess(
+        cmd=['ign', 'gazebo', '-r', world],
+        condition=IfCondition(gui),
+        output='screen',
+        name='gazebo_gui')
 
     spawn = TimerAction(period=12.0, actions=[ExecuteProcess(
         cmd=['ros2', 'run', 'ros_gz_sim', 'create',
@@ -136,8 +147,10 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument('use_sim_time', default_value='true'),
         DeclareLaunchArgument('nav', default_value='false'),
         DeclareLaunchArgument('start_rviz', default_value='true'),
+        # gui:=true 才开 Gazebo 3D 窗口（软件渲染下很慢，可能起不来）
+        DeclareLaunchArgument('gui', default_value='false'),
         *software_gl,
-        gz,
+        gz, gz_gui,
         spawn,
         bridge,
         tf_laser, tf_base, tf_imu, *tf_us,
