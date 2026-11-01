@@ -32,6 +32,8 @@ class DirectionalSafetySelector(Node):
         # → 雷达读数只要 > 0.37 - 0.21 = 0.16 m 就是安全的。
         # 之前用 0.34（相当于要求 0.55 m 实际余量），难怪"能转却不转"。
         self.declare_parameter('rotate_clear_m', 0.16)
+        # 前进被挡的判定距离（= 碰撞监控 front_stop 的外沿 0.45 m）
+        self.declare_parameter('forward_block_m', 0.45)
         self._last_scan = None
         self._front_min_m = float('inf')
         self._left_min_m = float('inf')
@@ -154,8 +156,9 @@ class DirectionalSafetySelector(Node):
         # 请求方向被挡、反方向空旷 → 翻转
         self.core.rotate_flip_ok = (not self.core.rotate_same_side_ok) and opposite >= clear
 
-        # 前进被挡时改原地转：只要某一侧够空旷
-        blocked = self._front_min_m < clear
+        # 前进被挡时改原地转：用**前进停车距离**判断（不是旋转阈值！）
+        # 前进停车区 0.45 m；旋转只需 0.16 m（雷达前置偏移已扣除）。
+        blocked = self._front_min_m < float(self.get_parameter('forward_block_m').value)
         self.core.blocked_rotate_same = blocked and requested >= clear
         self.core.blocked_rotate_ok = blocked and (not self.core.blocked_rotate_same) and opposite >= clear
         linear_x, angular_z = self.core.select(now)
