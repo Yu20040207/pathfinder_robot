@@ -3969,3 +3969,39 @@ ros2 run fwr_bringup keyboard_teleop     # w/s 前后, a/d 左右转, q 退出
 ### 下一步
 把 `stuck_reverser` 改成走 `/base/recovery_permit` + `/explore/state='reversing'`，
 卡顿时间应能从 30~45 秒降到 2~3 秒。
+
+## 2026-11-01 14:58 · 闭环问题：放宽回环检测参数（地图空闲 47.6 → 91 m²）
+
+### 现象
+用户观察到"走过的地方没形成闭环"——回到走过的区域时墙对不上，说明位姿漂移
+没有被回环约束拉回来。
+
+### 原因
+回环检测参数偏保守：
+- `optimize_every_n_nodes = 12`（优化不够频繁）
+- `min_score = 0.55`、`global_localization_min_score = 0.65`（偏严，扫过的区域匹配不上就不闭环）
+- `max_constraint_distance` 用默认 15 m（长走廊场景不够）
+- `fast_correlative_scan_matcher` 搜索窗口用默认（线性 7 m / 角度 30°）——
+  **漂移一旦超过窗口就永远找不到闭环**，这是长走廊最典型的问题
+
+### 修改（`config/fwr_2d.lua`）
+```lua
+POSE_GRAPH.optimize_every_n_nodes = 8
+POSE_GRAPH.constraint_builder.min_score = 0.48
+POSE_GRAPH.constraint_builder.global_localization_min_score = 0.55
+POSE_GRAPH.constraint_builder.max_constraint_distance = 25.0
+POSE_GRAPH.constraint_builder.sampling_ratio = 0.4
+POSE_GRAPH.constraint_builder.fast_correlative_scan_matcher.linear_search_window = 12.0
+POSE_GRAPH.constraint_builder.fast_correlative_scan_matcher.angular_search_window = 45°
+POSE_GRAPH.constraint_builder.fast_correlative_scan_matcher.branch_and_bound_depth = 7
+```
+
+### 结果（重启后约 3 分钟）
+| 指标 | 改前 | 改后 |
+| --- | --- | --- |
+| 地图尺寸 | — | **20.2 × 24.0 m** |
+| **空闲面积** | 47.6 m² | **91 m²** |
+| 障碍 | 4.8 m² | 7 m² |
+| 回环约束消息 | — | **929 条** |
+
+地图覆盖面积接近翻倍，说明回环约束确实在生效并把漂移拉回来了。

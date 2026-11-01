@@ -80,11 +80,22 @@ TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.probability_grid_range_data_in
 
 -- 更频繁做位姿图优化，歪斜能更早被拉回（原 30）
 -- 2026-10-31 减少重影：每 20→12 个节点优化一次位姿图
-POSE_GRAPH.optimize_every_n_nodes = 12
+-- 2026-11-01（用户反馈"走过的地方没形成闭环"）：回环没被拉上。
+-- 优化更频繁：每 8 个节点就优化一次（原来 12）
+POSE_GRAPH.optimize_every_n_nodes = 8
 -- 放宽一点(0.6→0.55)：真实环境回环更难匹配，太严会漏掉约束
-POSE_GRAPH.constraint_builder.min_score = 0.55
-POSE_GRAPH.constraint_builder.global_localization_min_score = 0.65
-POSE_GRAPH.constraint_builder.sampling_ratio = 0.3
+-- 回环匹配放宽：0.55 → 0.48。得分太低容易误闭环，0.48 是这个场地的折中。
+POSE_GRAPH.constraint_builder.min_score = 0.48
+POSE_GRAPH.constraint_builder.global_localization_min_score = 0.55
+-- 回环搜索范围放宽：默认 15 m 在长走廊场景不够用
+POSE_GRAPH.constraint_builder.max_constraint_distance = 25.0
+-- 采样更密：更容易凑出回环约束
+POSE_GRAPH.constraint_builder.sampling_ratio = 0.4
+-- 回环匹配的搜索窗口：漂移超过窗口就永远找不到闭环（长走廊尤其明显）。
+-- 线性 7 m→12 m、角度 30°→45°
+POSE_GRAPH.constraint_builder.fast_correlative_scan_matcher.linear_search_window = 12.0
+POSE_GRAPH.constraint_builder.fast_correlative_scan_matcher.angular_search_window = math.rad(45.0)
+POSE_GRAPH.constraint_builder.fast_correlative_scan_matcher.branch_and_bound_depth = 7
 POSE_GRAPH.max_num_final_iterations = 200
 
 return options
