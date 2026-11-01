@@ -244,8 +244,10 @@ global_costmap:
       origin_y: -32.0
       footprint: '[[0.30, 0.215], [0.30, -0.215], [-0.30, -0.215], [-0.30, 0.215]]'
       resolution: 0.05
-      # 2026-10-31：这里保持 false（未知=可通行），否则前沿目标点会被拒；
-      # 「路径穿墙」改由 map_seal 节点缝合地图缺口来解决（静态层读 /map_sealed）。
+      # 2026-11-01：改回 false。试过 true：未知区太多，三组路径全部规划失败
+      # （地图里大片未探索区域把可行通道堵死）。
+      # 「路径穿墙」的正确解法是**把地图建完整**（or map_seal 把墙缝封住），
+      # 而不是让规划器害怕未知。
       track_unknown_space: false
       plugins:
       - static_layer
