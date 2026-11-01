@@ -29,6 +29,15 @@ class MapSeal(Node):
         self.declare_parameter('dilate_cells', 1)
         self.declare_parameter('occupied_threshold', 60)
         self.declare_parameter('period_s', 0.5)
+        # 2026-11-01：Cartographer 的地图尺寸一直变（每新增子图就更大），
+        # 全局代价地图跟着反复 "Resizing costmap"，最终把 SmacPlanner 搞成
+        # segfault（planner_server exit -11）。固定输出尺寸即可根治。
+        #   0 = 保持输入尺寸（旧行为）
+        #   >0 = 输出固定 fixed_width_m × fixed_height_m，以 fixed_center 为中心
+        self.declare_parameter('fixed_width_m', 0.0)
+        self.declare_parameter('fixed_height_m', 0.0)
+        self.declare_parameter('fixed_center_x', 0.0)
+        self.declare_parameter('fixed_center_y', 0.0)
         qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
                          reliability=ReliabilityPolicy.RELIABLE)
         self._pub = self.create_publisher(
@@ -70,8 +79,45 @@ class MapSeal(Node):
         sealed = OccupancyGrid()
         sealed.header = msg.header
         sealed.info = msg.info
+
+        fw = float(self.get_parameter('fixed_width_m').value)
+        fh = float(self.get_parameter('fixed_height_m').value)
+        res = msg.info.resolution
+        if fw > 0.0 and fh > 0.0 and res > 0.0:
+            data, info = self._to_fixed(data, msg, fw, fh, res)
+            sealed.info = info
+
         sealed.data = data.reshape(-1).astype(np.int8).tolist()
         self._pub.publish(sealed)
+
+    def _to_fixed(self, data, msg, fw, fh, res):
+        """把输入地图搬到固定尺寸的画布上，缺失部分填未知(-1)。"""
+        from nav_msgs.msg import MapMetaData
+        out_w = int(round(fw / res))
+        out_h = int(round(fh / res))
+        out_x = float(self.get_parameter('fixed_center_x').value) - fw / 2.0
+        out_y = float(self.get_parameter('fixed_center_y').value) - fh / 2.0
+
+        h, w = data.shape
+        canvas = np.full((out_h, out_w), -1, dtype=np.int8)
+        in_x, in_y = msg.info.origin.position.x, msg.info.origin.position.y
+        # 输入地图在画布上的偏移（格）
+        dx = int(round((in_x - out_x) / res))
+        dy = int(round((in_y - out_y) / res))
+        x0, y0 = max(0, dx), max(0, dy)
+        x1, y1 = min(out_w, dx + w), min(out_h, dy + h)
+        if x1 > x0 and y1 > y0:
+            canvas[y0:y1, x0:x1] = data[y0 - dy:y1 - dy, x0 - dx:x1 - dx]
+
+        info = MapMetaData()
+        info.resolution = res
+        info.width = out_w
+        info.height = out_h
+        info.origin = msg.info.origin
+        info.origin.position.x = out_x
+        info.origin.position.y = out_y
+        info.origin.position.z = 0.0
+        return canvas, info
 
 
 def main():

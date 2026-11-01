@@ -3512,3 +3512,49 @@ AGENTS.md 里的说法（250°）已同步更正，并注明"必须改 launch，
   `/scan_mapping` 222 条/6s、`/odom` 150 条/6s、`/ultrasonic_rear/*` 204 条/6s×4、`/imu/data_raw` 100 Hz
 - 手动发 `/cmd_vel` 前进 6 s（0.15 m/s）→ 位移 0.87 m，**地图空闲区 8 → 35.6 m²** ✓
 - RViz 能看到地图和车
+
+## 2026-11-01 08:40 · 仿真跑通的关键修复（5 个真实 bug）
+
+### 1. 仿真模型改用真实 URDF（用户要求"按 RViz 的模型来"）
+`sim/models/fwr_bot/robot.urdf` 由 `fwr_chassis_demo.urdf` 生成：
+`package://` → 绝对 `file://`、注入 diff_drive/lidar/imu/超声插件与配色，
+再用 `ign sdf -p` 转成 `fwr_bot.sdf`。轮距 0.315、轮径 0.0325 与实车一致。
+
+### 2. 超声传感器装在车体内部 → 一直读 0.12~0.19 m（扫自己车壳）
+后果：车尾守卫永久报警 + 范围层把机器人脚下标成致命
+→ `planner_server: Starting point in lethal space`，所有目标规划失败。
+修复：传感器移到 x=−0.33（车体 ±0.30 之外，模拟真实后支架）。
+
+### 3. `map_seal` 的 1 格膨胀把"离墙 5 cm 的机器人脚下"也标成障碍
+`/map` 脚下=0，`/map_sealed` 脚下=100 → 规划器认为起点在障碍里。
+修复：`map_seal` 新增固定画布参数（`fixed_width_m/height_m/center`），
+仿真里再用 `dilate_cells: 0`（仿真地图本来就干净）。
+
+### 4. Cartographer 地图尺寸一直变 → 全局代价地图反复 "Resizing costmap"
+→ **`planner_server` segfault（exit -11）**。
+修复：同上的固定画布（24×24 m），代价地图尺寸从此不变。
+
+### 5. 【最重要】给 Cartographer 喂"事后遮罩"的扫描会让它位姿乱跳
+现象：机器人**完全静止**（Gazebo 真值不动、/odom 稳在 0,0），
+但 `map→odom` 以 m/s 级漂移到 -130 m，地图一路拉伸。
+- 用原始 `/scan`：`map→odom` 稳在 (0.00, -0.02) ✓
+- 用遮罩后的 `/scan_mapping`（NaN 或 inf 都试过）：仍然乱飘 ✗
+修复：**仿真里让雷达原生就是 260°（±130°）**，不再事后遮罩；
+Cartographer 直接吃 `/scan`。实车仍用 `/scan_mapping`。
+
+> ⚠️ 这条对实机有重要启示：实车的 `/scan_mapping` 也是"事后遮罩"。
+> 如果实机地图的墙薄/重影/位姿抖动与此有关，需要在实机上做 A/B 对比
+> （Cartographer 直接吃 `/scan` vs `/scan_mapping`）。**尚未在实机验证**。
+
+### 6. 其他
+- 移除 Gazebo `/tf` 桥接（否则 odom→base 有两个发布者，与 EKF 抢）
+- 仿真 `directional_safety_selector` 设 `require_manual_status: false`
+  （没有 base_bridge 就没人发 `/base/manual_status`，选择器会一直输出 0）
+- 仿真用 `auto_explore_state` 代替 `auto_mapping_supervisor`
+  （后者要操作 base_bridge 参数和 `/base/arm_auto`，仿真里没有）
+- 清理脚本按进程名关键词（含 Nav2 全家桶）清理，避免多实例叠加
+
+### 已验证
+- 原生 260° 雷达：`720 点，−130°~+130°`
+- `map→odom` 稳定：(+0.12, −0.02) ×4 次采样
+- 全量单测 226 通过

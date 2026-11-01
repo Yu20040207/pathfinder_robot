@@ -17,11 +17,11 @@
   gz_type_name: "ignition.msgs.Odometry"
   direction: GZ_TO_ROS
 
-- ros_topic_name: "/tf"
-  gz_topic_name: "/model/fwr_bot/tf"
-  ros_type_name: "tf2_msgs/msg/TFMessage"
-  gz_type_name: "ignition.msgs.Pose_V"
-  direction: GZ_TO_ROS
+# 注意：**不要**桥接 Gazebo 自己的 /model/<name>/tf！
+# 它会在 /tf 里发布 odom→base_footprint，与我们的 EKF 抢同一个变换，
+# TF 树打架 → Cartographer 的 map→odom 疯狂漂移（2026-11-01 实测：
+# 静止时 map→odom 以 ~1 m/s 漂到 -130 m）。
+# 仿真里的 odom→base_footprint 一律由 robot_localization 的 ekf_node 提供。
 
 - ros_topic_name: "/imu/data_raw"
   gz_topic_name: "/imu_raw"
@@ -29,7 +29,7 @@
   gz_type_name: "ignition.msgs.IMU"
   direction: GZ_TO_ROS
 
-- ros_topic_name: "/cmd_vel"
+- ros_topic_name: "/cmd_vel_sim"
   gz_topic_name: "/cmd_vel"
   ros_type_name: "geometry_msgs/msg/Twist"
   gz_type_name: "ignition.msgs.Twist"

@@ -33,7 +33,7 @@ def test_filter_keeps_metadata_and_does_not_mutate_original():
     assert filtered.angle_increment == original.angle_increment
     assert list(filtered.intensities) == [7.0]
     assert list(original.ranges) == [1.0] * 9
-    assert [math.isnan(v) for v in filtered.ranges] == [False, False, True, True, True, True, True, False, False]
+    assert [math.isinf(v) for v in filtered.ranges] == [False, False, True, True, True, True, True, False, False]
 
 
 def test_inf_forward_is_valid_no_return():

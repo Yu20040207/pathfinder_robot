@@ -6,7 +6,7 @@ from typing import Sequence
 
 def mask_rear_ranges(ranges: Sequence[float], angle_min: float,
                      angle_increment: float, rear_half_angle: float) -> list[float]:
-    """Return a copy with rear-facing samples set to NaN.
+    """Return a copy with rear-facing samples set to +inf.
 
     The C1's scan zero points toward the robot rear.  This masks observations;
     it never creates free-space measurements in the blind sector.
@@ -22,5 +22,8 @@ def mask_rear_ranges(ranges: Sequence[float], angle_min: float,
         wrapped = math.atan2(math.sin(angle), math.cos(angle))
         # LaserScan angular fields are float32; include intended boundary rays.
         if abs(wrapped) <= rear_half_angle + 1e-6:
-            result[index] = math.nan
+            # 2026-11-01：原来填 NaN。仿真里 NaN 会让 Cartographer 的
+            # RangeDataInserter 产出垃圾位姿（静止时 map→odom 以 m/s 级漂移）；
+            # 换成 +inf（ROS 里"无回波"的标准表示，Cartographer 明确会跳过）。
+            result[index] = math.inf
     return result

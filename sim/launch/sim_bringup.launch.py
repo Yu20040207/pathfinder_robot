@@ -30,7 +30,8 @@ def generate_launch_description() -> LaunchDescription:
     rviz = LaunchConfiguration('start_rviz')
 
     world = os.path.join(SIM, 'worlds', 'four_rooms.sdf')
-    model = os.path.join(SIM, 'models', 'fwr_bot', 'model.sdf')
+    # 用真实 URDF 转出来的 SDF（含 STL 网格、正确轮距/轮径），与 RViz 里的模型一致
+    model = os.path.join(SIM, 'models', 'fwr_bot', 'fwr_bot.sdf')
     bridge_cfg = os.path.join(SIM, 'config', 'bridge.yaml')
 
     # 软件渲染：这台机器 EGL 建不出 dri2 screen，GPU 传感器会静默不出数据
@@ -48,7 +49,7 @@ def generate_launch_description() -> LaunchDescription:
     spawn = TimerAction(period=12.0, actions=[ExecuteProcess(
         cmd=['ros2', 'run', 'ros_gz_sim', 'create',
              '-name', 'fwr_bot', '-file', model,
-             '-x', '-3.5', '-y', '-3.5', '-z', '0.12'],
+             '-x', '-2.5', '-y', '-5.5', '-z', '0.06'],
         output='screen',
         name='spawn_robot')])
 
@@ -63,21 +64,21 @@ def generate_launch_description() -> LaunchDescription:
     tf_laser = Node(
         package='tf2_ros', executable='static_transform_publisher',
         name='tf_laser_front',
-        arguments=['0.21', '0.0', '0.25', str(math.pi), '0.0', '0.0',
+        arguments=['0.21', '0.0', '0.075', str(math.pi), '0.0', '0.0',
                    'base_footprint', 'laser_front'],
         parameters=[{'use_sim_time': use_sim_time}])
 
     tf_base = Node(
         package='tf2_ros', executable='static_transform_publisher',
         name='tf_base_link',
-        arguments=['0', '0', '0', '0', '0', '0', 'base_footprint', 'base_link'],
+        arguments=['0', '0', '0.0325', '0', '0', '0', 'base_footprint', 'base_link'],
         parameters=[{'use_sim_time': use_sim_time}])
 
     # 仿真 IMU 的 frame 名不受 gz_frame_id 控制时兜底
     tf_imu = Node(
         package='tf2_ros', executable='static_transform_publisher',
         name='tf_imu_link',
-        arguments=['0', '0', '0.1', '0', '0', '0', 'base_footprint', 'imu_link'],
+        arguments=['0', '0', '0.0325', '0', '0', '0', 'base_footprint', 'imu_link'],
         parameters=[{'use_sim_time': use_sim_time}])
 
     tf_us = []
@@ -88,17 +89,12 @@ def generate_launch_description() -> LaunchDescription:
         tf_us.append(Node(
             package='tf2_ros', executable='static_transform_publisher',
             name=f'tf_us_{name}',
-            arguments=['-0.26', y, '0.14', '0.0', '0.0', yaw,
+            arguments=['-0.33', y, '0.14', '0.0', '0.0', yaw,
                        'base_footprint', f'ultrasonic_rear_{name}'],
             parameters=[{'use_sim_time': use_sim_time}]))
 
-    # ---- 260° 建图扫描（和实机同一个节点、同一个参数）
-    scan_filter = Node(
-        package='fwr_bringup', executable='scan_mapping_filter',
-        name='scan_mapping_filter',
-        parameters=[{'use_sim_time': use_sim_time,
-                     'rear_half_angle_rad': math.radians(50.0)}],
-        remappings=[('scan_in', '/scan'), ('scan_out', '/scan_mapping')])
+    # 仿真雷达本身就是 260°（±130°），不需要 scan_mapping_filter。
+    # 实测：给 Cartographer 喂带 inf/NaN 遮罩的扫描会让它位姿乱跳（见 AGENT_LOG）。
 
     # ---- 4 路后向超声（LaserScan → Range，接口与实机一致）
     us_sim = Node(
@@ -121,7 +117,7 @@ def generate_launch_description() -> LaunchDescription:
         arguments=['-configuration_directory', os.path.join(SIM, 'config'),
                    '-configuration_basename', 'sim_2d.lua'],
         parameters=[{'use_sim_time': use_sim_time}],
-        remappings=[('scan', '/scan_mapping'),
+        remappings=[('scan', '/scan'),
                     ('odom', '/odom'),
                     ('imu', '/imu/data_raw')])
 
@@ -132,7 +128,7 @@ def generate_launch_description() -> LaunchDescription:
 
     rviz_node = Node(
         package='rviz2', executable='rviz2', name='rviz2',
-        arguments=['-d', os.path.join(fwr, 'config', 'real_localization.rviz')],
+        arguments=['-d', os.path.join(SIM, 'config', 'sim_view.rviz')],
         parameters=[{'use_sim_time': use_sim_time}],
         condition=IfCondition(rviz))
 
@@ -145,6 +141,6 @@ def generate_launch_description() -> LaunchDescription:
         spawn,
         bridge,
         tf_laser, tf_base, tf_imu, *tf_us,
-        scan_filter, us_sim, ekf, carto, carto_grid,
+        us_sim, ekf, carto, carto_grid,
         rviz_node,
     ])
