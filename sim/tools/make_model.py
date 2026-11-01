@@ -54,11 +54,16 @@ GAZEBO = f'''
           <horizontal>
             <samples>720</samples>
             <resolution>1</resolution>
-            <!-- 实车 C1 是 360°，但车身挡住后方 ±45°，再遮 ±50° → 有效 260°。
-                 仿真里直接把雷达做成 ±130°（原生 260°），避免依赖"事后遮罩"，
-                 因为实测：给 Cartographer 喂带 inf/NaN 遮罩的扫描会让它位姿乱跳。 -->
-            <min_angle>{-2.268928}</min_angle>
-            <max_angle>{2.268928}</max_angle>
+            <!-- 实车 C1 是 360°，车身挡住后方 ±45°，再遮 ±50° → 有效 260°。
+                 仿真里直接让雷达原生 260°，避免依赖"事后遮罩"
+                 （实测：给 Cartographer 喂带 inf/NaN 遮罩的扫描会让它位姿乱跳）。
+
+                 注意：传感器是**倒装 180°**的，它自己的 +x 指向车尾。
+                 所以覆盖 260° 必须取 50°~310°（以车头 180° 为中心），
+                 盲区在 0°±50°（车尾）—— 这才与实车一致。
+                 早先误写成 ±130°（以车尾为中心），结果车头反而有 100° 盲区。 -->
+            <min_angle>{0.872665}</min_angle>
+            <max_angle>{5.410521}</max_angle>
           </horizontal>
         </scan>
         <range><min>0.15</min><max>12.0</max><resolution>0.01</resolution></range>
@@ -102,6 +107,35 @@ for name, y, yaw in US:
     </sensor>
   </gazebo>
 '''
+
+# 3b) 万向轮阻尼：URDF 里是 continuous，Gazebo 里没有摩擦就会不停自转。
+#     真实万向轮有轴承摩擦，会自己摆正；这里给转向轴加较大阻尼、滚动轴加小阻尼。
+CASTER = """
+  <gazebo reference="front_left_caster_steer_joint">
+    <implicit_spring_damper>false</implicit_spring_damper>
+  </gazebo>
+  <gazebo reference="front_right_caster_steer_joint">
+    <implicit_spring_damper>false</implicit_spring_damper>
+  </gazebo>
+"""
+src = src.replace('</robot>', CASTER + '</robot>')
+# 关节阻尼直接写进 URDF 的 <dynamics>（会转成 SDF 的 <dynamics>）
+src = src.replace(
+    '<joint name="front_left_caster_steer_joint" type="continuous">',
+    '<joint name="front_left_caster_steer_joint" type="continuous">\n'
+    '    <dynamics damping="8.0" friction="2.0"/>')
+src = src.replace(
+    '<joint name="front_right_caster_steer_joint" type="continuous">',
+    '<joint name="front_right_caster_steer_joint" type="continuous">\n'
+    '    <dynamics damping="8.0" friction="2.0"/>')
+src = src.replace(
+    '<joint name="front_left_caster_roll_joint" type="continuous">',
+    '<joint name="front_left_caster_roll_joint" type="continuous">\n'
+    '    <dynamics damping="0.05" friction="0.01"/>')
+src = src.replace(
+    '<joint name="front_right_caster_roll_joint" type="continuous">',
+    '<joint name="front_right_caster_roll_joint" type="continuous">\n'
+    '    <dynamics damping="0.05" friction="0.01"/>')
 
 # 4) 配色（Gazebo 里没有这些就是默认灰）
 COLORS = '''

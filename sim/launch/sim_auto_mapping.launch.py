@@ -16,7 +16,8 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import (DeclareLaunchArgument, ExecuteProcess,
+                            IncludeLaunchDescription)
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
@@ -118,6 +119,12 @@ def generate_launch_description() -> LaunchDescription:
                          name='room_explorer', output='screen',
                          condition=IfCondition(explorer),
                          parameters=[{'use_sim_time': use_sim_time}])
+    # 链路看门狗：碰撞监控触发一次 stop 后会卡死不再处理指令（老毛病），
+    # 卡死时 /cmd_vel_auto_*_filtered 静默 → 车不动。实机一直有，仿真之前漏了。
+    watchdog = ExecuteProcess(
+        cmd=['python3', os.path.join(REPO, 'tools', 'chain_watchdog.py')],
+        name='chain_watchdog', output='screen')
+
     free_around = Node(package='fwr_bringup', executable='map_free_around_robot',
                        name='map_free_around_robot', output='screen',
                        parameters=[{'use_sim_time': use_sim_time}])
@@ -131,5 +138,6 @@ def generate_launch_description() -> LaunchDescription:
         map_seal, activate,
         gate, selector, cm_fwd, cm_mgr,
         rear_guard, cmd_router,
+        watchdog,
         free_around, room_explorer, state_pub,
     ])
