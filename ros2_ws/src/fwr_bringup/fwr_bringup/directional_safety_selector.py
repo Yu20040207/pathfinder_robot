@@ -28,7 +28,10 @@ class DirectionalSafetySelector(Node):
         # 0.38 m ≈ 车体半对角线 0.37 m，旋转扫不到。
         # 0.34：车体前缘 0.30 + 4 cm 余量。0.38（半对角线）偏保守，
         # 现场"明明右转有空间"却被拒；旋转是原地转，前缘不会比 0.30 更近。
-        self.declare_parameter('rotate_clear_m', 0.34)
+        # 雷达装在被转中心**前方 0.21 m**，旋转时车体扫过半径 0.37 m
+        # → 雷达读数只要 > 0.37 - 0.21 = 0.16 m 就是安全的。
+        # 之前用 0.34（相当于要求 0.55 m 实际余量），难怪"能转却不转"。
+        self.declare_parameter('rotate_clear_m', 0.16)
         self._last_scan = None
         self._front_min_m = float('inf')
         self._left_min_m = float('inf')
