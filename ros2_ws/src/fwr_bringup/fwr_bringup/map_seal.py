@@ -28,6 +28,10 @@ class MapSeal(Node):
         self.declare_parameter('out_topic', '/map_sealed')
         self.declare_parameter('dilate_cells', 1)
         self.declare_parameter('occupied_threshold', 60)
+        # 2026-11-01（用户反馈"规划路径穿墙"）：手动建图的地图上有大量孤立噪点，
+        # 墙体被切成 146 个碎片，规划器就从碎片缝隙钻过去。
+        # 先删掉小于 min_cluster_cells 的障碍连通块（噪点），再膨胀封缝。
+        self.declare_parameter('min_cluster_cells', 4)
         # 2026-11-01：原 0.5 s（2 Hz）。BT 每秒重规划，地图每秒都在变 → 路径频繁跳变。
         # 降到 2 s（0.5 Hz），让规划看到稳定的世界。
         self.declare_parameter('period_s', 2.0)
@@ -65,9 +69,23 @@ class MapSeal(Node):
         data = np.array(msg.data, dtype=np.int8).reshape(h, w)
 
         thr = int(self.get_parameter('occupied_threshold').value)
+        # 1) 去掉孤立噪点：连通块小于 min_cluster_cells 的障碍直接抹掉
+        min_cells = int(self.get_parameter('min_cluster_cells').value)
+        occ = data >= thr
+        if min_cells > 0 and occ.any():
+            from scipy.ndimage import label as _label
+            lab, k = _label(occ, structure=np.ones((3, 3)))
+            if k > 0:
+                sizes = np.bincount(lab.ravel())
+                small = sizes < min_cells
+                small[0] = False
+                if small.any():
+                    occ = occ & ~small[lab]
+        data = np.where(occ & (data < thr), 100, data).astype(np.int8)
+
+        # 2) 膨胀封缝
         r = max(0, int(self.get_parameter('dilate_cells').value))
         if r > 0:
-            occ = data >= thr
             out = data.copy()
             for dy in range(-r, r + 1):
                 for dx in range(-r, r + 1):
