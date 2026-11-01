@@ -3915,3 +3915,30 @@ ros2 run fwr_bringup keyboard_teleop     # w/s 前后, a/d 左右转, q 退出
 3. 路径抖动：`bt_navigator` 每秒重规划 + 车在转 → 目标航向一直变。
    可把重规划周期从 1 s 放宽（`controller_frequency` / BT 的 rate），
    或在 BT 里加"先对齐航向再走"的节点（我们已有 rotate_to_heading）。
+
+## 2026-11-01 14:20 · 实车自动建图跑通（本轮最后一批修复）
+
+### 实测成果
+```
+/cmd_vel            (0.1, 0.0)
+/cmd_vel_auto_safe  (0.1, 0.0)   ← 指令全程放行
+15 秒位移            1.27 m       ← 车正常跟路径
+选择器异常           0
+角速度符号翻转       0 次（382 样本）← 不再左右徘徊
+```
+
+### 本批改动
+1. **前进被挡 → 改原地旋转**（`directional_safety_core.blocked_rotate_*`）
+   前停区挡住"前进+转弯"时，放弃线速度、输出纯旋转（v=0）：
+   优先按请求方向转，请求方向被挡就转反方向。这是安全的 —— 原地转不会把车头推向障碍。
+2. **纯旋转放行**（`rotate_clear_ok` / `rotate_same_side_ok` / `rotate_flip_ok`）
+   扇区收窄到 ±20°（侧前方的墙不该阻止原地转），门槛 0.34 m（车体前缘 0.30 + 4 cm）。
+3. **防左右徘徊**：`angular_dist_threshold 1.2→0.35`（偏差 >20° 先转正再走）、
+   `lookahead_dist 0.45→0.60`、`min_lookahead_dist 0.30→0.40`
+4. **死胡同过滤**：目标周围 1 m 内空闲格 < 120（≈0.3 m²）就跳过，不进去
+5. **看门狗**：新增"指令在流动但监控输出静默 >3 s 就重启"
+
+### 唯一遗留
+**脱困倒车仍不可用**：`stuck_reverser` 走 `/cmd_vel_manual`，
+自动模式下被 `base_bridge` 拒绝（即使临时开 `manual_enabled` 也会被自动授权锁回）。
+正确通路是 `/base/recovery_permit` + `/explore/state='reversing'`（`nav_reverse_ok` 已实现，未接）。

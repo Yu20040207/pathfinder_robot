@@ -98,7 +98,10 @@ controller_server:
       # 窄处/贴障碍时改成 0.6 rad(34°) 先转向再走，避免直接顶上去报 collision。
       # 2026-10-30：0.6 rad(34°) 太敏感——路径一转弯就原地转，用户反馈“转向太过头”。
       # 恢复 1.2 rad(69°)：普通绕障边走边转，只有大偏差才原地对准。
-      angular_dist_threshold: 1.2
+      # 2026-11-01（用户反馈"路径左右徘徊"）：
+      # 1.2 rad ≈ 69° 太大 —— 车头偏 30° 时 shim 不介入，RPP 边前进边纠偏，
+      # 于是左右摇摆。降到 0.35 rad(20°)：偏差超过 20° 就先原地转正再走。
+      angular_dist_threshold: 0.35
       forward_sampling_distance: 0.30
       # 2026-10-31 减少重影：雷达 10 Hz 扫一圈 0.1 s，
       # 0.8 rad/s 时车每帧转 4.6°，转角处点云被拉斜 → 同一面墙出现双线。
@@ -117,9 +120,11 @@ controller_server:
       # 0.30 m 时车头前方只有半个车身，微小横向误差就产生大角速度 → 左右摆动。
       # 2026-11-01（清单 C4）：低速时前视 0.55 m 太远，遇到窄处会"抄近路"贴障碍。
       # 打开速度自适应前视：0.10 m/s 巡航时前视约 0.30~0.45 m，转弯更贴合路径。
-      lookahead_dist: 0.45
-      min_lookahead_dist: 0.30
-      max_lookahead_dist: 0.75
+      # 前视距离加长：0.45→0.60（下限 0.30→0.40）。
+      # 前视太短会"追着车轮跑"，一点点偏差就大幅打方向 → 左右摆。
+      lookahead_dist: 0.60
+      min_lookahead_dist: 0.40
+      max_lookahead_dist: 0.85
       use_velocity_scaled_lookahead_dist: true
       # Shim 已在路径起步时原地对准航向；RPP 再做一次“转-走-转”会形成
       # 极限环，表现为转弯一顿一顿。路径跟踪只保留前进 + 小角速度修正。

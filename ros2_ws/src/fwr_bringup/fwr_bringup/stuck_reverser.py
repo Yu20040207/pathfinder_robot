@@ -19,6 +19,9 @@ import math
 import time
 
 from geometry_msgs.msg import Twist
+from rcl_interfaces.msg import Parameter as RclParameter
+from rcl_interfaces.msg import ParameterType
+from rcl_interfaces.srv import SetParameters
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from std_msgs.msg import Bool
@@ -45,6 +48,10 @@ class StuckReverser(Node):
         self._last_action = 0.0
 
         self._pub = self.create_publisher(Twist, '/cmd_vel_manual', 20)
+        # 自动模式下 manual_enabled=false，手动词道会被 base_bridge 拒绝 →
+        # 倒车前临时打开，结束后关回去（与 room_explorer 的脱困做法一致）
+        self._param_cli = self.create_client(SetParameters,
+                                             '/base_bridge/set_parameters')
         self.create_subscription(Twist, '/cmd_vel_auto_unchecked', self._on_raw, 20)
         self.create_subscription(Twist, '/cmd_vel_auto_forward_filtered',
                                  self._on_filtered, 20)
@@ -69,6 +76,18 @@ class StuckReverser(Node):
         p = msg.pose.pose.position
         self._pos = (p.x, p.y)
 
+    def _set_manual(self, enabled: bool) -> None:
+        if not self._param_cli.service_is_ready():
+            return
+        req = SetParameters.Request()
+        for name, val in (('motion_enabled', True), ('manual_enabled', enabled)):
+            prm = RclParameter()
+            prm.name = name
+            prm.value.type = ParameterType.PARAMETER_BOOL
+            prm.value.bool_value = val
+            req.parameters.append(prm)
+        self._param_cli.call_async(req)
+
     # ---------- 状态机 ----------
     def _tick(self) -> None:
         now = time.monotonic()
@@ -83,6 +102,7 @@ class StuckReverser(Node):
                 self._state_at = now
                 self._last_action = now
                 self._origin = self._pos
+                self._set_manual(True)
                 self.get_logger().warn('前停区持续拦截且车尾空旷 → 倒车自救')
             return
 
@@ -96,6 +116,7 @@ class StuckReverser(Node):
                     self._rear_blocked)
             if done:
                 self._pub.publish(Twist())
+                self._set_manual(False)
                 self._state = 'releasing'
                 self._state_at = now
                 self.get_logger().info(f'倒车结束（{moved:.2f} m），交还导航')

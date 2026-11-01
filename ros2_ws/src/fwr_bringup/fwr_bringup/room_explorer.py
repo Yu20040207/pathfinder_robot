@@ -51,6 +51,8 @@ class RoomExplorer(Node):
         # 房间扫完却找不到前沿（房间在图上被封死）时：沿房间四角巡逻换角度重扫，
         # 往往能发现之前没扫到的门口。0 = 关闭该兜底行为。
         self.declare_parameter('patrol_on_stuck', True)
+        # 死胡同过滤：目标周围 1 m 半径内空闲格数少于这个值就跳过（0.05 m/格）
+        self.declare_parameter('dead_end_min_free', 120)
         # 2026-10-31 方案 A：同一目标连续失败 N 次后，用"手动通道"短退脱困。
         # 走手动通道是因为：手动后退只受车尾超声守卫约束（nav 通道还要恢复许可），
         # 而且这条通路已经实车验证过（有障停、无障走）。
@@ -146,6 +148,14 @@ class RoomExplorer(Node):
         w, h = m.info.width, m.info.height
         data = np.array(m.data, dtype=np.int16).reshape(h, w)
         cx, cy = int((x - ox) / res), int((y - oy) / res)
+        # 2026-11-01（用户要求）：看起来是死胡同的就别进去 ——
+        # 目标周围 1.0 m 半径内空闲格太少（< dead_end_min_free 格）就跳过。
+        r_dead = int(1.0 / res)
+        y0d, y1d = max(0, cy - r_dead), min(h, cy + r_dead + 1)
+        x0d, x1d = max(0, cx - r_dead), min(w, cx + r_dead + 1)
+        patch = data[y0d:y1d, x0d:x1d]
+        if int((patch == 0).sum()) < int(self.get_parameter('dead_end_min_free').value):
+            return None
         best = None
         best_d = 1e9
         for dy in range(-radius_cells, radius_cells + 1):

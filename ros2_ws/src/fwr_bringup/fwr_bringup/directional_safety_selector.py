@@ -31,6 +31,8 @@ class DirectionalSafetySelector(Node):
         self.declare_parameter('rotate_clear_m', 0.34)
         self._last_scan = None
         self._front_min_m = float('inf')
+        self._left_min_m = float('inf')
+        self._right_min_m = float('inf')
         # 2026-11-01：默认关闭 —— reverse 监控贴墙必然触发，会否决所有旋转
         self.declare_parameter('require_reverse_monitor', False)
         self.base_frame = str(self.get_parameter('base_frame').value)
@@ -59,6 +61,9 @@ class DirectionalSafetySelector(Node):
         def _on_scan(msg):
             self._last_scan = msg
             self._front_min_m = self._compute_front_min(msg)
+            # 反方向的余量：左前（150~180°）与右前（-180~-150°）
+            self._left_min_m = self._sector_min(msg, +1)
+            self._right_min_m = self._sector_min(msg, -1)
             self.core.observe_scan(time.monotonic())
 
         self.create_subscription(LaserScan, self.get_parameter('scan_topic').value,
@@ -97,23 +102,59 @@ class DirectionalSafetySelector(Node):
                                    time.monotonic())
 
     @staticmethod
-    def _compute_front_min(scan):
-        """车头方向（扫描角 ±180，±30°）最近障碍；无回波返回 inf。"""
+    def _sector_min(scan, side):
+        """side=+1 左前（扫描角 150~180°），-1 右前（-180~-150°）。"""
         n = len(scan.ranges)
         if n == 0:
             return float('inf')
         vals = []
         for i, r in enumerate(scan.ranges):
             a = math.degrees(scan.angle_min + i * scan.angle_increment)
-            if abs(abs(a) - 180.0) <= 30.0 and math.isfinite(r) and r > 0.05:
+            if side > 0:
+                hit = 150.0 <= a <= 180.0 or -180.0 <= a <= -150.0
+            else:
+                hit = 150.0 <= a <= 180.0 or -180.0 <= a <= -150.0
+            if hit and math.isfinite(r) and r > 0.05:
+                vals.append(r)
+        return min(vals) if vals else float('inf')
+
+    @staticmethod
+    def _compute_front_min(scan):
+        """车头正前方（扫描角 ±180，**±20°** 窄扇区）最近障碍。
+
+        2026-11-01：原来用 ±30°，把"侧前方 30° 的墙"也算进来了 →
+        明明原地能转，却因为旁边有墙被否决。原地旋转时车头正前方
+        不会再靠近，真正会扫到的是正前方 ±20° 内的物体。
+        """
+        n = len(scan.ranges)
+        if n == 0:
+            return float('inf')
+        vals = []
+        for i, r in enumerate(scan.ranges):
+            a = math.degrees(scan.angle_min + i * scan.angle_increment)
+            if abs(abs(a) - 180.0) <= 20.0 and math.isfinite(r) and r > 0.05:
                 vals.append(r)
         return min(vals) if vals else float('inf')
 
     def _tick(self):
         now = time.monotonic()
         self.core.observe_tf(self._tf_ready(), now)
-        self.core.rotate_clear_ok = (
-            self._front_min_m >= float(self.get_parameter('rotate_clear_m').value))
+        clear = float(self.get_parameter('rotate_clear_m').value)
+        cmd_w = self.core.raw[1] if self.core.raw else 0.0
+        # 左转（w>0）要左前空旷；右转（w<0）要右前空旷
+        requested = self._left_min_m if cmd_w > 0 else self._right_min_m
+        opposite = self._right_min_m if cmd_w > 0 else self._left_min_m
+        # 正前方空旷 → 随便转
+        self.core.rotate_clear_ok = self._front_min_m >= clear
+        # 请求方向本身就空旷 → 直接转（不翻转）
+        self.core.rotate_same_side_ok = requested >= clear
+        # 请求方向被挡、反方向空旷 → 翻转
+        self.core.rotate_flip_ok = (not self.core.rotate_same_side_ok) and opposite >= clear
+
+        # 前进被挡时改原地转：只要某一侧够空旷
+        blocked = self._front_min_m < clear
+        self.core.blocked_rotate_same = blocked and requested >= clear
+        self.core.blocked_rotate_ok = blocked and (not self.core.blocked_rotate_same) and opposite >= clear
         linear_x, angular_z = self.core.select(now)
         if os.environ.get('FWR_SELECTOR_DEBUG'):
             reason = self.core.last_reason

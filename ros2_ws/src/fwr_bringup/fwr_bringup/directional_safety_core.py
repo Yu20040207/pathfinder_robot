@@ -29,6 +29,16 @@ class DirectionalSafetyCore:
         # 但它把整帧清零 → "车头没对准路径、只需原地右转"也被拦死。
         # 车体半对角线约 0.37 m：车头障碍更远时，原地旋转不可能撞到。
         self.rotate_clear_ok = False
+        # 2026-11-01（用户要求）：**要转的方向被挡就转另一边**。
+        # 例：导航要左转，但左前有障碍、右前空旷 → 直接右转，
+        # Nav2 会按新朝向重新规划。这里只用标志位表达"反方向是否安全"。
+        self.rotate_flip_ok = False
+        self.rotate_same_side_ok = False
+        # 2026-11-01（用户要求）：前进被前停区挡住、但某一侧有空间时，
+        # **放弃线速度、改为原地旋转**（v=0），转到朝向可行再继续。
+        # 这是安全的：原地转不会把车头推向障碍。
+        self.blocked_rotate_ok = False   # 反方向可转
+        self.blocked_rotate_same = False # 请求方向可转
         self.scan_at = None
         self.tf_at = None
         self.monitor_active_since = {}
@@ -124,10 +134,23 @@ class DirectionalSafetyCore:
         if self.manual or self.state != ('reversing' if self.direction == 'reverse' else 'navigating'):
             return fail('mode')
         # 纯旋转 + 车头够远 → 直接放行角速度（不要求监控回执）
-        if (self.rotate_clear_ok and self.direction == 'rotate' and
-                abs(raw_x) < 1e-3 and abs(raw_z_eff) > 0):
-            self.last_reason = 'rotate-clear'
-            return (0.0, raw_z_eff)
+        if (self.direction == 'rotate' and abs(raw_x) < 1e-3 and
+                abs(raw_z_eff) > 0):
+            if self.rotate_clear_ok or self.rotate_same_side_ok:
+                self.last_reason = 'rotate-clear'
+                return (0.0, raw_z_eff)
+            # 要转的方向被挡 → 反方向只要空旷就转过去
+            if self.rotate_flip_ok:
+                self.last_reason = 'rotate-flip'
+                return (0.0, -raw_z_eff)
+        # 前进被前停区挡住（线速度非零但前方堵）→ 改成原地旋转
+        if (abs(raw_x) >= 1e-3 and abs(raw_z_eff) > 0):
+            if self.blocked_rotate_same:
+                self.last_reason = 'blocked-rotate-same'
+                return (0.0, raw_z_eff)
+            if self.blocked_rotate_ok:
+                self.last_reason = 'blocked-rotate-flip'
+                return (0.0, -raw_z_eff)
         # 2026-11-01：原来"原地旋转"要求 forward 和 reverse 两个监控都给出
         # 非零角速度回执。但 reverse 监控的后方停车区在贴墙时必然触发，
         # 车尾 0.3~0.45 m 内有 3 个激光点就否决一切旋转 →

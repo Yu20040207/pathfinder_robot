@@ -47,6 +47,7 @@ class Watchdog(Node):
             m: self.create_client(GetState, f'/{m}/get_state') for m in MONITORS
         }
         self.create_timer(1.0, self._check)
+        self.declare_parameter('out_silent_s', 3.0)
         self.create_timer(5.0, self._health)
         self.get_logger().info(
             f'看门狗启动（{"只报告" if dry_run else "自动重启"}）：{IN_TOPIC} → {OUT_TOPIC}')
@@ -109,13 +110,27 @@ class Watchdog(Node):
             self._do(name, Transition.TRANSITION_ACTIVATE, 'activate')
 
     def _health(self):
-        """周期健康检查：任何监控不是 active 就恢复。"""
+        """周期健康检查：状态不对、或**输出静默**就恢复。
+
+        2026-11-01：原来只查状态和"输入有、输出无"。现场遇到"输入也在发、
+        但监控完全不回复"的情况（前端空旷也输出 0），两个条件都没覆盖到。
+        现在只要**指令在流动而监控输出静默超过 out_silent_s** 就重启。
+        """
         if self._dry:
             return
+        now = time.monotonic()
+        cmd_flowing = (now - self._last_in) < 1.0
+        out_silent = (now - self._last_out) > float(
+            self.get_parameter('out_silent_s').value)
         for name in MONITORS:
             state = self._state_of(name)
             if state not in ('active', 'unknown'):
                 self.get_logger().warn('%s 处于 %s，自动恢复' % (name, state))
+                self._restart(name)
+            elif cmd_flowing and out_silent:
+                self.get_logger().warn(
+                    '%s 指令在流动但输出静默 %.1fs，重启'
+                    % (name, now - self._last_out))
                 self._restart(name)
 
     def _check(self) -> None:
