@@ -4074,3 +4074,40 @@ footprint_clearing_enabled: true
 ### 教训
 "规划穿墙"要先看**代价地图在车自己脚下是什么值**。车贴墙时
 （5×5 邻域有 82 的膨胀代价），规划器必然会"穿出去"。
+
+## 2026-11-01 17:25 · 卡住脱困：为什么不能靠浅停车区解决
+
+### 现场现象
+车停在门口附近不动，前方只有 0.24 m，左右各 0.33 m（**右边其实能转出去**）。
+`/cmd_vel` 为空、`motion_enabled=false`（任务失败后关门）。
+
+### 关键约束（已试过，不可行）
+把 `front_stop` 深度从 0.32 收到 0.22，想让"原地转身"不被拦截 ——
+**单元测试立刻挡住**：
+
+```
+test_collision_stop_zones_keep_in_place_rotation_usable
+    assert min(fx) >= 0.30, 'front stop zone must start at the chassis front edge'
+```
+
+这条护栏来自 2026-11-01 的真实撞墙事故（0.28 起时车体前缘 0.30 已无余量）。
+**停车区不能再浅。**
+
+### 结论：脱困必须绕过 collision_monitor
+安全链顺序是
+`/cmd_vel → gate → collision_monitor_forward → directional_safety_selector → /cmd_vel_auto_safe`
+
+监控在**选择器之前**，它一旦把速度清零，选择器收到的就是 0，无法"翻案"。
+所以"原地转身脱困"只能在**监控之后**注入。
+
+### 建议方案（下个会话实现）
+新增 `escape_spinner` 节点，订阅 `/cmd_vel_auto_safe`、`/scan`、`/odom`：
+- 连续 `N` 秒（默认 3 s）指令非零但里程计几乎不动 → 判定卡住
+- 用 `/scan` 实测左右两侧可用距离，选**更宽的一侧**决定转向方向
+- 转角不写死：按该侧剩余空间算（例如 `min(60°, 可用距离对应角度)`），
+  至少 30°、最多 90°，转完再交回 Nav2
+- 直接发布到 `/base_bridge` 的自动通道（需 `/base/recovery_permit`），
+  或复用已有 `stuck_reverser` 的许可机制
+
+### 已验证
+- `front_stop` 已恢复 0.32（228 通过 / 1 曾失败后恢复）
