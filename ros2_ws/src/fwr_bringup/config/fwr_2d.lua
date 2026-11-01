@@ -45,7 +45,8 @@ TRAJECTORY_BUILDER_2D.max_range = 12.0
 -- 地图空闲只有 48 m² / 未知 311 m²（87%），探索器到处看到前沿、
 -- 目标点落在未知区 → 规划穿墙。
 -- 折中回到 2.0：既擦出行驶过的空间，又不像 3.0 那样把门外的远处也涂成空闲。
-TRAJECTORY_BUILDER_2D.missing_data_ray_length = 2.0
+-- 2026-11-01：无回波射线擦 3 m（有回波的擦到命中点）
+TRAJECTORY_BUILDER_2D.missing_data_ray_length = 3.0
 TRAJECTORY_BUILDER_2D.use_imu_data = true
 -- 走廊关键项：开启在线相关匹配（分支限界），平行墙场景比纯优化匹配稳
 TRAJECTORY_BUILDER_2D.use_online_correlative_scan_matching = true
@@ -66,6 +67,16 @@ TRAJECTORY_BUILDER_2D.motion_filter.max_angle_radians = math.rad(0.3)
 -- 2026-10-31 减少重影：子图 120→90 帧（更短 → 回环约束更多）
 TRAJECTORY_BUILDER_2D.submaps.num_range_data = 90
 TRAJECTORY_BUILDER_2D.submaps.grid_options_2d.resolution = 0.05
+
+-- 2026-11-01：**显式写全自由空间插入参数**（原来全用默认值，
+-- 现场实测：手动开 0.15 m，地图外框扩张 47 m²，但空闲面积从 9.0 只到 9.7 m²
+-- —— 射线打到的墙能标成障碍，射线**途经的空闲区域却没写进地图**，
+-- 全留在 unknown。于是探索器没有前沿、代价地图大半不可通行、墙薄重影。
+TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.probability_grid_range_data_inserter = {
+  hit_probability = 0.55,    -- 命中一次就把格子推向"占据"
+  miss_probability = 0.45,   -- 穿过一次就推向"空闲"（<0.5 才判为空闲，默认 0.49 太贴近阈值）
+}
+
 
 -- 更频繁做位姿图优化，歪斜能更早被拉回（原 30）
 -- 2026-10-31 减少重影：每 20→12 个节点优化一次位姿图

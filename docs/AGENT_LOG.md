@@ -3855,3 +3855,34 @@ supervisor 交接后，探索器每个目标都被判"在代价地图上不可�
 **两边都是"Cartographer 自由空间几乎不增长"** —— 这不是环境或探索算法的问题，
 而是**建图配置的共性问题**，优先级应提到最高。下一轮从
 `range_data_inserter`（hit/miss probability）和 `missing_data_ray_length` 查起。
+
+## 2026-11-01 11:15 · 【重大修复】Cartographer 空闲空间不写入 → 一行概率参数解决
+
+### 现场对照实验（用户手动驾驶）
+| 指标 | 改动前 | 改动后（开完一个房间）|
+| --- | --- | --- |
+| 空闲面积 | 9.0 → 9.7 m²（移动 0.15 m 只涨 0.7）| **47.6 m²** |
+| 障碍 | 1.1~2.1 m² | 4.8 m² |
+| 地图尺寸 | 5×7 m | 18×18.6 m |
+
+### 根因
+`fwr_2d.lua` 里**从来没有显式配置 `range_data_inserter`**，用的是默认
+`miss_probability = 0.49`。射线穿过的格子概率几乎跨不过 0.5 阈值 →
+**"走过的路"永远留在 unknown**（只写障碍、不写空闲）。
+于是：地图大片未知 → 探索器没有前沿 → 代价地图大半不可通行 → 目标全被拒
+→ 墙薄、重影、"走过还是黑的"。
+
+### 修复（`config/fwr_2d.lua`）
+```lua
+TRAJECTORY_BUILDER_2D.submaps.range_data_inserter.probability_grid_range_data_inserter = {
+  hit_probability  = 0.55,
+  miss_probability = 0.45,   -- 原来是 0.49（默认），太贴近阈值
+}
+TRAJECTORY_BUILDER_2D.missing_data_ray_length = 2.0 → 3.0
+```
+
+### 手动驾驶命令（给现场用）
+```bash
+ros2 run fwr_bringup keyboard_teleop     # w/s 前后, a/d 左右转, q 退出
+# 速度固定 0.10 m/s，可用 -p forward_speed_mps:=0.15 调整（0.02~0.20）
+```
