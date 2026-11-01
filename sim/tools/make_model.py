@@ -62,8 +62,8 @@ GAZEBO = f'''
                  所以覆盖 260° 必须取 50°~310°（以车头 180° 为中心），
                  盲区在 0°±50°（车尾）—— 这才与实车一致。
                  早先误写成 ±130°（以车尾为中心），结果车头反而有 100° 盲区。 -->
-            <min_angle>{0.872665}</min_angle>
-            <max_angle>{5.410521}</max_angle>
+            <min_angle>{-2.268928}</min_angle>
+            <max_angle>{2.268928}</max_angle>
           </horizontal>
         </scan>
         <range><min>0.15</min><max>12.0</max><resolution>0.01</resolution></range>
@@ -147,6 +147,14 @@ COLORS = '''
   <gazebo reference="laser_front"><material>Gazebo/DarkGrey</material></gazebo>
   <gazebo reference="motor_driver_body"><material>Gazebo/Green</material></gazebo>
 '''
+
+# 用户确认：雷达是"线在后、箭头在前"的正常安装，扫描角 0 = 车头方向。
+# 生产 URDF 里 laser_front_joint 带了 180°（历史补偿），仿真里去掉，
+# 让激光坐标系与车体坐标系一致 —— 否则仿真雷达会朝车尾扫。
+src = src.replace('<!-- Physical C1 scan zero faces chassis rear; rotate its frame into +X front. -->',
+                  '<!-- 仿真：雷达按"箭头朝前"安装，扫描角 0 = 车头（去掉了历史 180° 补偿） -->')
+src = src.replace('<origin xyz="0.21 0 0.0425" rpy="0 0 3.14159265359"/>',
+                  '<origin xyz="0.21 0 0.0425" rpy="0 0 0"/>')
 
 out = src.replace('</robot>', GAZEBO + COLORS + '</robot>')
 os.makedirs(os.path.join(ROOT, 'sim/models/fwr_bot'), exist_ok=True)

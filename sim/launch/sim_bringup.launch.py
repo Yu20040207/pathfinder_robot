@@ -60,11 +60,11 @@ def generate_launch_description() -> LaunchDescription:
         parameters=[{'config_file': bridge_cfg, 'use_sim_time': True}],
         output='screen')])
 
-    # ---- 静态 TF（与实机一致：laser_front 在 x=+0.21 且倒装 180°）
+    # ---- 静态 TF（雷达"箭头朝前"安装：laser_front 与车体同向，扫描角 0 = 车头）
     tf_laser = Node(
         package='tf2_ros', executable='static_transform_publisher',
         name='tf_laser_front',
-        arguments=['0.21', '0.0', '0.075', str(math.pi), '0.0', '0.0',
+        arguments=['0.21', '0.0', '0.075', '0.0', '0.0', '0.0',
                    'base_footprint', 'laser_front'],
         parameters=[{'use_sim_time': use_sim_time}])
 
