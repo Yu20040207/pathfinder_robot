@@ -32,9 +32,10 @@ class MapSeal(Node):
         # 墙体被切成 146 个碎片，规划器就从碎片缝隙钻过去。
         # 先删掉小于 min_cluster_cells 的障碍连通块（噪点），再膨胀封缝。
         self.declare_parameter('min_cluster_cells', 4)
-        # 2026-11-01：原 0.5 s（2 Hz）。BT 每秒重规划，地图每秒都在变 → 路径频繁跳变。
-        # 降到 2 s（0.5 Hz），让规划看到稳定的世界。
-        self.declare_parameter('period_s', 2.0)
+        # 2026-11-01：2 s 太慢 —— 代价地图在这 2 秒内可能是空的，
+        # 此时算出来的路径是"直穿墙"（因为整张图都当自由空间）。
+        # 预览一旦算成这样，RViz 会一直显示那条线，看起来像规划器坏了。
+        self.declare_parameter('period_s', 0.5)
         # 2026-11-01：Cartographer 的地图尺寸一直变（每新增子图就更大），
         # 全局代价地图跟着反复 "Resizing costmap"，最终把 SmacPlanner 搞成
         # segfault（planner_server exit -11）。固定输出尺寸即可根治。
