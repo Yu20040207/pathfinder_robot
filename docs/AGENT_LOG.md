@@ -3582,3 +3582,71 @@ Cartographer 直接吃 `/scan`。实车仍用 `/scan_mapping`。
 - 给 Cartographer 喂"事后遮罩"的扫描（NaN 或 inf 都试过）→ 位姿乱跳 ❌
 - 关闭 `TRAJECTORY_BUILDER_2D.use_imu_data` → 地图退化成 391×297 m 垃圾 ❌
 - 桥接 Gazebo 的 `/model/fwr_bot/tf` → odom→base 双发布者，TF 打架 ❌
+
+## 2026-11-01 09:05 · 分析：加了超声波之后自动建图变差的原因（未改动代码）
+
+用户观察：加超声**之前**自动建图效果不错；加之后出现
+①路径离障碍近且频繁跳变、越走越贴 ②规划出转弯但底盘停在原地。
+
+### 结论：不是超声本身，是随它一起加进链路的 4 个东西
+
+**① `collision_monitor_reverse` 的"后方停车区"会连原地旋转一起禁止（主因②）**
+`real_collision_monitor_reverse.yaml`：
+```
+cmd_vel_in_topic: /cmd_vel_auto_unchecked
+polygons: [rear_visible_stop]   points: [-0.30,0.30, -0.45,0.30, -0.45,-0.30, -0.30,-0.30]
+action_type: stop   max_points: 3
+```
+Nav2 的 `stop` 动作**把整帧指令清零（线速度和角速度都清）**，不分前进/倒车。
+而 `directional_safety_selector` 对"原地旋转"要求**两个监控都给出非零角速度**：
+```python
+required = ('forward', 'reverse') if self.direction == 'rotate' else (self.direction,)
+...
+if self.direction == 'rotate' and any(abs(z) <= epsilon for _, z in outputs):
+    return fail('zero-angular-reply')     # 输出 0 → 车不动
+```
+⇒ 只要车尾 0.30~0.45 m 内有 3 个激光点（窄空间里极常见），
+**任何原地旋转都会被否决** → 现场就是"规划出转弯、底盘停在那儿"。
+Nav2 社区也在讨论这个限制（stop 区域不能只禁平移、不禁旋转）：
+ros-navigation/navigation2 issue #3313。
+
+**② 局部代价地图的 `range_layer` 只增不减（主因①）**
+```
+range_layer: topics: 4 路超声  input_sensor_type: INPUT_ULTRASOUND
+clear_on_max_reading: false      ← 读到 max_range（无目标）时**不清理**旧标记
+```
+超声无目标时我发的是 `range = max_range`，但 `clear_on_max_reading: false`
+意味着这些"空"读数不会擦掉之前打的障碍格 →
+车尾后方在代价地图上**逐渐长出一堵永远不消失的假墙**（膨胀 0.30 m 后更厚）。
+规划器只能把路径往前挤 → "离前面障碍物越来越近"。
+
+**③ `base_bridge` 开始拒绝倒车指令**
+加了超声后，倒车要过 `nav_reverse_ok()` / 车尾守卫。
+曾把 `allow_reversing: true` 打开：RPP 规划出倒车段 → 底盘拒绝 → 车不动 →
+`Controller patience exceeded` → 目标失败 → 探索器重发 → 死循环（已回退）。
+
+**④ `cost_travel_multiplier` 被我改成 4.0**
+这是"路径贴障碍"的直接旋钮（8.0 → 贴边走；3~4 → 敢贴）。
+昨天已回退到 8.0。
+
+### 为什么"路径经常跳变"
+全局代价地图的 static 层读 `/map_sealed`，而 `map_seal` **每 0.5 秒**重发一次，
+建图模式下 Cartographer 的 `/map` 本身也在变 → 规划器每秒看到的世界都不一样
+（BT 里 `RateController hz=1.0`，即每秒重规划一次）→ 路径在两种走法之间来回跳。
+
+### 建议（按性价比，待确认后实施）
+1. **去掉 `collision_monitor_reverse`**：倒车安全已由 `base_bridge` 的
+   车尾超声联锁负责，且它只拦"后退"不拦旋转。这一步最可能直接恢复加超声前的表现。
+   （替代方案：保留监控但在选择器里对 `rotate` 只采纳 forward 回执。）
+2. **`range_layer` 改 `clear_on_max_reading: true`**，或直接从局部代价地图移除
+   （它的职责与车尾联锁重复）。
+3. **降低 `/map_sealed` 刷新到 0.2~0.5 Hz**（或规划时用快照），让路径在几秒内稳定。
+4. **RPP 收紧**：`use_velocity_scaled_lookahead_dist: true`，
+   低车速时前视 0.30~0.45 m，避免切角贴墙。
+5. 保持 `cost_travel_multiplier: 8.0`、`inflation_radius: 0.30`。
+
+### 依据
+- nav2_collision_monitor（Humble）：stop/slowdown 作用于整帧指令
+- ros-navigation/navigation2 issue #3313：社区讨论"只禁平移不禁旋转"的 stop 区
+- 代码：`directional_safety_core.select()`、`real_collision_monitor_reverse.yaml`、
+  `real_nav2.yaml` 的 `range_layer` / Smac 段
