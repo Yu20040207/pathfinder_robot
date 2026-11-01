@@ -135,3 +135,13 @@ Visualization Manager:
       Target Frame: map
       Scale: 80
       Value: TopDownOrtho (rviz)
+
+Window Geometry:
+  Displays:
+    collapsed: false
+  Height: 1190
+  Hide Left Dock: false
+  Hide Right Dock: false
+  Width: 1910
+  X: 5
+  Y: 5
