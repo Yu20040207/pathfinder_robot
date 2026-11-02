@@ -7,7 +7,13 @@ bt_navigator:
     global_frame: map
     robot_base_frame: base_footprint
     odom_topic: /odom
-    bt_loop_duration: 10
+    # 2026-11-02：原来 10 ms(100 Hz)。实测日志报 \"Behavior Tree tick rate 100.00 was exceeded\"，
+
+    # BT 线程被饿死 → 目标看似 active 但不再下发速度（车停在空地不动）。
+
+    # 降到 50 ms(20 Hz)：导航不需要 100 Hz，20 Hz 足够且稳定。
+
+    bt_loop_duration: 50
     default_server_timeout: 20
     wait_for_service_timeout: 1000
     plugin_lib_names:
