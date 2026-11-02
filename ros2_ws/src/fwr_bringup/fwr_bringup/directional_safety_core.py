@@ -183,8 +183,15 @@ class DirectionalSafetyCore:
                 return fail(f'future-reply-{direction}')
             # 符号必须与当前指令一致：回执方向相反说明监控结果陈旧或错乱，
             # 这种情况仍然整帧拒绝（不能夹紧，否则会朝反方向走）。
+            # 2026-11-02（实测"一卡一卡"根因）：
+            # 监控 10 Hz 回执 vs 选择器 20 Hz 输出，转弯时角速度符号快速变化，
+            # 只要回执慢一拍就"符号不符"，原来会**整帧丢弃线速度** ——
+            # 实测 15 次 sign-angular + 11 次 no-reply = 14% 帧被削。
+            # 现在：角速度很小时（< 0.05 rad/s ≈ 3°/s）符号抖动直接忽略，
+            # 只保留线速度；角速度较大且真的反向时才拒绝。
             if raw_z_eff and output_z and (output_z > 0) != (raw_z_eff > 0):
-                return fail(f'sign-angular-{direction}')
+                if abs(output_z) > 0.05 or abs(raw_z_eff) > 0.05:
+                    return fail(f'sign-angular-{direction}')
             # 幅值超出的情形（10 Hz 回执 vs 20 Hz 输出，减速时回执仍偏大）
             # 按当前指令夹紧而不是丢弃，否则每两帧砍一帧、车起不了速。
             output_z = math.copysign(min(abs(output_z), abs(raw_z_eff)), raw_z_eff) if raw_z_eff else 0.0
