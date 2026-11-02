@@ -24,7 +24,7 @@ class AutoInitialPose(Node):
         # 本图有重复走廊：错误盆地也能到 0.06–0.08。真实位姿通常 0.015–0.035，
         # 2026-10-31：0.05 太严（实测 0.094 只差一点就失败，导致每次都要人工点
         # 2D Pose Estimate、Nav2 一直不激活）。放宽到 0.10，播错了 AMCL 也会自己收。
-        self.declare_parameter('max_score_m', 0.10)
+        self.declare_parameter('max_score_m', 0.15)
         self.declare_parameter('prior_score_m', 0.12)
         self.declare_parameter('checkpoint_file',
                                os.path.expanduser('~/.config/fwr/last_pose.yaml'))
