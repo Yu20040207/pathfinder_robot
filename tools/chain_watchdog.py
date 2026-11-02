@@ -44,7 +44,10 @@ class Watchdog(Node):
         from sensor_msgs.msg import LaserScan
         from rclpy.qos import qos_profile_sensor_data
         self.declare_parameter('scan_stale_s', 2.0)
-        self.declare_parameter('restart_scan', True)
+        # 2026-11-02：默认**只告警、不自动重启**。
+        # 实测自动重启会陷入'杀掉→拉不起来→再杀'的循环，比不重启更糟。
+        # 需要自动重启时显式传 restart_scan:=true。
+        self.declare_parameter('restart_scan', False)
         self._last_scan = 0.0
         self._scan_n = 0
         self.create_subscription(LaserScan, '/scan', self._on_scan,
@@ -134,9 +137,18 @@ class Watchdog(Node):
             by_id = ('/dev/serial/by-id/'
                      'usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_Controller_'
                      'e00aaf475431f111b7818c5f30d20014-if00-port0')
+            # 2026-11-02：必须带齐参数！只传 serial_port 会让节点在默认
+            # 波特率下打不开串口、起来就退出 —— 现场表现为"看门狗把雷达杀了
+            # 却拉不起来，/scan 直接 0 Hz"。参数与 real_mapping.launch.py 一致。
             subprocess.Popen(
-                ['ros2', 'run', 'sllidar_ros2', 'sllidar_node',
-                 '--ros-args', '-p', f'serial_port:={by_id}'],
+                ['ros2', 'run', 'sllidar_ros2', 'sllidar_node', '--ros-args',
+                 '-p', 'channel_type:=serial',
+                 '-p', f'serial_port:={by_id}',
+                 '-p', 'serial_baudrate:=460800',
+                 '-p', 'frame_id:=laser_front',
+                 '-p', 'inverted:=false',
+                 '-p', 'angle_compensate:=true',
+                 '-p', 'scan_mode:=Standard'],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 start_new_session=True)
             self.get_logger().warn('已重新拉起雷达节点')
