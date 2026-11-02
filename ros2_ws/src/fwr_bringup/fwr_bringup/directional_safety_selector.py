@@ -214,7 +214,13 @@ class DirectionalSafetySelector(Node):
         # 就由选择器自己原地转过去，转到前方空旷为止（角度自适应，10° 也行）。
         front_block_m = float(self.get_parameter('forward_block_m').value)
         raw_lin = abs(self.core.raw[0]) if self.core.raw else 0.0
-        wants_motion = raw_lin > 0.02 or abs(cmd_w) > 0.05
+        # 2026-11-02（用户确认）：原条件是"Nav2 正在下发指令"。
+        # 但 Nav2 进入 Recovery(Wait/Spin) 时不发 /cmd_vel，于是
+        # 车卡住 → 控制器 abort → BT Wait → 没有指令 → 脱困等不到指令 → 死锁。
+        # 现在：只要 /explore/state == 'navigating'（任务还在跑），
+        # 即使暂时没有指令也算"想走"，配合 1.5 s 零位移判定避免误触发。
+        task_active = (self.core.state == 'navigating')
+        wants_motion = (raw_lin > 0.02 or abs(cmd_w) > 0.05 or task_active)
         newer = self._left_min_m if cmd_w >= 0 else self._right_min_m
         other = self._right_min_m if cmd_w >= 0 else self._left_min_m
         best_side = max(self._left_min_m, self._right_min_m)
