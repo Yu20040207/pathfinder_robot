@@ -198,6 +198,7 @@ class TurnRadiusBoost(Node):
         arr = MarkerArray()
         poses = msg.poses
         if len(poses) < 2:
+            self._clear_markers()
             return
 
         base = Marker()
@@ -266,7 +267,18 @@ class TurnRadiusBoost(Node):
             arr.markers.append(txt)
         self._marker_pub.publish(arr)
 
+    def _clear_markers(self) -> None:
+        """清空标注：面板"清除选择"时 /plan 会变成空路径，残留的橙线要一起消失。"""
+        arr = MarkerArray()
+        m = Marker()
+        m.action = Marker.DELETEALL
+        arr.markers.append(m)
+        self._marker_pub.publish(arr)
+
     def _on_plan(self, msg: Path) -> None:
+        if len(msg.poses) < 2:
+            self._clear_markers()
+            return
         change = path_heading_change(
             msg.poses, float(self.get_parameter('lookahead_m').value))
         if change is None:
