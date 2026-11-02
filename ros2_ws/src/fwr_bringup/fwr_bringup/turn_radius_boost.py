@@ -70,6 +70,69 @@ def path_heading_change(poses, lookahead_m: float = 3.0) -> float | None:
     return d
 
 
+def find_turn_ranges(poses, window_m: float = 0.6,
+                     threshold_rad: float = math.pi / 3) -> list[tuple[int, int]]:
+    """扫描整条路径，返回掉头段的**索引区间** [(start, end), ...]。
+
+    注意用**局部窗口**（默认 0.6 m）而不是 3 m 前视：
+    - 3 m 前视用于"决定要不要提前加大膨胀"（`path_heading_change`）
+    - 局部窗口用于"标出掉头到底发生在哪一段" —— 否则会把接近掉头的那几米
+      全都标成掉头（因为未来 3 m 里确实有掉头）
+    """
+    pts = [(p.pose.position.x, p.pose.position.y) for p in poses]
+    n = len(pts)
+    if n < 3:
+        return []
+
+    def tangent(i):
+        a, b = (i, i + 1) if i + 1 < n else (i - 1, i)
+        dx, dy = pts[b][0] - pts[a][0], pts[b][1] - pts[a][1]
+        if math.hypot(dx, dy) < 1e-6:
+            return None
+        return math.atan2(dy, dx)
+
+    # 每个点的弧长
+    acc = [0.0] * n
+    for i in range(1, n):
+        acc[i] = acc[i - 1] + math.hypot(pts[i][0] - pts[i - 1][0],
+                                         pts[i][1] - pts[i - 1][1])
+
+    def index_at(arc):
+        # 二分找第一个 acc >= arc 的索引
+        lo, hi = 0, n - 1
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if acc[mid] < arc:
+                lo = mid + 1
+            else:
+                hi = mid
+        return lo
+
+    flags = []
+    for i in range(n):
+        t0 = tangent(i)
+        j = index_at(acc[i] + window_m)
+        t1 = tangent(j) if j != i else None
+        if t0 is None or t1 is None:
+            flags.append(False)
+            continue
+        d = abs(math.atan2(math.sin(t1 - t0), math.cos(t1 - t0)))
+        flags.append(d >= threshold_rad)
+
+    ranges = []
+    start = None
+    for i, f in enumerate(flags):
+        if f and start is None:
+            start = i
+        elif not f and start is not None:
+            ranges.append((start, i - 1))
+            start = None
+    if start is not None:
+        ranges.append((start, n - 1))
+    # 掉头段向两侧各延伸 2 个点，视觉上更完整
+    return [(max(0, a - 2), min(n - 1, b + 2)) for a, b in ranges if b - a >= 1]
+
+
 class TurnRadiusBoost(Node):
     def __init__(self) -> None:
         super().__init__('turn_radius_boost')
@@ -87,6 +150,8 @@ class TurnRadiusBoost(Node):
         self._boosted = False
         self._votes = 0
         # 可视化：把"被判为掉头的那一段"画出来，并在起点标注当前膨胀值。
+        # 标注用局部窗口（m）：只标"真正转弯的那一小段"
+        self.declare_parameter('mark_window_m', 0.6)
         self.declare_parameter('marker_topic', '/turn_radius_boost/marker')
         self._marker_pub = self.create_publisher(
             MarkerArray, self.get_parameter('marker_topic').value, 10)
@@ -122,54 +187,73 @@ class TurnRadiusBoost(Node):
         return ok
 
     def _publish_marker(self, msg: Path, change, is_turn: bool) -> None:
-        """把前视段画成一条线：普通=绿色，掉头=橙色；并在起点标注膨胀值。"""
+        """整条路径画一条细线，所有掉头段画粗橙线，并标注每段角度。"""
         arr = MarkerArray()
-        line = Marker()
-        line.header = msg.header
-        line.ns = 'turn_radius_boost'
-        line.id = 0
-        line.type = Marker.LINE_STRIP
-        line.action = Marker.ADD
-        line.scale.x = 0.06
-        line.color.a = 0.9
-        if is_turn:
-            line.color.r, line.color.g, line.color.b = 1.0, 0.55, 0.0
-        else:
-            line.color.r, line.color.g, line.color.b = 0.1, 0.9, 0.3
-        look = float(self.get_parameter('lookahead_m').value)
-        acc = 0.0
-        pts = msg.poses
-        for i in range(1, len(pts)):
-            p = PoseStamped()
-            p.pose = pts[i].pose
-            p.header = msg.header
-            line.points.append(p.pose.position)
-            acc += math.hypot(pts[i].pose.position.x - pts[i - 1].pose.position.x,
-                              pts[i].pose.position.y - pts[i - 1].pose.position.y)
-            if acc >= look and len(line.points) > 1:
-                break
-        if len(line.points) >= 2:
-            arr.markers.append(line)
+        poses = msg.poses
+        if len(poses) < 2:
+            return
 
-        txt = Marker()
-        txt.header = msg.header
-        txt.ns = 'turn_radius_boost'
-        txt.id = 1
-        txt.type = Marker.TEXT_VIEW_FACING
-        txt.action = Marker.ADD
-        txt.scale.z = 0.35
-        txt.color.a = 1.0
-        if is_turn:
-            txt.color.r, txt.color.g, txt.color.b = 1.0, 0.55, 0.0
-            txt.text = (f'掉头段 {math.degrees(change):.0f}° → '
+        base = Marker()
+        base.header = msg.header
+        base.ns = 'turn_radius_boost'
+        base.id = 0
+        base.type = Marker.LINE_STRIP
+        base.action = Marker.ADD
+        base.scale.x = 0.03
+        base.color.r, base.color.g, base.color.b, base.color.a = 0.2, 0.7, 0.3, 0.6
+        for p in poses:
+            base.points.append(p.pose.position)
+        arr.markers.append(base)
+
+        thr = math.radians(float(self.get_parameter('turn_deg').value))
+        ranges = find_turn_ranges(
+            poses, window_m=float(self.get_parameter('mark_window_m').value),
+            threshold_rad=thr)
+        mid = 1
+        for a, b in ranges:
+            m = Marker()
+            m.header = msg.header
+            m.ns = 'turn_radius_boost'
+            m.id = mid
+            mid += 1
+            m.type = Marker.LINE_STRIP
+            m.action = Marker.ADD
+            m.scale.x = 0.07
+            m.color.r, m.color.g, m.color.b, m.color.a = 1.0, 0.55, 0.0, 0.95
+            for i in range(a, b + 1):
+                m.points.append(poses[i].pose.position)
+            arr.markers.append(m)
+
+            txt = Marker()
+            txt.header = msg.header
+            txt.ns = 'turn_radius_boost'
+            txt.id = 100 + mid
+            txt.type = Marker.TEXT_VIEW_FACING
+            txt.action = Marker.ADD
+            txt.scale.z = 0.32
+            txt.color.r, txt.color.g, txt.color.b, txt.color.a = 1.0, 0.55, 0.0, 1.0
+            c = poses[min(len(poses) - 1, (a + b) // 2)].pose.position
+            txt.pose.position.x = c.x
+            txt.pose.position.y = c.y
+            txt.pose.position.z = 0.9
+            txt.text = (f'掉头 {math.degrees(change):.0f}° → '
                         f'膨胀 {self.get_parameter("boost_radius").value:.2f}')
-        else:
-            txt.color.r, txt.color.g, txt.color.b = 0.1, 0.9, 0.3
-            txt.text = (f'普通 {math.degrees(change):.0f}° → '
-                        f'膨胀 {self.get_parameter("normal_radius").value:.2f}')
-        txt.pose = msg.poses[0].pose
-        txt.pose.position.z = 0.8
-        arr.markers.append(txt)
+            arr.markers.append(txt)
+
+        if not ranges:
+            txt = Marker()
+            txt.header = msg.header
+            txt.ns = 'turn_radius_boost'
+            txt.id = 999
+            txt.type = Marker.TEXT_VIEW_FACING
+            txt.action = Marker.ADD
+            txt.scale.z = 0.32
+            txt.color.r, txt.color.g, txt.color.b, txt.color.a = 0.2, 0.9, 0.3, 1.0
+            txt.pose = poses[0].pose
+            txt.pose.position.z = 0.9
+            txt.text = (f'全程无掉头 → 膨胀 '
+                        f'{self.get_parameter("normal_radius").value:.2f}')
+            arr.markers.append(txt)
         self._marker_pub.publish(arr)
 
     def _on_plan(self, msg: Path) -> None:

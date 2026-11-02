@@ -43,3 +43,22 @@ def test_uturn_is_detected():
 def test_short_paths_return_none():
     assert path_heading_change([], 3.0) is None
     assert path_heading_change(_path([(0.0, 0.0)]), 3.0) is None
+
+
+def test_find_turn_ranges_on_uturn_path():
+    from fwr_bringup.turn_radius_boost import find_turn_ranges
+    r = find_turn_ranges(_uturn(), 0.6, math.radians(70))
+    assert len(r) >= 1, 'U 型掉头应至少检出 1 段'
+    a, b = r[0]
+    # 转点在 index 30；函数会向两侧各扩 2 个点，所以起点落在 20~30
+    assert 20 <= a <= 30, f'掉头段起点应在转点附近，实际 {a}'
+
+
+def test_find_turn_ranges_on_straight_path():
+    from fwr_bringup.turn_radius_boost import find_turn_ranges
+    assert find_turn_ranges(_straight(), 0.6, math.radians(70)) == []
+
+
+def test_find_turn_ranges_on_gentle_curve():
+    from fwr_bringup.turn_radius_boost import find_turn_ranges
+    assert find_turn_ranges(_gentle(), 0.6, math.radians(70)) == []
