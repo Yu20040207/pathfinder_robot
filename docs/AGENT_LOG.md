@@ -4170,3 +4170,32 @@ RViz 打开后 `/map` 有 **两个发布者**：`maperaser`（Map Edit 橡皮工
 **"车不动"先查 `/map` 的发布者数量和频率**，再查规划器。
 一整天多轮排查都栽在这上面 —— 诊断顺序应该是：
 `/map` 频率 → AMCL 是否被反复重初始化 → 控制器 abort → 规划/代价地图。
+
+## 2026-11-02 15:10 · 端到端自测通过（代理自己验证，不用人工试）
+
+### 背景
+用户要求"先自己验证了再给我"。于是代理按面板的真实流程走了一遍：
+开运动门 → `/base/arm_auto` 授权 → 调 `/explore/start_fixed_goal` → 监控
+`/cmd_vel` 与 `/odom` → 收尾（停止 + 关门）。
+
+### 结果
+```
+运动门 True / 授权 True(armed) / accepted=True
+20 秒：595 帧速度指令，最大线速度 0.12 m/s，实际位移 0.42 m
+→ ✅ 导航正常
+```
+
+### 今天修掉的三个"点开始没反应"
+1. **空 BT**：`default_nav_to_pose_bt_xml: ''` ≠ 默认，而是**空树**
+   → `Behavior tree threw exception: Empty Tree`，目标 2 ms 失败。
+2. **官方 BT 缺 `/backup`**：本车 `behavior_plugins` 只有 wait/spin，
+   官方 XML 含 `<BackUp>` → `Exception when loading BT: Action server backup not available`
+   → bt_navigator 激活失败。
+   **解法**：复制官方结构，把 `BackUp` 换成 `Wait`（倒车功能以后再单独做）。
+3. **面板启动保护 2.5 s**：官方 BT 启动要先 ClearEntireCostmap，2.5 s 不够
+   → 面板误判"任务未进入运行状态"并关门。放宽到 6 s。
+
+### 可复用的自测脚本要点
+- 必须走完 `motion_enabled=true` → `/base/arm_auto` → 服务发目标；
+  少了授权会返回 `preflight failed: arm`。
+- 判据用 **`/odom` 位移 > 0.3 m**，不要只看 `/cmd_vel`（有指令不等于车在动）。
