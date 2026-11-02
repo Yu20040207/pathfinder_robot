@@ -103,7 +103,8 @@ controller_server:
       # Humble 版 shim 的 primary_controller 是字符串，RPP 参数与它同级。
       plugin: nav2_rotation_shim_controller::RotationShimController
       primary_controller: nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController
-      # 四轮刮擦阻力大，原地转向最容易顶死（固件 fault 1 = 堵转）。
+      # 2026-11-02 更正：底盘是**双驱动轮 + 两个万向轮**（URDF 可查），
+      # 不是四轮刮擦底盘，弧线转弯没有阻力问题。原注释有误，已更正。
       # 角度阈值放大到 80°：只有接近反向时才原地转，其余情况走弧线。
       # 2026-10-29：1.4 rad(80°) 意味着只有偏得离谱才原地先转向；
       # 窄处/贴障碍时改成 0.6 rad(34°) 先转向再走，避免直接顶上去报 collision。
@@ -112,7 +113,12 @@ controller_server:
       # 2026-11-01（用户反馈"路径左右徘徊"）：
       # 1.2 rad ≈ 69° 太大 —— 车头偏 30° 时 shim 不介入，RPP 边前进边纠偏，
       # 于是左右摇摆。降到 0.35 rad(20°)：偏差超过 20° 就先原地转正再走。
-      angular_dist_threshold: 0.35
+      # 2026-11-02（实测门口变慢的主因）：0.35 rad(20°) 太敏感 ——
+      # 门洞处路径拐弯就触发"原地转"，线速度强制归零（实测 150 s 内 4 次）。
+      # 底盘是**双驱动轮 + 万向轮**（URDF: left/right_drive_wheel + caster），
+      # 无刮擦阻力，弧线过弯完全可行，因此放宽到 0.6 rad(34°)：
+      # 只有大偏差（接近反向）才停下原地对准。
+      angular_dist_threshold: 0.6
       forward_sampling_distance: 0.30
       # 2026-10-31 减少重影：雷达 10 Hz 扫一圈 0.1 s，
       # 0.8 rad/s 时车每帧转 4.6°，转角处点云被拉斜 → 同一面墙出现双线。
