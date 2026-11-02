@@ -47,7 +47,7 @@ def test_short_paths_return_none():
 
 def test_find_turn_ranges_on_uturn_path():
     from fwr_bringup.turn_radius_boost import find_turn_ranges
-    r = find_turn_ranges(_uturn(), 0.6, math.radians(70))
+    r = find_turn_ranges(_uturn(), 2.0, math.radians(70), 1.0)
     assert len(r) >= 1, 'U 型掉头应至少检出 1 段'
     a, b = r[0]
     # 转点在 index 30；函数会向两侧各扩 2 个点，所以起点落在 20~30
@@ -56,9 +56,17 @@ def test_find_turn_ranges_on_uturn_path():
 
 def test_find_turn_ranges_on_straight_path():
     from fwr_bringup.turn_radius_boost import find_turn_ranges
-    assert find_turn_ranges(_straight(), 0.6, math.radians(70)) == []
+    assert find_turn_ranges(_straight(), 2.0, math.radians(70), 1.0) == []
 
 
 def test_find_turn_ranges_on_gentle_curve():
     from fwr_bringup.turn_radius_boost import find_turn_ranges
-    assert find_turn_ranges(_gentle(), 0.6, math.radians(70)) == []
+    assert find_turn_ranges(_gentle(), 2.0, math.radians(70), 1.0) == []
+
+
+def test_semicircle_uturn_is_detected():
+    """半径 1 m 的半圆掉头（现场那种）必须被检出。"""
+    from fwr_bringup.turn_radius_boost import find_turn_ranges
+    arc = [(math.sin(t), 1 - math.cos(t)) for t in [i * 0.05 for i in range(64)]]
+    r = find_turn_ranges(_path(arc), 2.0, math.radians(70), 1.0)
+    assert len(r) >= 1, f'半圆掉头应检出，实际 {r}'

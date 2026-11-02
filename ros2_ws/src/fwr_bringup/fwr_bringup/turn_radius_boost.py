@@ -70,8 +70,9 @@ def path_heading_change(poses, lookahead_m: float = 3.0) -> float | None:
     return d
 
 
-def find_turn_ranges(poses, window_m: float = 0.6,
-                     threshold_rad: float = math.pi / 3) -> list[tuple[int, int]]:
+def find_turn_ranges(poses, window_m: float = 2.0,
+                     threshold_rad: float = math.pi / 3,
+                     skip_m: float = 1.0) -> list[tuple[int, int]]:
     """扫描整条路径，返回掉头段的**索引区间** [(start, end), ...]。
 
     注意用**局部窗口**（默认 0.6 m）而不是 3 m 前视：
@@ -110,6 +111,9 @@ def find_turn_ranges(poses, window_m: float = 0.6,
 
     flags = []
     for i in range(n):
+        if acc[i] < skip_m:
+            flags.append(False)      # 起步阶段路径抖动大，不参与判定
+            continue
         t0 = tangent(i)
         j = index_at(acc[i] + window_m)
         t1 = tangent(j) if j != i else None
@@ -151,7 +155,10 @@ class TurnRadiusBoost(Node):
         self._votes = 0
         # 可视化：把"被判为掉头的那一段"画出来，并在起点标注当前膨胀值。
         # 标注用局部窗口（m）：只标"真正转弯的那一小段"
-        self.declare_parameter('mark_window_m', 0.6)
+        # 标注窗口 2.0 m：0.6 m 太短，缓一点的掉头（半径 1 m）转不够阈值；
+        # 同时跳过路径开头 1 m，避开起步抖动造成的误判。
+        self.declare_parameter('mark_window_m', 2.0)
+        self.declare_parameter('mark_skip_m', 1.0)
         self.declare_parameter('marker_topic', '/turn_radius_boost/marker')
         self._marker_pub = self.create_publisher(
             MarkerArray, self.get_parameter('marker_topic').value, 10)
@@ -209,7 +216,8 @@ class TurnRadiusBoost(Node):
         thr = math.radians(float(self.get_parameter('turn_deg').value))
         ranges = find_turn_ranges(
             poses, window_m=float(self.get_parameter('mark_window_m').value),
-            threshold_rad=thr)
+            threshold_rad=thr,
+            skip_m=float(self.get_parameter('mark_skip_m').value))
         mid = 1
         for a, b in ranges:
             m = Marker()
