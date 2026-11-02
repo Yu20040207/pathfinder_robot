@@ -724,6 +724,7 @@ private:
       resume_goal_x_ = points_.goal()->x;
       resume_goal_y_ = points_.goal()->y;
       has_resume_goal_ = true;
+      resume_two_point_ = !single;   // 两点任务被中断 → 继续时仍走两点流程
     }
     status_label_->setText(single ?
       "已开始：从当前位置前往终点；停止可按下方按钮" :
@@ -740,6 +741,31 @@ private:
   void send_real_navigation_request(unsigned long revision)
   {
     if (revision != selection_revision_) {return;}
+    if (resume_mode_ && resume_two_point_ && points_.two_point() && points_.start()) {
+      // 继续一个被中断的两点任务：重发「起点→终点」，
+      // explorer 会从**当前位置**规划到起点，两条腿都不丢。
+      if (!real_nav_client_->service_is_ready()) {
+        fail_real_start("实车两点导航服务尚未就绪，已关闭运动门", revision);
+        return;
+      }
+      auto req = std::make_shared<RealGoal::Request>();
+      req->start_x = points_.start()->x;
+      req->start_y = points_.start()->y;
+      req->end_x = points_.goal()->x;
+      req->end_y = points_.goal()->y;
+      status_label_->setText("继续两点任务：先从当前位置前往起点，再到终点…");
+      real_nav_client_->async_send_request(req, [this, revision](
+        rclcpp::Client<RealGoal>::SharedFuture future) {
+        if (revision != selection_revision_) {return;}
+        try {
+          const auto r = future.get();
+          handle_real_goal_response(r->accepted, r->reason, revision, false);
+        } catch (const std::exception & e) {
+          fail_real_start(QString("启动服务失败：%1").arg(e.what()), revision);
+        }
+      });
+      return;
+    }
     if (resume_mode_) {
       if (!real_single_goal_client_->service_is_ready()) {
         fail_real_start("实车单点导航服务尚未就绪，已关闭运动门", revision);
@@ -903,6 +929,9 @@ private:
   bool real_task_active_ = false;
   QPushButton * resume_button_ = nullptr;
   bool resume_mode_ = false;
+  // 2026-11-02：中止的若是**两点任务**，继续时必须重发两点服务（先去起点再到终点）。
+  // 原实现只要 resume 就走单点客户端，直接奔终点，把"先去起点"这一腿丢了。
+  bool resume_two_point_ = false;
   bool has_resume_goal_ = false;
   double resume_goal_x_ = 0.0;
   double resume_goal_y_ = 0.0;
