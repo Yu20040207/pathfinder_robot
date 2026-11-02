@@ -104,6 +104,11 @@
 | BT `number_of_retries` | 6 | 2 时 0.6 s 就放弃 |
 | `auto_initial_pose.max_score_m` | 0.15 | 0.10 会拒绝 0.127 m 的正常匹配 |
 
+**⚠️ 局部代价地图不要启用 `range_layer`**：它等不到超声数据时会把代价地图
+更新拖住 → 控制器拿不到新鲜地图 → `computeVelocityCommands` 失败 →
+`[follow_path] Aborting handle` 每秒一次、`/cmd_vel_nav` 恒 0。
+现象是"短目标能到、长目标必卡"。倒车安全由 `rear_guard` 独立保障。
+
 **Map Edit 面板**：橡皮工具已加发布去重 + 4 Hz 限速（原来每帧重发 `/map`，
 30 Hz 冲垮 AMCL，是"车完全不动"的总根源）。
 

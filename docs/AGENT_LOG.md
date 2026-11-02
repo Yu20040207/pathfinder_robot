@@ -4199,3 +4199,37 @@ RViz 打开后 `/map` 有 **两个发布者**：`maperaser`（Map Edit 橡皮工
 - 必须走完 `motion_enabled=true` → `/base/arm_auto` → 服务发目标；
   少了授权会返回 `preflight failed: arm`。
 - 判据用 **`/odom` 位移 > 0.3 m**，不要只看 `/cmd_vel`（有指令不等于车在动）。
+
+## 2026-11-02 16:20 · 【根因】range_layer 拖垮局部代价地图，导致第 2 腿必卡
+
+### 现象
+两点导航：第 1 腿（终点就在旁边）总是成功，第 2 腿（9 米外）**必然卡死**：
+`/cmd_vel_nav` 恒 0 Hz、`[follow_path] Aborting handle` 每秒一次、
+`/plan` 有 300+ 点有效路径、碰撞监控 0 次拦截、激光前方空旷。
+
+### 根因
+`local_costmap` 启用了 `range_layer`（后向四路超声 → 障碍格）。该层按
+`no_readings_timeout` 等数据，日志反复报：
+
+```
+[local_costmap] No range readings received for 2.60 seconds, while expected at least every ...
+```
+
+代价地图这一轮更新被拖住 → 控制器拿不到新鲜代价地图 →
+`computeVelocityCommands` 返回失败 → abort 循环。
+
+### 为什么"以前能跑"
+**概率性时序问题，不是新引入的 bug**：
+- 早前日志里同样有此警告（`nav_bt3` 28 次、`nav_stable` 4 次）
+- 短目标需要的控制周期少，撞上失败窗口的概率低
+- 系统越忙（BT debug、更多节点、RViz 面板）→ 余量越少 → 必然撞上
+
+### 修复
+从 `local_costmap` 的 `plugins` 里**移除 `range_layer`**，并删掉其配置块。
+倒车安全已由 `rear_guard` → `/base/rear_blocked` 独立保障，代价地图不需要这层。
+
+实测：警告 **81 次 → 0 次**，两点导航完整跑通。
+
+### 教训（追加到排查顺序）
+"目标 active 但 `/cmd_vel_nav` 0 Hz" 时，**先看代价地图有没有抱怨**
+（range/obstacle layer 缺数据、更新超时），再怀疑控制器本身。
