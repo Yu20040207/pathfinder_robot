@@ -1,18 +1,40 @@
+<!--
+  2026-11-02：以 Nav2 官方 navigate_to_pose_w_replanning_and_recovery.xml 为蓝本，
+  唯一改动是把恢复动作里的 <BackUp> 换成 <Wait> ——
+  本车 behavior_plugins 只配了 wait / spin，没有 backup，
+  直接用官方 XML 会因为 "/backup action server not available" 导致
+  bt_navigator 加载失败、所有导航目标 2 毫秒内失败。
+
+  保留官方的结构（RateController 1Hz + RecoveryNode + ReactiveFallback + RoundRobin），
+  这样抢占/恢复的边界行为与社区验证过的一致；等以后启用倒车再把 BackUp 加回来。
+-->
 <root main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree">
-    <!-- 回归到已验证可用的结构：固定频率重规划 + 跟踪，卡住时原地转 60° 再重试。
-         条件重规划（IsPathValid）留待单独验证，避免再次出现"有目标但不规划"。 -->
     <RecoveryNode number_of_retries="6" name="NavigateRecovery">
       <PipelineSequence name="NavigateWithReplanning">
         <RateController hz="1.0">
-          <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
+          <RecoveryNode number_of_retries="1" name="ComputePathToPose">
+            <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
+            <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
+          </RecoveryNode>
         </RateController>
-        <FollowPath path="{path}" controller_id="FollowPath"/>
+        <RecoveryNode number_of_retries="1" name="FollowPath">
+          <FollowPath path="{path}" controller_id="FollowPath"/>
+          <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
+        </RecoveryNode>
       </PipelineSequence>
-      <Sequence name="RecoveryActions">
-        <Spin spin_dist="1.05" name="RecoverySpin"/>
-        <Wait wait_duration="1.0"/>
-      </Sequence>
+      <ReactiveFallback name="RecoveryFallback">
+        <GoalUpdated/>
+        <RoundRobin name="RecoveryActions">
+          <Sequence name="ClearingActions">
+            <ClearEntireCostmap name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>
+            <ClearEntireCostmap name="ClearGlobalCostmap-Subtree" service_name="global_costmap/clear_entirely_global_costmap"/>
+          </Sequence>
+          <Spin spin_dist="1.57"/>
+          <Wait wait_duration="5"/>
+          <Wait wait_duration="2"/>
+        </RoundRobin>
+      </ReactiveFallback>
     </RecoveryNode>
   </BehaviorTree>
 </root>

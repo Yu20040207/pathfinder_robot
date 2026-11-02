@@ -20,13 +20,12 @@ def generate_launch_description():
     params = RewrittenYaml(
         source_file=str(share / 'config' / 'real_nav2.yaml'),
         root_key='',
-        # 2026-11-02：改用 Nav2 自带的行为树（用**实际路径**，不能用空字符串！
-        # 空字符串会让 bt_navigator 加载一棵空树，目标 2 ms 就失败：
-        #   "Behavior tree threw exception: Empty Tree"）
+        # 2026-11-02：用"官方结构、去掉 BackUp"的 BT。
+        # - 空字符串 ≠ 默认，那是**空树**（目标 2 ms 失败）
+        # - 直接用官方 XML 会因缺 /backup 动作导致 BT 加载失败
         param_rewrites={
-            'default_nav_to_pose_bt_xml':
-                '/opt/ros/humble/share/nav2_bt_navigator/behavior_trees/'
-                'navigate_to_pose_w_replanning_and_recovery.xml',
+            'default_nav_to_pose_bt_xml': str(share / 'behavior_trees' /
+                                              'real_navigate_to_pose.xml'),
         },
         convert_types=True,
     )
