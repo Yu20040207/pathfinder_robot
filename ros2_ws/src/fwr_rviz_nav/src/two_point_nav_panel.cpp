@@ -729,7 +729,11 @@ private:
     status_label_->setText(single ?
       "已开始：从当前位置前往终点；停止可按下方按钮" :
       "已开始：先到起点，再到终点；停止可按下方按钮");
-    QTimer::singleShot(2500, this, [this, revision]() {
+    // 2026-11-02：原来 2500 ms。换回 Nav2 官方 BT 后，启动阶段要先跑
+      // ClearEntireCostmap 等动作，2.5 s 内还没到 RUNNING，面板就误判
+      // "任务未进入运行状态"并关门（现场表现为"点了开始没反应"）。
+      // 放宽到 6 s。
+      QTimer::singleShot(6000, this, [this, revision]() {
       if (revision == selection_revision_ && real_task_active_ &&
         !flow_.saw_running_state())
       {
