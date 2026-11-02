@@ -50,8 +50,9 @@ def test_find_turn_ranges_on_uturn_path():
     r = find_turn_ranges(_uturn(), 2.0, math.radians(70), 1.0)
     assert len(r) >= 1, 'U 型掉头应至少检出 1 段'
     a, b = r[0]
-    # 转点在 index 30；函数会向两侧各扩 2 个点，所以起点落在 20~30
-    assert 20 <= a <= 30, f'掉头段起点应在转点附近，实际 {a}'
+    # 2 m 窗口会从"距离转点 2 m"处开始命中（起点 index 约 8~12），
+    # 关键是区间必须**覆盖**转点（index 30）
+    assert a < 30 <= b, f'掉头段必须覆盖转点 index 30，实际区间 {r}'
 
 
 def test_find_turn_ranges_on_straight_path():
