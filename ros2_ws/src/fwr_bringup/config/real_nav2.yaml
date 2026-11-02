@@ -187,25 +187,16 @@ local_costmap:
       footprint_clearing_enabled: true
       plugins:
       - obstacle_layer
-      - range_layer          # 后向四路超声：只加占用，不清除激光障碍
+      # 2026-11-02：**移除 range_layer**。
+      # 它会报 "No range readings received for 2.6 s"，把局部代价地图的更新卡住，
+      # 导致控制器拿不到新鲜代价地图 → computeVelocityCommands 失败 →
+      # follow_path 每秒 abort、/cmd_vel_nav 恒 0（长距离第 2 腿必卡）。
+      # 倒车安全已由 rear_guard → /base/rear_blocked 独立保障，代价地图不需要这层。
       - inflation_layer
       # 2026-10-31 后向 A22 超声（4 路 sensor_msgs/Range，见 ultrasonic_rear 节点）：
       #   · clear_threshold: 0.0  → 永不清除已有障碍（激光发现的不会被超声抹掉）
       #   · clear_on_max_reading: false → 读到超量程也不当"空地"
       #   · 只把测到的近距障碍标记成占用 → 后退时能停车
-      range_layer:
-        plugin: nav2_costmap_2d::RangeSensorLayer
-        enabled: true
-        topics: ['/ultrasonic_rear/left_out', '/ultrasonic_rear/left_in',
-                 '/ultrasonic_rear/right_in', '/ultrasonic_rear/right_out']
-        # "Invalid input sensor type"（这个版本只认 INPUT_ALL/INPUT_LASER/
-        # INPUT_POINTCLOUD）。超声是 sensor_msgs/Range，按 LASER 处理即可。
-        # 2026-11-01：原为 false —— 超声读到 max（无目标）不擦除旧标记，
-        # 于是车尾会长出一堵永不消失的墙，膨胀后把路径往前挤。
-        # 现在 max 读数也会清除该方向的旧障碍。
-        clear_on_max_reading: true
-        clear_threshold: 0.0
-        no_readings_timeout: 2.0
       inflation_layer:
         plugin: nav2_costmap_2d::InflationLayer
         # 0.45 会让贴墙停车的机器人自身处于致命格（规划直接失败），改 0.30
