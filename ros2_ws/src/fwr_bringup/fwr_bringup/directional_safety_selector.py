@@ -61,8 +61,9 @@ class DirectionalSafetySelector(Node):
         from nav_msgs.msg import Odometry
         self._last_pos = None
         self._last_move_t = 0.0
-        self.create_subscription(Odometry, self.get_parameter('odom_topic').value,
-                                 self._on_odom, 10)
+        # 注意：这里必须用字面量 —— 参数声明在本函数更后面，
+        # 用 get_parameter('odom_topic') 会抛 ParameterNotDeclaredException。
+        self.create_subscription(Odometry, '/odom', self._on_odom, 10)
         self.create_subscription(Twist, '/cmd_vel_auto_unchecked', self._raw, 10)
         self.create_subscription(Twist, '/cmd_vel_auto_forward_filtered',
                                  lambda msg: self._filtered('forward', msg), 10)
