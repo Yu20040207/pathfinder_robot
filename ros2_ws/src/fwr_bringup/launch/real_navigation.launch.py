@@ -130,14 +130,10 @@ def generate_launch_description():
              parameters=[{'use_sim_time': use_sim_time,
                           'autostart': True,
                           'node_names': ['collision_monitor_forward']}]),
-        # 2026-11-02：链路看门狗也放进导航栈。
-        # 它监控 /scan：雷达断流会让局部代价地图"没有障碍数据"，
-        # controller 连续 abort、Nav2 直接 Goal failed（实测断流 19.8 s）。
-        # 同时照旧负责碰撞监控卡死时的自动恢复。
-        ExecuteProcess(
-            cmd=['python3', str(Path(__file__).resolve().parents[4]
-                                / 'tools' / 'chain_watchdog.py')],
-            name='chain_watchdog', output='screen'),
+        # 2026-11-02：看门狗**不再放进导航栈**。
+        # 实测它把 collision_monitor_forward 误判为 unknown，强行 deactivate->activate
+        # 失败后监控进入坏状态，/cmd_vel_auto_safe 恒为 0、车完全不动 —— 比它要修的问题更糟。
+        # 需要时手动起：python3 tools/chain_watchdog.py
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(str(nav2_share / 'launch' / 'navigation_launch.py')),
             launch_arguments={'use_sim_time': use_sim_time,
