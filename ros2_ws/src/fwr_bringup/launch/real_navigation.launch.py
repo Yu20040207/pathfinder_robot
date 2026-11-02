@@ -20,10 +20,12 @@ def generate_launch_description():
     params = RewrittenYaml(
         source_file=str(share / 'config' / 'real_nav2.yaml'),
         root_key='',
-        param_rewrites={
-            'default_nav_to_pose_bt_xml': str(share / 'behavior_trees' / 'real_navigate_to_pose.xml'),
-            'default_nav_through_poses_bt_xml': str(share / 'behavior_trees' / 'real_navigate_through_poses.xml'),
-        },
+        # 2026-11-02：**改用 Nav2 自带的行为树**。
+        # 我们自定义的 real_navigate_to_pose.xml 每秒重规划一次、FollowPath 每秒被
+        # 抢占一次，实测会出现"BT 认为在跑、控制器却没有活动目标"的失步：
+        # 状态 active、/cmd_vel 一条消息都没有、车停住不动，重启才能恢复。
+        # 官方 BT 的抢占/恢复边界处理更成熟，先换回来排除这个变量。
+        param_rewrites={},
         convert_types=True,
     )
     return LaunchDescription([
