@@ -250,16 +250,21 @@ class DirectionalSafetySelector(Node):
             # 原来只按"几何上更宽"选方向，完全不管路径要往哪走。
             # 现在优先跟随 Nav2 想要的转向方向（raw 的角速度符号），
             # 只有该方向被挡或没有角速度指令时，才退回"选更宽的一侧"。
-            if abs(cmd_w) > 0.02:
-                want_right = cmd_w < 0
-                want_clear = (self._right_min_m if want_right else self._left_min_m) >= clear
-            else:
-                want_clear = False
-            if want_clear:
+            # 2026-11-02（用户："左边进了停车矩形就朝右转一点"）：
+            # **优先级 1：有侧面太近 → 强制朝反方向转**。
+            # 原来先跟随 Nav2 的转向意图，只要那一侧 ≥0.16 m 就照做 ——
+            # 结果 Nav2 想左转时车就向左扎进贴墙的一侧（现场实测）。
+            if escape_near:
+                self._escape_dir = (1.0 if self._left_min_m >= self._right_min_m
+                                    else -1.0)
+            elif abs(cmd_w) > 0.02 and (
+                    (self._right_min_m if cmd_w < 0 else self._left_min_m) >= clear):
+                # 优先级 2：两侧都不近时，跟随 Nav2 的转向意图
                 self._escape_dir = -1.0 if cmd_w < 0 else 1.0
             else:
-                # 朝**远离障碍**的一侧转（左边近就右转，反之亦然）
-                self._escape_dir = 1.0 if self._left_min_m >= self._right_min_m else -1.0
+                # 优先级 3：退回到"选更宽的一侧"
+                self._escape_dir = (1.0 if self._left_min_m >= self._right_min_m
+                                    else -1.0)
             linear_x = 0.0
             angular_z = self._escape_dir * float(
                 self.get_parameter('escape_turn_rate').value)
