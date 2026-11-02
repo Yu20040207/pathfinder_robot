@@ -112,10 +112,7 @@ controller_server:
       # 2026-11-01（用户反馈"路径左右徘徊"）：
       # 1.2 rad ≈ 69° 太大 —— 车头偏 30° 时 shim 不介入，RPP 边前进边纠偏，
       # 于是左右摇摆。降到 0.35 rad(20°)：偏差超过 20° 就先原地转正再走。
-      # 2026-11-02（用户反馈"进门很慢"）：0.35 rad(20°) 太敏感 ——
-      # 门洞处路径一拐弯就停下原地转正再走，进出每个门都要停一次。
-      # 取 0.7 rad(40°)：普通弯边走边转，只有大偏差才原地对准。
-      angular_dist_threshold: 0.7
+      angular_dist_threshold: 0.35
       forward_sampling_distance: 0.30
       # 2026-10-31 减少重影：雷达 10 Hz 扫一圈 0.1 s，
       # 0.8 rad/s 时车每帧转 4.6°，转角处点云被拉斜 → 同一面墙出现双线。
@@ -151,10 +148,7 @@ controller_server:
       use_regulated_linear_velocity_scaling: false
       regulated_linear_scaling_min_radius: 0.9
       regulated_linear_scaling_min_speed: 0.06
-      # 2026-11-02（用户反馈"一卡一卡不连贯"）：
-      # 前视距离随速度变化会形成反馈环：速度↑→前视变远→目标点跳→速度又变，
-      # 实测 cmd 在 0.12/0.07 之间来回跳。关掉后前视固定，速度更稳。
-      use_velocity_scaled_lookahead_dist: false
+      use_velocity_scaled_lookahead_dist: true
       # Shim 已在路径起步时原地对准航向；RPP 再做一次“转-走-转”会形成
       # 极限环，表现为转弯一顿一顿。路径跟踪只保留前进 + 小角速度修正。
       # 2026-11-02：试过打开（想让车先转正），
@@ -216,14 +210,12 @@ local_costmap:
         # inflation_radius 只影响**代价梯度**，不封路，所以调大是安全的。
         # 0.30 只比车体内切半径 0.215 多一点，路径没有空间离开墙。
         # 提到 0.45：路径会主动保持在墙 0.3~0.4 m 外，门洞照样能过。
-        inflation_radius: 0.50
+        inflation_radius: 0.48
         # 2026-10-30：cost_scaling_factor 3.0 时代价衰减太快，缓冲区形同虚设；
         # 降到 2.0 让 0.30 m 缓冲带整体保持高代价，规划器才会绕开。
         # 2026-10-31 二次调整：3.0 衰减太快 → 规划器觉得"贴墙便宜"，
         # 实测路径离墙只有 0.18 m。回到 2.0，让 0.40 m 缓冲带整体保持高代价。
-        # 2026-11-02（用户反馈"U 型掉头处贴内弯、太靠门框"）：
-        # 1.2 → 1.0，代价衰减更慢，墙边更贵，路径整体离墙更远。
-        cost_scaling_factor: 1.0
+        cost_scaling_factor: 1.2
       obstacle_layer:
         plugin: nav2_costmap_2d::ObstacleLayer
         enabled: true
@@ -325,14 +317,12 @@ global_costmap:
         # inflation_radius 只影响**代价梯度**，不封路，所以调大是安全的。
         # 0.30 只比车体内切半径 0.215 多一点，路径没有空间离开墙。
         # 提到 0.45：路径会主动保持在墙 0.3~0.4 m 外，门洞照样能过。
-        inflation_radius: 0.50
+        inflation_radius: 0.48
         # 2026-10-30：cost_scaling_factor 3.0 时代价衰减太快，缓冲区形同虚设；
         # 降到 2.0 让 0.30 m 缓冲带整体保持高代价，规划器才会绕开。
         # 2026-10-31 二次调整：3.0 衰减太快 → 规划器觉得"贴墙便宜"，
         # 实测路径离墙只有 0.18 m。回到 2.0，让 0.40 m 缓冲带整体保持高代价。
-        # 2026-11-02（用户反馈"U 型掉头处贴内弯、太靠门框"）：
-        # 1.2 → 1.0，代价衰减更慢，墙边更贵，路径整体离墙更远。
-        cost_scaling_factor: 1.0
+        cost_scaling_factor: 1.2
       always_send_full_costmap: true
       footprint_padding: 0.02
 planner_server:

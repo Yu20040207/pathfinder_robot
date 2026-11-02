@@ -42,10 +42,7 @@ collision_monitor_forward:
       # 同时满足护栏（起点 ≥0.30、跨度 ≤0.20）。
       points: [0.32, 0.24, 0.38, 0.24, 0.38, -0.24, 0.32, -0.24]
       action_type: stop
-      # 2026-11-02（用户反馈"卡在第二个门口，车偏到门框旁"）：
-      # 门框在斜角下只产生少量点，实墙会产生大量点。
-      # 触发点数 3 → 6：门框不再误触发，正面推进的实墙仍然会停。
-      max_points: 6
+      max_points: 3
       visualize: true
       polygon_pub_topic: /collision_monitor_forward/front_stop
       enabled: true
