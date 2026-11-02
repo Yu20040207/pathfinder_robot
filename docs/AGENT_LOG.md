@@ -4111,3 +4111,36 @@ test_collision_stop_zones_keep_in_place_rotation_usable
 
 ### 已验证
 - `front_stop` 已恢复 0.32（228 通过 / 1 曾失败后恢复）
+
+## 2026-11-02 10:15 · 回退：auto_explore_state 常驻是错的
+
+### 症状
+点「开始导航」→ 目标发出 0.1 s 后
+`[bt_navigator] Client requested to cancel the goal` → 任务立刻结束。
+
+### 原因
+我把 `auto_explore_state`（无条件每秒发 `/explore/state='navigating'`）
+加进导航栈。它与 `frontier_explorer` 自己的状态机冲突，导致目标被取消；
+同时这也是**安全回归**（没有任务时安全链也常开）。
+
+### 处理
+已从 `real_navigation.launch.py` 移除，状态改回只由 explorer 发布
+（空闲时 = `stopped`）。
+
+### 今天真正该保留的修复（有实测证据）
+1. `map_seal` 固定画布错位 → 改直通，151/151 墙点对齐 ★
+2. `map_publish_period: 0.0` → 原来 30 Hz 重发地图，AMCL 被反复重初始化 ★
+3. 足迹清除 `footprint_clearing_enabled: true`（全局代价地图顶层）
+4. 建图引擎默认 slam_toolbox
+5. 面板：加载当前地图按钮 / 状态栏换行 / 继续两点任务不丢第一腿
+
+### 今天被我改坏又回退的
+- `QT_SCALE_FACTOR`（打乱 RViz 布局）
+- 删 `Panels` 里的 Map Edit 条目（窗口状态错乱）
+- 看门狗入导航栈（把 collision_monitor 弄坏）
+- `auto_explore_state` 常驻（目标被取消）
+- `track_unknown_space: true`（全部路径规划失败）
+
+### 教训
+**每次只改一件事，改完立刻跑一次导航验证，再改下一件。**
+今天多次"改 A 修 B，B 没修好反而破了 C"。
