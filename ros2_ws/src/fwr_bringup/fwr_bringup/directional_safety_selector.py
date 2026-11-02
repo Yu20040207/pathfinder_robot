@@ -58,6 +58,11 @@ class DirectionalSafetySelector(Node):
                 lambda _, direction=direction: self.core.observe_monitor(
                     direction, False, time.monotonic()), 10)
         self.publisher = self.create_publisher(Twist, '/cmd_vel_auto_safe', 10)
+        from nav_msgs.msg import Odometry
+        self._last_pos = None
+        self._last_move_t = 0.0
+        self.create_subscription(Odometry, self.get_parameter('odom_topic').value,
+                                 self._on_odom, 10)
         self.create_subscription(Twist, '/cmd_vel_auto_unchecked', self._raw, 10)
         self.create_subscription(Twist, '/cmd_vel_auto_forward_filtered',
                                  lambda msg: self._filtered('forward', msg), 10)
@@ -79,6 +84,11 @@ class DirectionalSafetySelector(Node):
         # 2026-11-01（用户要求）卡住脱困：原地转身**转过为止**，角度不写死，
         # 哪怕 10° 够用就 10°。每帧检查前方是否已空旷，一空就交回 Nav2。
         self.declare_parameter('escape_turn_rate', 0.35)
+        # 2026-11-01（用户反馈"正常行驶时偶发一卡一卡"）：
+        # 光看"前方被挡 + 侧面有空间"会误触发 —— 正常行驶时本来就常满足。
+        # 必须**真的没在动**持续 escape_after_s 秒才脱困。
+        self.declare_parameter('escape_after_s', 2.5)
+        self.declare_parameter('odom_topic', '/odom')
         self._escape_active = False
         self._escape_dir = 1.0
         self.create_subscription(Bool, '/explore/pause', self._on_pause, 10)
@@ -153,6 +163,25 @@ class DirectionalSafetySelector(Node):
     def _on_pause(self, msg) -> None:
         self._paused = bool(msg.data)
 
+    def _on_odom(self, msg) -> None:
+        x = msg.pose.pose.position.x
+        y = msg.pose.pose.position.y
+        now = time.monotonic()
+        if self._last_pos is None:
+            self._last_pos = (x, y)
+            self._last_move_t = now
+            return
+        if (x - self._last_pos[0]) ** 2 + (y - self._last_pos[1]) ** 2 > 0.02 ** 2:
+            self._last_pos = (x, y)
+            self._last_move_t = now
+
+    def _is_really_stuck(self, now: float) -> bool:
+        """连续 escape_after_s 秒没位移才算卡住。"""
+        if self._last_pos is None:
+            return False
+        return (now - self._last_move_t) >= float(
+            self.get_parameter('escape_after_s').value)
+
     def _tick(self):
         now = time.monotonic()
         self.core.observe_tf(self._tf_ready(), now)
@@ -193,7 +222,8 @@ class DirectionalSafetySelector(Node):
                 linear_x = 0.0
                 angular_z = self._escape_dir * float(
                     self.get_parameter('escape_turn_rate').value)
-        elif wants_motion and self._front_min_m < front_block_m and best_side >= clear:
+        elif (wants_motion and self._front_min_m < front_block_m
+              and best_side >= clear and self._is_really_stuck(now)):
             self._escape_active = True
             self._escape_dir = 1.0 if self._left_min_m >= self._right_min_m else -1.0
             linear_x = 0.0
