@@ -104,6 +104,16 @@
 | BT `number_of_retries` | 6 | 2 时 0.6 s 就放弃 |
 | `auto_initial_pose.max_score_m` | 0.15 | 0.10 会拒绝 0.127 m 的正常匹配 |
 
+**控制 / 行为树（v1.0 定版）**
+- `angular_dist_threshold` **0.35**（RotationShim 转向阈值）
+- `use_velocity_scaled_lookahead_dist` **true**
+- BT `RateController` **0.5 Hz**（⚠️ 1 Hz 时远处目标要 1040 ms 规划，
+  刚算完就被取消 → "点开始就结束"）
+- `bt_loop_duration` **50 ms**（100 Hz 会被饿死，报 `tick rate exceeded`）
+- `xy_goal_tolerance` **0.4**（规划器会把落在膨胀区的终点吸附 0.34 m）
+- 选择器：角速度符号容差 **0.05 rad/s**；方向变化**不清空**回执缓存
+  （这两条是"一卡一卡"的两个根因，见 AGENT_LOG）
+
 **碰撞监控 / 代价地图（2026-11-02 最终）**
 - `front_stop` 深度 **0.32~0.38**（半宽 0.24，3 点触发）—— 浅于 0.30 会撞
 - `front_slow` 横向 **±0.22**、`max_points 3`、`slowdown_ratio 0.8`
