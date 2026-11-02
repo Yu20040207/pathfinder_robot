@@ -198,7 +198,10 @@ local_costmap:
         enabled: true
         topics: ['/ultrasonic_rear/left_out', '/ultrasonic_rear/left_in',
                  '/ultrasonic_rear/right_in', '/ultrasonic_rear/right_out']
-        input_sensor_type: INPUT_ULTRASOUND
+        # 2026-11-02：INPUT_ULTRASOUND 是**无效值**，Nav2 会报
+        # "range_layer: Invalid input sensor type: INPUT_ULTRASOUND"
+        # 并退化成 INPUT_ALL（把不相关的消息也当测距）。超声用 INPUT_SONAR。
+        input_sensor_type: INPUT_SONAR
         # 2026-11-01：原为 false —— 超声读到 max（无目标）不擦除旧标记，
         # 于是车尾会长出一堵永不消失的墙，膨胀后把路径往前挤。
         # 现在 max 读数也会清除该方向的旧障碍。
