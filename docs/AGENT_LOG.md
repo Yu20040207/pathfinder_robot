@@ -4144,3 +4144,29 @@ test_collision_stop_zones_keep_in_place_rotation_usable
 ### 教训
 **每次只改一件事，改完立刻跑一次导航验证，再改下一件。**
 今天多次"改 A 修 B，B 没修好反而破了 C"。
+
+## 2026-11-02 11:50 · 【根因】Map Edit 橡皮工具 30 Hz 重发 /map，冲垮 AMCL
+
+### 现象（反复出现一整天）
+点「开始导航」后车完全不动：`/cmd_vel` 无数据、`controller_server` 每秒
+`[follow_path] Aborting handle`、位姿看起来正常、规划也正常。
+
+### 根因
+RViz 打开后 `/map` 有 **两个发布者**：`maperaser`（Map Edit 橡皮工具）
+和 `map_server`，实测 **182 条 / 6 秒 ≈ 30 Hz**。
+
+`map_eraser_tool.cpp` 的 `publishModifiedMap()` 在鼠标位于地图上时**每帧**都调用，
+把整张地图重发。AMCL 收到任何一条 `/map` 就重新初始化粒子云 → 位姿永远不稳 →
+控制器判定失败 → 无速度输出。
+
+### 修复
+`publishModifiedMap()` 加两个条件：
+1. 地图数据与上次发布相同 → 直接返回
+2. 最短间隔 250 ms（4 Hz）
+
+实测：**182 条/6 秒 → 2 条/6 秒**，发布者只剩 `map_server`。
+
+### 教训（追加）
+**"车不动"先查 `/map` 的发布者数量和频率**，再查规划器。
+一整天多轮排查都栽在这上面 —— 诊断顺序应该是：
+`/map` 频率 → AMCL 是否被反复重初始化 → 控制器 abort → 规划/代价地图。
