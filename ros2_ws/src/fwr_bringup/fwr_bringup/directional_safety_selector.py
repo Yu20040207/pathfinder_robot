@@ -234,7 +234,19 @@ class DirectionalSafetySelector(Node):
         elif (wants_motion and self._front_min_m < front_block_m
               and best_side >= clear and self._is_really_stuck(now)):
             self._escape_active = True
-            self._escape_dir = 1.0 if self._left_min_m >= self._right_min_m else -1.0
+            # 2026-11-02（用户反馈"本该右转却左转"）：
+            # 原来只按"几何上更宽"选方向，完全不管路径要往哪走。
+            # 现在优先跟随 Nav2 想要的转向方向（raw 的角速度符号），
+            # 只有该方向被挡或没有角速度指令时，才退回"选更宽的一侧"。
+            if abs(cmd_w) > 0.02:
+                want_right = cmd_w < 0
+                want_clear = (self._right_min_m if want_right else self._left_min_m) >= clear
+            else:
+                want_clear = False
+            if want_clear:
+                self._escape_dir = -1.0 if cmd_w < 0 else 1.0
+            else:
+                self._escape_dir = 1.0 if self._left_min_m >= self._right_min_m else -1.0
             linear_x = 0.0
             angular_z = self._escape_dir * float(
                 self.get_parameter('escape_turn_rate').value)
