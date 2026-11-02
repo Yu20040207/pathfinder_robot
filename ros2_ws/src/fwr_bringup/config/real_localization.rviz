@@ -89,6 +89,16 @@ Visualization Manager:
         Value: /plan
       Value: true
     - Class: rviz_default_plugins/MarkerArray
+      Name: 掉头判定
+      Enabled: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /turn_radius_boost/marker
+      Value: true
+    - Class: rviz_default_plugins/MarkerArray
       Name: 起点与终点
       Enabled: true
       Topic:
