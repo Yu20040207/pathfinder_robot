@@ -1,12 +1,12 @@
 <!--
   2026-11-02：以 Nav2 官方 navigate_to_pose_w_replanning_and_recovery.xml 为蓝本，
-  唯一改动是把恢复动作里的 <BackUp> 换成 <Wait> ——
+  唯一改动是把恢复动作里的 倒车节点 换成 <Wait> ——
   本车 behavior_plugins 只配了 wait / spin，没有 backup，
   直接用官方 XML 会因为 "/backup action server not available" 导致
   bt_navigator 加载失败、所有导航目标 2 毫秒内失败。
 
   保留官方的结构（RateController 1Hz + RecoveryNode + ReactiveFallback + RoundRobin），
-  这样抢占/恢复的边界行为与社区验证过的一致；等以后启用倒车再把 BackUp 加回来。
+  这样抢占/恢复的边界行为与社区验证过的一致；等以后启用倒车再把该节点加回来。
 -->
 <root main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree">
