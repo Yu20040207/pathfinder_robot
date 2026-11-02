@@ -117,7 +117,9 @@ controller_server:
       # 2026-10-31 建图时降速：0.15→0.12，扫描拖影更少（重影主要来源之一）
       # 2026-10-31 用户反馈"速度太快"：巡航降到 0.10，
       # 并把 velocity_smoother 的硬上限压到 0.12（原来 0.18，实际会冲过头）
-      desired_linear_vel: 0.10
+      # 2026-11-02（用户要求）：直线快、转弯慢、切换丝滑。
+      # 0.10 太保守；回到之前验证过的 0.15。
+      desired_linear_vel: 0.15
       # 前视距离必须大于车长（0.60 m）才有稳定裕度：
       # 0.30 m 时车头前方只有半个车身，微小横向误差就产生大角速度 → 左右摆动。
       # 2026-11-01（清单 C4）：低速时前视 0.55 m 太远，遇到窄处会"抄近路"贴障碍。
@@ -127,6 +129,10 @@ controller_server:
       lookahead_dist: 0.60
       min_lookahead_dist: 0.40
       max_lookahead_dist: 0.85
+      # 曲率越大线速度越低（转弯自动减速），配合下面的平滑器实现"丝滑"切换
+      use_regulated_linear_velocity_scaling: true
+      regulated_linear_scaling_min_radius: 0.9
+      regulated_linear_scaling_min_speed: 0.06
       use_velocity_scaled_lookahead_dist: true
       # Shim 已在路径起步时原地对准航向；RPP 再做一次“转-走-转”会形成
       # 极限环，表现为转弯一顿一顿。路径跟踪只保留前进 + 小角速度修正。
@@ -391,12 +397,14 @@ velocity_smoother:
     - -1.0
     # 2026-11-01：平滑器的角加速度/减速度也放宽（2.0→4.0 / -2.5→-4.5），
     # 否则 RPP 每帧改角速度时会被平滑器拖住，表现为一顿一顿。
+    # 2026-11-02：起步/收尾更干脆（0.5→0.8、-0.6→-0.9），
+    # 配合 RPP 的曲率限速（转弯 0.06~0.15、直道 0.15）实现"直线快、转弯慢、切换丝滑"。
     max_accel:
-    - 0.5
+    - 0.8
     - 0.0
     - 4.0
     max_decel:
-    - -0.6
+    - -0.9
     - 0.0
     - -4.5
     odom_topic: /odom
