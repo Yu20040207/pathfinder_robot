@@ -408,8 +408,12 @@ velocity_smoother:
     smoothing_frequency: 20.0
     scale_velocities: false
     feedback: OPEN_LOOP
+    # 2026-11-02（发现的配置不一致）：这里原来是 0.12，而
+    # controller 的 desired_linear_vel 是 0.15 —— 平滑器把指令截断到 0.12，
+    # 车实际从来没跑到过 0.15（监控回执恒为 0.12 可证）。
+    # 对齐到 0.15。
     max_velocity:
-    - 0.12
+    - 0.15
     - 0.0
     - 1.0
     min_velocity:
