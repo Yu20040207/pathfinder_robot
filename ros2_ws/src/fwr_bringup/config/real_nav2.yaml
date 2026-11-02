@@ -90,7 +90,12 @@ controller_server:
     general_goal_checker:
       stateful: true
       plugin: nav2_controller::SimpleGoalChecker
-      xy_goal_tolerance: 0.2
+      # 2026-11-02（用户反复遇到"到了起点就不动"）：
+      # 目标点若落在膨胀区内，SmacPlanner2D 会把终点吸附到最近的空闲格，
+      # 实测偏差 0.34 m；而容差只有 0.20 m → goal_checker 永远判不"到达"，
+      # 任务卡在 active 状态但不再下发速度。
+      # 容差放宽到 0.40，覆盖吸附偏差。
+      xy_goal_tolerance: 0.4
       yaw_goal_tolerance: 3.1416
     FollowPath:
       # 差速底盘：每条新路径先原地转到路径朝向（Rotation Shim），
