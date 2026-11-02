@@ -48,6 +48,11 @@ class Watchdog(Node):
         # 实测自动重启会陷入'杀掉→拉不起来→再杀'的循环，比不重启更糟。
         # 需要自动重启时显式传 restart_scan:=true。
         self.declare_parameter('restart_scan', False)
+        # 2026-11-02：/scan 多发布者检测。今天两个 sllidar_node 抢同一串口，
+        # launch 里那个抛 RCLError 崩溃，/scan 出现异常数据 → 局部代价地图坏掉
+        # → 控制器每帧 abort → 车不动，排查了半天。
+        # 默认**只告警并列出节点名**，不自动杀 —— 盲杀可能杀掉正常的那个。
+        self.declare_parameter('dedupe_scan', False)
         self._last_scan = 0.0
         self._scan_n = 0
         self.create_subscription(LaserScan, '/scan', self._on_scan,
@@ -123,6 +128,13 @@ class Watchdog(Node):
             self._do(name, Transition.TRANSITION_DEACTIVATE, 'deactivate')
             self._do(name, Transition.TRANSITION_ACTIVATE, 'activate')
 
+    def _scan_publishers(self):
+        try:
+            infos = self.get_publishers_info_by_topic('/scan')
+            return [i.node_name for i in infos]
+        except Exception:                          # noqa: BLE001
+            return []
+
     def _on_scan(self, _msg) -> None:
         self._last_scan = time.monotonic()
         self._scan_n += 1
@@ -168,6 +180,20 @@ class Watchdog(Node):
         cmd_flowing = (now - self._last_in) < 1.0
         out_silent = (now - self._last_out) > float(
             self.get_parameter('out_silent_s').value)
+        # /scan 多发布者检查（今天的事故源）
+        pubs = self._scan_publishers()
+        if len(pubs) > 1:
+            if (now - getattr(self, '_last_dup_warn', 0.0)) > 30.0:
+                self._last_dup_warn = now
+                self.get_logger().error(
+                    '/scan 有 %d 个发布者 %s —— 多个雷达节点抢串口会让'
+                    '代价地图数据错乱、控制器连续 abort。' % (len(pubs), pubs))
+                if bool(self.get_parameter('dedupe_scan').value):
+                    import subprocess
+                    subprocess.run(['pkill', '-f', 'sllidar_ros2/lib'],
+                                   check=False)
+                    self.get_logger().warn('已结束全部雷达进程，请重启一个')
+
         # 雷达断流检查（优先级最高：没有它一切都白搭）
         stale = float(self.get_parameter('scan_stale_s').value)
         if self._last_scan > 0 and (now - self._last_scan) > stale:
