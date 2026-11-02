@@ -4,7 +4,7 @@ from pathlib import Path
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import ExecuteProcess, DeclareLaunchArgument, IncludeLaunchDescription
 from launch.conditions import IfCondition, UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PythonExpression
@@ -130,6 +130,14 @@ def generate_launch_description():
              parameters=[{'use_sim_time': use_sim_time,
                           'autostart': True,
                           'node_names': ['collision_monitor_forward']}]),
+        # 2026-11-02：链路看门狗也放进导航栈。
+        # 它监控 /scan：雷达断流会让局部代价地图"没有障碍数据"，
+        # controller 连续 abort、Nav2 直接 Goal failed（实测断流 19.8 s）。
+        # 同时照旧负责碰撞监控卡死时的自动恢复。
+        ExecuteProcess(
+            cmd=['python3', str(Path(__file__).resolve().parents[4]
+                                / 'tools' / 'chain_watchdog.py')],
+            name='chain_watchdog', output='screen'),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(str(nav2_share / 'launch' / 'navigation_launch.py')),
             launch_arguments={'use_sim_time': use_sim_time,
