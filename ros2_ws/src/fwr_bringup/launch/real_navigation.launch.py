@@ -130,13 +130,10 @@ def generate_launch_description():
              parameters=[{'use_sim_time': use_sim_time,
                           'autostart': True,
                           'node_names': ['collision_monitor_forward']}]),
-        # 2026-11-02：安全选择器要求 /explore/state == 'navigating' 才放行指令
-        # （directional_safety_core.py:134）。这个节点负责持续发布该状态，
-        # 但**从未被任何 launch 启动过** —— 现场表现就是"点了开始导航，
-        # /cmd_vel 有速度、/cmd_vel_auto_safe 恒为 0，车不动"。
-        Node(package='fwr_bringup', executable='auto_explore_state',
-             name='auto_explore_state', output='screen',
-             parameters=[{'use_sim_time': use_sim_time}]),
+        # 2026-11-02 回退：不再常驻启动 auto_explore_state。
+        # 它无条件每秒发 /explore/state='navigating'，与 explorer 自己的状态机
+        # 打架 —— 发出去的目标 0.1 s 就被 "Client requested to cancel the goal"，
+        # 表现为"一开始就结束"。状态仍由 explorer 在导航期间自己发布。
         # 2026-11-02：看门狗**不再放进导航栈**。
         # 实测它把 collision_monitor_forward 误判为 unknown，强行 deactivate->activate
         # 失败后监控进入坏状态，/cmd_vel_auto_safe 恒为 0、车完全不动 —— 比它要修的问题更糟。
