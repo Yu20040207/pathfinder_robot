@@ -90,7 +90,7 @@ def generate_launch_description():
                           'fixed_height_m': 0.0,
                           # 2026-11-01：手动地图有噪点和缝隙 → 先清噪点，再膨胀 2 格封缝
                           'min_cluster_cells': 4,
-                          'dilate_cells': 2}]),
+                          'dilate_cells': 1}]),
         # 启动后自动做一次全局雷达匹配并播种 AMCL（手动挪车/重启后的 kidnapped 恢复）。
         # slam localization 模式下每 2 分钟把地图（pgm/yaml + posegraph）存盘。
         # 2026-10-30：自动存档在建图模式下也要跑（原来只在 slam localization 模式），
