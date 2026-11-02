@@ -202,7 +202,8 @@ class TurnRadiusBoost(Node):
         base.scale.x = 0.03
         base.color.r, base.color.g, base.color.b, base.color.a = 0.2, 0.7, 0.3, 0.6
         for p in poses:
-            base.points.append(p.pose.position)
+            q = type(p.pose.position)(x=p.pose.position.x, y=p.pose.position.y, z=0.01)
+            base.points.append(q)
         arr.markers.append(base)
 
         thr = math.radians(float(self.get_parameter('turn_deg').value))
@@ -221,7 +222,8 @@ class TurnRadiusBoost(Node):
             m.scale.x = 0.07
             m.color.r, m.color.g, m.color.b, m.color.a = 1.0, 0.55, 0.0, 0.95
             for i in range(a, b + 1):
-                m.points.append(poses[i].pose.position)
+                m.points.append(type(poses[i].pose.position)(
+                    x=poses[i].pose.position.x, y=poses[i].pose.position.y, z=0.03))
             arr.markers.append(m)
 
             txt = Marker()
