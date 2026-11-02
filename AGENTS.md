@@ -104,6 +104,13 @@
 | BT `number_of_retries` | 6 | 2 时 0.6 s 就放弃 |
 | `auto_initial_pose.max_score_m` | 0.15 | 0.10 会拒绝 0.127 m 的正常匹配 |
 
+**碰撞监控 / 代价地图（2026-11-02 最终）**
+- `front_stop` 深度 **0.32~0.38**（半宽 0.24，3 点触发）—— 浅于 0.30 会撞
+- `front_slow` 横向 **±0.22**、`max_points 3`、`slowdown_ratio 0.8`
+  （±0.30 / 1 点时会因侧墙和门框误触发，一次跑动 7 次）
+- `local_costmap.plugins = [obstacle_layer, inflation_layer]`
+- `footprint_padding 0.02`
+
 **⚠️ 局部代价地图不要启用 `range_layer`**：它等不到超声数据时会把代价地图
 更新拖住 → 控制器拿不到新鲜地图 → `computeVelocityCommands` 失败 →
 `[follow_path] Aborting handle` 每秒一次、`/cmd_vel_nav` 恒 0。

@@ -148,7 +148,10 @@ controller_server:
       use_regulated_linear_velocity_scaling: false
       regulated_linear_scaling_min_radius: 0.9
       regulated_linear_scaling_min_speed: 0.06
-      use_velocity_scaled_lookahead_dist: true
+      # 2026-11-02（用户反馈"一卡一卡不连贯"）：
+      # 前视距离随速度变化会形成反馈环：速度↑→前视变远→目标点跳→速度又变，
+      # 实测 cmd 在 0.12/0.07 之间来回跳。关掉后前视固定，速度更稳。
+      use_velocity_scaled_lookahead_dist: false
       # Shim 已在路径起步时原地对准航向；RPP 再做一次“转-走-转”会形成
       # 极限环，表现为转弯一顿一顿。路径跟踪只保留前进 + 小角速度修正。
       # 2026-11-02：试过打开（想让车先转正），
