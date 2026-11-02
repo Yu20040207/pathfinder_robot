@@ -132,7 +132,9 @@ controller_server:
       min_lookahead_dist: 0.40
       max_lookahead_dist: 0.85
       # 曲率越大线速度越低（转弯自动减速），配合下面的平滑器实现"丝滑"切换
-      use_regulated_linear_velocity_scaling: true
+      # 2026-11-02 回退：开启后控制器每帧 abort、/cmd_vel 无输出（车不动）。
+      # 疑似曲率限速把线速度压到接近 0，RPP 判定"无进展"。
+      use_regulated_linear_velocity_scaling: false
       regulated_linear_scaling_min_radius: 0.9
       regulated_linear_scaling_min_speed: 0.06
       use_velocity_scaled_lookahead_dist: true
