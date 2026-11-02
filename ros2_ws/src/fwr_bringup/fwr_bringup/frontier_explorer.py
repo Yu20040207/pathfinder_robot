@@ -493,7 +493,15 @@ class FrontierExplorer(Node):
         pose = PoseStamped()
         pose.pose = mapped.pose.pose
         xy = (pose.pose.position.x, pose.pose.position.y)
-        if self._last_map_xy and math.dist(xy, self._last_map_xy) > .5:
+        # 2026-11-02（用户反馈"走得好好的突然停、状态是 canceled"）：
+        # 原来是 0.5 m 跳变就判定"定位丢失"并取消任务。但 AMCL 用激光纠偏时
+        # 偶尔会修正 >0.5 m（那是正常行为，不是丢失），于是任务被误杀。
+        # 放宽到 1.0 m，并打印出来 —— 原来完全静默，排查时看不到。
+        jump = (math.dist(xy, self._last_map_xy)
+                if self._last_map_xy else 0.0)
+        if jump > 1.0:
+            self.get_logger().warn(
+                f'定位跳变 {jump:.2f} m (>1.0) → 判定丢失定位，取消任务')
             self._sm.stop()
             return
         self._last_map_xy = xy
