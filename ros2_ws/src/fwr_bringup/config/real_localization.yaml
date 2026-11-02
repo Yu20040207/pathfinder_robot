@@ -29,3 +29,7 @@ map_server:
     yaml_filename: ''
     topic_name: map
     frame_id: map
+    # 2026-11-02：实测 map_server 以 ~30 Hz 重发地图，AMCL 每收到一次就重初始化
+    # 粒子，位姿永远稳不下来 → 控制器连续 abort、车不动。
+    # 显式设为 0（只在激活时发一次）。
+    map_publish_period: 0.0
