@@ -88,7 +88,9 @@ class DirectionalSafetySelector(Node):
         # 2026-11-01（用户反馈"正常行驶时偶发一卡一卡"）：
         # 光看"前方被挡 + 侧面有空间"会误触发 —— 正常行驶时本来就常满足。
         # 必须**真的没在动**持续 escape_after_s 秒才脱困。
-        self.declare_parameter('escape_after_s', 2.5)
+        # 2026-11-02（用户确认）：2.5 s 太慢 —— Nav2 的 Recovery 重试约 2 s 就耗尽，
+        # 任务先结束，脱困永远来不及。改 1.5 s，抢在 Nav2 放弃之前接管。
+        self.declare_parameter('escape_after_s', 1.5)
         self.declare_parameter('odom_topic', '/odom')
         self._escape_active = False
         self._escape_dir = 1.0
