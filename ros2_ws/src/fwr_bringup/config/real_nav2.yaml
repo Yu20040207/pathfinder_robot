@@ -151,7 +151,11 @@ controller_server:
       use_velocity_scaled_lookahead_dist: true
       # Shim 已在路径起步时原地对准航向；RPP 再做一次“转-走-转”会形成
       # 极限环，表现为转弯一顿一顿。路径跟踪只保留前进 + 小角速度修正。
-      use_rotate_to_heading: false
+      # 2026-11-02（用户反馈"到起点后转个弯就停住"）：
+      # 关掉时 RPP 不会先转正；车头与路径方向差太多时前视点落在车后，
+      # 控制器算不出有效速度 → 每秒 abort、/cmd_vel_nav 一条都没有。
+      # 打开：先原地转到路径朝向再走（angular_dist_threshold 0.35 控制精度）。
+      use_rotate_to_heading: true
       rotate_to_heading_min_angle: 0.35
       # 2026-10-31 回退：曾把 allow_reversing 设为 true（方案 B），但实测出问题 ——
       # 规划器不知道车尾守卫会拒绝倒车：RPP 选择倒车 → base_bridge 拒绝 →
