@@ -85,6 +85,11 @@ class DirectionalSafetySelector(Node):
         # 2026-11-01（用户要求）卡住脱困：原地转身**转过为止**，角度不写死，
         # 哪怕 10° 够用就 10°。每帧检查前方是否已空旷，一空就交回 Nav2。
         self.declare_parameter('escape_turn_rate', 0.35)
+        # 2026-11-02（用户："左边进了停车矩形就朝右转一点不就行了"）：
+        # 选择器自己算的"前方距离"和碰撞监控的矩形口径不一致 ——
+        # 现场出现过"监控按 0.38 m 停车、选择器算出前方 ≥0.45 m"，
+        # 于是脱困不触发。这里再加一个更直接的判据：**任一侧靠得太近**。
+        self.declare_parameter('near_side_m', 0.45)
         # 2026-11-01（用户反馈"正常行驶时偶发一卡一卡"）：
         # 光看"前方被挡 + 侧面有空间"会误触发 —— 正常行驶时本来就常满足。
         # 必须**真的没在动**持续 escape_after_s 秒才脱困。
@@ -224,14 +229,21 @@ class DirectionalSafetySelector(Node):
         newer = self._left_min_m if cmd_w >= 0 else self._right_min_m
         other = self._right_min_m if cmd_w >= 0 else self._left_min_m
         best_side = max(self._left_min_m, self._right_min_m)
+        # 任一侧靠得太近也算"被挡住"：门洞/墙角进了车头停车矩形时，
+        # 选择器自己的前方距离可能仍然很大，但侧面已经贴上了。
+        escape_near = min(self._left_min_m, self._right_min_m) < float(
+            self.get_parameter('near_side_m').value)
+        escape_blocked = (self._front_min_m < front_block_m) or escape_near
         if self._escape_active:
-            if self._front_min_m >= front_block_m:
-                self._escape_active = False          # 前方已空，交回 Nav2
+            still_near = min(self._left_min_m, self._right_min_m) < float(
+                self.get_parameter('near_side_m').value)
+            if self._front_min_m >= front_block_m and not still_near:
+                self._escape_active = False          # 前方和侧面都空，交回 Nav2
             else:
                 linear_x = 0.0
                 angular_z = self._escape_dir * float(
                     self.get_parameter('escape_turn_rate').value)
-        elif (wants_motion and self._front_min_m < front_block_m
+        elif (wants_motion and escape_blocked
               and best_side >= clear and self._is_really_stuck(now)):
             self._escape_active = True
             # 2026-11-02（用户反馈"本该右转却左转"）：
@@ -246,6 +258,7 @@ class DirectionalSafetySelector(Node):
             if want_clear:
                 self._escape_dir = -1.0 if cmd_w < 0 else 1.0
             else:
+                # 朝**远离障碍**的一侧转（左边近就右转，反之亦然）
                 self._escape_dir = 1.0 if self._left_min_m >= self._right_min_m else -1.0
             linear_x = 0.0
             angular_z = self._escape_dir * float(
