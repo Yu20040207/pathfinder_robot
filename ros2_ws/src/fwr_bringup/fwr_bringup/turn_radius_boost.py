@@ -19,6 +19,7 @@ import math
 import rclpy
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Path
+from visualization_msgs.msg import Marker, MarkerArray
 from rcl_interfaces.msg import Parameter, ParameterType
 from rcl_interfaces.srv import SetParameters
 from rclpy.node import Node
@@ -85,6 +86,11 @@ class TurnRadiusBoost(Node):
                                ['/global_costmap/global_costmap'])
         self._boosted = False
         self._votes = 0
+        # 可视化：把"被判为掉头的那一段"画出来，并在起点标注当前膨胀值。
+        self.declare_parameter('marker_topic', '/turn_radius_boost/marker')
+        self._marker_pub = self.create_publisher(
+            MarkerArray, self.get_parameter('marker_topic').value, 10)
+        self._last_change = 0.0
         self._clients = {}
         self.create_subscription(Path, self.get_parameter('plan_topic').value,
                                  self._on_plan, 10)
@@ -115,14 +121,68 @@ class TurnRadiusBoost(Node):
             ok = ok and good
         return ok
 
+    def _publish_marker(self, msg: Path, change, is_turn: bool) -> None:
+        """把前视段画成一条线：普通=绿色，掉头=橙色；并在起点标注膨胀值。"""
+        arr = MarkerArray()
+        line = Marker()
+        line.header = msg.header
+        line.ns = 'turn_radius_boost'
+        line.id = 0
+        line.type = Marker.LINE_STRIP
+        line.action = Marker.ADD
+        line.scale.x = 0.06
+        line.color.a = 0.9
+        if is_turn:
+            line.color.r, line.color.g, line.color.b = 1.0, 0.55, 0.0
+        else:
+            line.color.r, line.color.g, line.color.b = 0.1, 0.9, 0.3
+        look = float(self.get_parameter('lookahead_m').value)
+        acc = 0.0
+        pts = msg.poses
+        for i in range(1, len(pts)):
+            p = PoseStamped()
+            p.pose = pts[i].pose
+            p.header = msg.header
+            line.points.append(p.pose.position)
+            acc += math.hypot(pts[i].pose.position.x - pts[i - 1].pose.position.x,
+                              pts[i].pose.position.y - pts[i - 1].pose.position.y)
+            if acc >= look and len(line.points) > 1:
+                break
+        if len(line.points) >= 2:
+            arr.markers.append(line)
+
+        txt = Marker()
+        txt.header = msg.header
+        txt.ns = 'turn_radius_boost'
+        txt.id = 1
+        txt.type = Marker.TEXT_VIEW_FACING
+        txt.action = Marker.ADD
+        txt.scale.z = 0.35
+        txt.color.a = 1.0
+        if is_turn:
+            txt.color.r, txt.color.g, txt.color.b = 1.0, 0.55, 0.0
+            txt.text = (f'掉头段 {math.degrees(change):.0f}° → '
+                        f'膨胀 {self.get_parameter("boost_radius").value:.2f}')
+        else:
+            txt.color.r, txt.color.g, txt.color.b = 0.1, 0.9, 0.3
+            txt.text = (f'普通 {math.degrees(change):.0f}° → '
+                        f'膨胀 {self.get_parameter("normal_radius").value:.2f}')
+        txt.pose = msg.poses[0].pose
+        txt.pose.position.z = 0.8
+        arr.markers.append(txt)
+        self._marker_pub.publish(arr)
+
     def _on_plan(self, msg: Path) -> None:
-        if not bool(self.get_parameter('enabled').value):
-            return
         change = path_heading_change(
             msg.poses, float(self.get_parameter('lookahead_m').value))
         if change is None:
             return
-        want = change >= math.radians(float(self.get_parameter('turn_deg').value))
+        thr = math.radians(float(self.get_parameter('turn_deg').value))
+        self._last_change = change
+        self._publish_marker(msg, change, change >= thr)
+        if not bool(self.get_parameter('enabled').value):
+            return
+        want = change >= thr
         hold = int(self.get_parameter('hold_cycles').value)
         if want == self._boosted:
             self._votes = 0
