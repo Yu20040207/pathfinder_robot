@@ -305,10 +305,13 @@ class FrontierExplorer(Node):
         # 2026-11-02 诊断（临时）：两点导航在"到达起点"后不切第 2 腿。
         # 打印状态机的关键量，复现一次即可定位。
         if self._sm.fixed_goal:
-            self.get_logger().info(
-                f'[fixed-diag] status={self._status} dispatched={self._sm._fixed_dispatched} '
-                f'legs={self._sm._fixed_legs} enabled={self._sm.enabled} '
-                f'leg_idx={self._sm.fixed_leg_index}')
+            snap = (self._status, self._sm._fixed_dispatched, self._sm.enabled)
+            if snap != getattr(self, '_diag_prev', None):
+                self._diag_prev = snap
+                self.get_logger().info(
+                    f'[fixed-diag] status={self._status} dispatched={self._sm._fixed_dispatched} '
+                    f'legs={self._sm._fixed_legs} enabled={self._sm.enabled} '
+                    f'leg_idx={self._sm.fixed_leg_index}')
         decision = self._sm.update(map_ok, pose_ok, self._fault, self._status, now,
                                    self._goal.grid_index if self._goal else None)
         state = String()
