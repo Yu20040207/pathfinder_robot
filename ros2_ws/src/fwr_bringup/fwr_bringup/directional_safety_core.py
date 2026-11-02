@@ -63,8 +63,12 @@ class DirectionalSafetyCore:
         repeated = (self.raw is not None and
                     (linear_x, angular_z) == self.raw[:2] and
                     new_direction == self.direction)
-        if new_direction != self.direction:
-            self.filtered = {}
+        # 2026-11-02（"一卡一卡"根因）：
+        # 原来方向一变就把回执缓存整个清空。而控制器在"前进↔原地转"之间
+        # 频繁切换（RotationShim），每切一次就丢几帧回执 → no-reply-forward
+        # → 整帧拒绝 → 线速度掉一下，观感就是一顿一顿。
+        # 缓存本来就按方向分键（filtered[direction]），且每条都有
+        # stale-reply / future-reply 时间戳校验，不需要清空。
         self.repeated_raw_at = now if repeated else None
         self.direction = new_direction
         self.raw = (linear_x, angular_z, now)
