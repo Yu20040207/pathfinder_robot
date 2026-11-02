@@ -84,6 +84,29 @@
 - `rosbridge 2.0.8` 监听 9090；连接地址 `127.0.0.1:9090`，端到端只读验证通过（35 节点、`/scan` 720 点）。
 - 启用/关闭/回滚步骤见 `docs/agent/ros-mcp-setup.md`；不要用 `FWR_ROS_MCP_MODE=full` 连实机。
 
+### 实机导航已验证参数快照（2026-11-02，四房间实景）
+
+**已跑通完整两点导航**，以下组合可直接复用：
+
+| 参数 | 值 | 备注 |
+| --- | --- | --- |
+| `inflation_radius` | **0.48** | 0.45 实测离墙 0.10 m；0.48 更居中 |
+| `cost_scaling_factor` | 1.2 | 衰减慢，贴墙更贵 |
+| `cost_travel_multiplier` | 8.0 | 调 20 无效果，别动 |
+| `desired_linear_vel` | 0.15 | 直线速度 |
+| `rotate_to_heading_angular_vel` | 0.6 | 转 90° 约 2.6 s |
+| `max_angular_accel` | 4.0 | 转弯不顿挫 |
+| `use_regulated_linear_velocity_scaling` | **false** | ⚠️ 开 true 会让车完全不动 |
+| `front_stop` 深度 | 0.32~0.38 | 比车体前缘 0.30 留 2~8 cm |
+| `dilate_cells`（map_seal） | 1 | 2 以上会把门洞挤窄导致规划失败 |
+| `map_publish_period` | **0.0** | ⚠️ 必须显式写，否则 30 Hz 重发冲垮 AMCL |
+| `track_unknown_space` | false | true 会让全部路径规划失败 |
+| BT `number_of_retries` | 6 | 2 时 0.6 s 就放弃 |
+| `auto_initial_pose.max_score_m` | 0.15 | 0.10 会拒绝 0.127 m 的正常匹配 |
+
+**Map Edit 面板**：橡皮工具已加发布去重 + 4 Hz 限速（原来每帧重发 `/map`，
+30 Hz 冲垮 AMCL，是"车完全不动"的总根源）。
+
 ## 3.9 血泪教训（2026-11-01，务必遵守）
 
 1. **"规划穿墙"先查数据源，别查算法**
