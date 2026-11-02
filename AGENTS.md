@@ -111,6 +111,11 @@
 - `local_costmap.plugins = [obstacle_layer, inflation_layer]`
 - `footprint_padding 0.02`
 
+> ⚠️ **这四个"手感"参数一次只改一个**：`angular_dist_threshold`、
+> `use_velocity_scaled_lookahead_dist`、`inflation_radius`、`front_stop.max_points`。
+> 2026-11-02 一起改（0.35→0.7、true→false、0.48→0.50、3→6）后出现
+> **起步即原地来回转**；全部回退后立刻恢复正常。改一个、跑一次，再动下一个。
+
 **⚠️ 局部代价地图不要启用 `range_layer`**：它等不到超声数据时会把代价地图
 更新拖住 → 控制器拿不到新鲜地图 → `computeVelocityCommands` 失败 →
 `[follow_path] Aborting handle` 每秒一次、`/cmd_vel_nav` 恒 0。
