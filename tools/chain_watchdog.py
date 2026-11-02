@@ -38,6 +38,17 @@ class Watchdog(Node):
         self._out = 0
         self._last_in = 0.0
         self._last_out = 0.0
+        # 2026-11-02：雷达断流会让局部代价地图"没有障碍数据"，控制器连续 abort、
+        # Nav2 目标失败（现场实测断流 19.8 s 后任务直接结束）。
+        # 这里监控 /scan，超过 scan_stale_s 没数据就重启雷达节点。
+        from sensor_msgs.msg import LaserScan
+        from rclpy.qos import qos_profile_sensor_data
+        self.declare_parameter('scan_stale_s', 2.0)
+        self.declare_parameter('restart_scan', True)
+        self._last_scan = 0.0
+        self._scan_n = 0
+        self.create_subscription(LaserScan, '/scan', self._on_scan,
+                                 qos_profile_sensor_data)
         self.create_subscription(Twist, IN_TOPIC, self._on_in, 20)
         self.create_subscription(Twist, OUT_TOPIC, self._on_out, 20)
         self._change_clients = {
@@ -109,6 +120,29 @@ class Watchdog(Node):
             self._do(name, Transition.TRANSITION_DEACTIVATE, 'deactivate')
             self._do(name, Transition.TRANSITION_ACTIVATE, 'activate')
 
+    def _on_scan(self, _msg) -> None:
+        self._last_scan = time.monotonic()
+        self._scan_n += 1
+
+    def _restart_scan(self) -> None:
+        """重启雷达节点（按 by-id 串口，避免 /dev/ttyUSB* 重枚举）。"""
+        import subprocess
+        try:
+            subprocess.run(['pkill', '-f', 'sllidar_node'], timeout=5,
+                           check=False)
+            time.sleep(1.0)
+            by_id = ('/dev/serial/by-id/'
+                     'usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_Controller_'
+                     'e00aaf475431f111b7818c5f30d20014-if00-port0')
+            subprocess.Popen(
+                ['ros2', 'run', 'sllidar_ros2', 'sllidar_node',
+                 '--ros-args', '-p', f'serial_port:={by_id}'],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                start_new_session=True)
+            self.get_logger().warn('已重新拉起雷达节点')
+        except Exception as exc:                     # noqa: BLE001
+            self.get_logger().error(f'重启雷达失败: {exc}')
+
     def _health(self):
         """周期健康检查：状态不对、或**输出静默**就恢复。
 
@@ -122,6 +156,17 @@ class Watchdog(Node):
         cmd_flowing = (now - self._last_in) < 1.0
         out_silent = (now - self._last_out) > float(
             self.get_parameter('out_silent_s').value)
+        # 雷达断流检查（优先级最高：没有它一切都白搭）
+        stale = float(self.get_parameter('scan_stale_s').value)
+        if self._last_scan > 0 and (now - self._last_scan) > stale:
+            if bool(self.get_parameter('restart_scan').value) and \
+                    (now - getattr(self, '_last_scan_restart', 0.0)) > 10.0:
+                self.get_logger().error(
+                    '/scan 已静默 %.1fs → 重启雷达' % (now - self._last_scan))
+                self._last_scan_restart = now
+                self._restart_scan()
+            self._last_scan = now      # 避免每轮都触发
+
         for name in MONITORS:
             state = self._state_of(name)
             if state not in ('active', 'unknown'):
