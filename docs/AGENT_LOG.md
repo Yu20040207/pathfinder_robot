@@ -4251,3 +4251,54 @@ RViz 打开后 `/map` 有 **两个发布者**：`maperaser`（Map Edit 橡皮工
 
 ### 当前完整参数
 见 `AGENTS.md` 的"实机导航已验证参数快照（2026-11-02）"。
+
+## 2026-11-02 18:35 · v1.0：两点导航完整跑通，卡顿解决
+
+### 本次目标（今日）
+让实车在四房间场景里稳定跑两点导航（先到起点、再到终点），并解决卡顿。
+
+### 今天修掉的真实 bug（按发现顺序）
+1. **Map Edit 面板每帧重发 `/map`（30 Hz）** → AMCL 被反复重初始化 → 车完全不动。
+   修复：橡皮工具发布去重 + 4 Hz 限速。实测 182 条/6s → 2 条。
+2. **空行为树**：`default_nav_to_pose_bt_xml: ''` 不是"用默认"，而是**空树**
+   → `Behavior tree threw exception: Empty Tree`，目标 2 ms 失败。
+3. **官方 BT 需要 `/backup`**：本车 `behavior_plugins` 只有 wait/spin →
+   `Exception when loading BT: Action server backup not available` → BT 激活失败。
+4. **面板启动保护 2.5 s 太短** → 误判"任务未进入运行状态"并关门。放宽到 6 s。
+5. **BT 跑 100 Hz 被饿死**（`tick rate 100.00 was exceeded`）→ `bt_loop_duration` 50 ms。
+6. **goal 容差 0.20 m < 规划器吸附偏差 0.34 m** → 到了却永远判不"到达"。放宽到 0.4。
+7. **`local_costmap` 的 `range_layer` 等不到超声数据** → 拖住代价地图更新 →
+   `computeVelocityCommands` 失败 → `follow_path` 每秒 abort、`/cmd_vel_nav` 恒 0。
+   现象极具迷惑性：**短目标能到（终点就在旁边，不需控制器驱动）、长目标必卡**。
+   修复：从 plugins 移除 `range_layer`（倒车安全由 `rear_guard` 独立保障）。
+8. **规划耗时 1040 ms > 重规划周期 1000 ms** → 每次刚算完就被取消 →
+   "点开始就结束"。修复：BT `RateController` 1.0 → 0.5 Hz。
+9. **卡顿根因 A**：监控 10 Hz 回执 vs 选择器 20 Hz，转弯时回执角速度符号滞后 →
+   原逻辑整帧拒绝（连正常线速度一起丢）。修复：仅当 |ω| > 0.05 rad/s 才拒绝。
+10. **卡顿根因 B（主因）**：方向一变（前进↔原地转）就 `filtered = {}` 清空回执 →
+    接下来几帧 `no-reply-forward` → 整帧拒绝。修复：不再清空（本来就按方向分键
+    且有时间戳校验）。
+
+### 量化证据
+- 控制器输出帧间抖动 **0.0013 m/s**（本身很平滑）
+- 修复前安全链削速 **14%** 的帧，`sign-angular` 15 次 + `no-reply` 11 次 / 3 分钟
+- 修复后用户确认"基本解决"
+
+### 最终参数（见 AGENTS.md「实机导航已验证参数快照（2026-11-02）」）
+inflation 0.48 / cost_scaling 1.2 / angular_dist_threshold 0.35 /
+use_velocity_scaled_lookahead_dist true / front_stop 0.32~0.38·3点 /
+front_slow ±0.22·3点·0.8 / BT RateController 0.5 Hz / bt_loop_duration 50 /
+xy_goal_tolerance 0.4 / local_costmap 无 range_layer
+
+### 今天试过但**回退**的（不要再走一遍）
+- `use_regulated_linear_velocity_scaling: true` → 车完全不动（速度被压到 0）
+- `track_unknown_space: true` → 全部路径规划失败
+- 官方 BT（含 ClearEntireCostmap 恢复）→ 控制器失步
+- `angular_dist_threshold` 0.7 + 前视固定 + 膨胀 0.50 + 停车 6 点**同时改**
+  → 起步即原地来回转（四个"手感"参数必须一次只改一个）
+- 掉头半径动态加大（turn_radius_boost）→ 膨胀切换导致规划瞬时失败，已停用
+
+### 当前状态
+- 两点导航：起点→原地转→终点，完整跑通
+- 卡顿：基本消除
+- 版本：**v1.0**
