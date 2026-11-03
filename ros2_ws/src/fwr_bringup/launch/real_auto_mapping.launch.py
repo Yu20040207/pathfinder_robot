@@ -15,6 +15,7 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -59,7 +60,12 @@ def generate_launch_description():
         # 只转不走、前方过近立即停、用 yaw 计角度。可用 initial_spin:=false 关闭。
         Node(package='fwr_bringup', executable='initial_spin', name='initial_spin',
              output='screen',
-             parameters=[{'enabled': LaunchConfiguration('initial_spin')}]),
+             # 2026-11-03 修 bug：LaunchConfiguration 传进来是**字符串** 'true'，
+             # 而 enabled 声明为 bool → get_parameter 抛 ParameterTypeException，
+             # 节点在第一次 tick 就静默挂掉（日志里只有 process started）。
+             # 必须用 ParameterValue(..., value_type=bool) 显式转类型。
+             parameters=[{'enabled': ParameterValue(
+                 LaunchConfiguration('initial_spin'), value_type=bool)}]),
         # 2026-11-03（用户思路）：不用固定延迟 —— room_explorer 订阅
         # /mapping/spin_done，收到 initial_spin 的"转完"信号后才接管底盘。
         # 事件驱动，转得快就早开始，转得慢也不会被抢走。
