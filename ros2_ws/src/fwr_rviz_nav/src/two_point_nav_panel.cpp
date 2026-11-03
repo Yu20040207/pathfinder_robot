@@ -10,6 +10,9 @@
 #include <QLabel>
 #include <QPushButton>
 #include <QTimer>
+#include <QCheckBox>
+#include <QHBoxLayout>
+#include <QSpinBox>
 #include <QVBoxLayout>
 
 #include <geometry_msgs/msg/point_stamped.hpp>
@@ -91,6 +94,25 @@ protected:
     speed_box_->addItems({"速度 ×0.5", "速度 ×0.75", "速度 ×1.0"});
     speed_box_->setCurrentIndex(2);
     layout->addWidget(speed_box_);
+    // 2026-11-03（用户需求）：手动指定终点朝向。
+    // 不勾选时沿用原来的"从当前位置指向终点"，勾选后用这里设定的角度。
+    auto * yaw_row = new QHBoxLayout();
+    manual_yaw_check_ = new QCheckBox("手动朝向", this);
+    manual_yaw_spin_ = new QSpinBox(this);
+    manual_yaw_spin_->setRange(-180, 180);
+    manual_yaw_spin_->setSingleStep(5);
+    manual_yaw_spin_->setValue(0);
+    manual_yaw_spin_->setSuffix(" °");
+    manual_yaw_spin_->setEnabled(false);
+    yaw_row->addWidget(manual_yaw_check_);
+    yaw_row->addWidget(manual_yaw_spin_);
+    layout->addLayout(yaw_row);
+    connect(manual_yaw_check_, &QCheckBox::toggled, this, [this](bool on) {
+      manual_yaw_spin_->setEnabled(on);
+      publish_markers();          // 勾选/取消时立刻刷新箭头
+    });
+    connect(manual_yaw_spin_, QOverload<int>::of(&QSpinBox::valueChanged),
+      this, [this](int) {publish_markers();});
     layout->addWidget(preview_button_);
     layout->addWidget(start_button_);
     if (guarded_) {layout->addWidget(stop_button_);}
@@ -559,8 +581,9 @@ private:
         from_x = points_.start()->x;
         from_y = points_.start()->y;
       }
-      const double yaw = std::atan2(points_.goal()->y - from_y,
-                                    points_.goal()->x - from_x);
+      const double yaw = manual_yaw_enabled()
+        ? manual_yaw_rad()
+        : std::atan2(points_.goal()->y - from_y, points_.goal()->x - from_x);
       add_arrow(points_.goal()->x, points_.goal()->y, yaw, 10);
       if (points_.two_point() && points_.start()) {
         // 起点处的朝向同样指向终点（车到起点后会转向这个方向）
@@ -827,7 +850,9 @@ private:
       auto request = std::make_shared<RealSingleGoal::Request>();
       request->x = resume_goal_x_;
       request->y = resume_goal_y_;
-      request->yaw = std::atan2(request->y - current->y, request->x - current->x);
+      request->yaw = manual_yaw_enabled()
+        ? manual_yaw_rad()
+        : std::atan2(request->y - current->y, request->x - current->x);
       status_label_->setText("正在从当前位置继续前往原终点…");
       real_single_goal_client_->async_send_request(request, [this, revision](
         rclcpp::Client<RealSingleGoal>::SharedFuture future) {
@@ -858,7 +883,9 @@ private:
       auto request = std::make_shared<RealSingleGoal::Request>();
       request->x = points_.goal()->x;
       request->y = points_.goal()->y;
-      request->yaw = std::atan2(request->y - current->y, request->x - current->x);
+      request->yaw = manual_yaw_enabled()
+        ? manual_yaw_rad()
+        : std::atan2(request->y - current->y, request->x - current->x);
       status_label_->setText("正在请求从当前位置到终点的受控导航…");
       real_single_goal_client_->async_send_request(request, [this, revision](
         rclcpp::Client<RealSingleGoal>::SharedFuture future) {
@@ -958,6 +985,19 @@ private:
   rclcpp::Client<RealSingleGoal>::SharedPtr real_single_goal_client_;
   rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr arm_client_;
   QComboBox * speed_box_ = nullptr;
+  QCheckBox * manual_yaw_check_ = nullptr;
+  QSpinBox * manual_yaw_spin_ = nullptr;
+
+  // 手动朝向是否启用；启用时终点 yaw 用它，否则用"指向终点"的自动方向
+  bool manual_yaw_enabled() const
+  {
+    return manual_yaw_check_ && manual_yaw_check_->isChecked();
+  }
+  double manual_yaw_rad() const
+  {
+    const double deg = manual_yaw_spin_ ? manual_yaw_spin_->value() : 0.0;
+    return deg * M_PI / 180.0;
+  }
   QPushButton * recover_button_ = nullptr;
   int base_fault_ = 0;
   rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr fault_sub_;
