@@ -352,11 +352,27 @@ class FrontierExplorer(Node):
                 return response
             pts.append((gx, gy, yaw))
         self._goal = None
+        self._status = 'idle'
+        self._trial_started = now
+        # 2026-11-03（现场："一开始就结束"）：Nav2 的 goal checker 只看**最后一个点**。
+        # 如果最后一个点就在车身上（闭环路线很常见），它 20 ms 内就判"已到达"，
+        # 整条路线被跳过。这种情况下改成逐段执行（每段都是真实目标），
+        # 保证顺序走完；终点离得远时仍用 through-poses（途经点不停车）。
+        tail_gap = math.hypot(pts[-1][0] - rx, pts[-1][1] - ry)
+        if tail_gap < 1.0:
+            self._multi_points = None
+            self._fixed_goals = pts
+            self._fixed_goal = pts[0]
+            self._sm.start_fixed(legs=len(pts))
+            self.get_logger().warn(
+                '终点距车仅 %.2f m（闭环路线）→ 改为逐段执行 %d 段，'
+                '否则 goal checker 会立刻判到达' % (tail_gap, len(pts)))
+            response.accepted = True
+            response.reason = f'ok: {len(pts)} points (sequential, tail gap {tail_gap:.2f} m)'
+            return response
         self._fixed_goals = None
         self._fixed_goal = None
         self._multi_points = pts
-        self._status = 'idle'
-        self._trial_started = now
         self._sm.start_fixed(legs=1)
         response.accepted = True
         response.reason = f'ok: {len(pts)} points'
