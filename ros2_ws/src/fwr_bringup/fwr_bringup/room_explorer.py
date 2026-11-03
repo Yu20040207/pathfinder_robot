@@ -479,7 +479,15 @@ class RoomExplorer(Node):
         hi = float(self.get_parameter('goal_max_m').value)
         sel = np.where((dist >= lo) & (dist <= hi))[0]
         if len(sel) == 0:
-            sel = np.argsort(dist)[:20]
+            # 2026-11-03 修"卡在门口出不去"：原来直接退化成"选最近的 20 个"，
+            # 结果挑到距车 0.2 m 的前沿 → Nav2 认为已在终点，速度恒 0，
+            # 车原地不动、探索器又反复派同一个点，形成死循环。
+            # 现在兜底也要求至少 min_goal_m 远，实在没有就本 tick 不派。
+            far = np.where(dist >= 0.5)[0]
+            if len(far) == 0:
+                self._skip(f'frontier-too-close min={dist.min():.2f}m')
+                return
+            sel = far
         # 房间内优先：选距离分位数 30% 的点，避免总奔最远
         order = sel[np.argsort(dist[sel])]
         idx = int(order[min(len(order) - 1, max(0, int(len(order) * 0.3)))])
