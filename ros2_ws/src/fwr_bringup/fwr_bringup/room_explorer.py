@@ -90,7 +90,6 @@ class RoomExplorer(Node):
         # 2026-11-03（用户思路）：等 initial_spin 转完一圈再接管，不用固定延迟。
         self.declare_parameter('wait_for_spin', True)
         self._spin_done = not bool(self.get_parameter('wait_for_spin').value)
-        from rclpy.qos import DurabilityPolicy, QoSProfile
         self.create_subscription(
             Bool, '/mapping/spin_done', self._on_spin_done,
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))

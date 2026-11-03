@@ -17,10 +17,9 @@ from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
 from rcl_interfaces.srv import SetParameters
 from rcl_interfaces.msg import Parameter, ParameterType
-from rclpy.qos import QoSProfile, ReliabilityPolicy
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import Odometry
-import math
 
 
 class AutoMappingSupervisor(Node):
@@ -68,7 +67,6 @@ class AutoMappingSupervisor(Node):
         # 否则它 15 s 后自己开门转向，会和自转抢控制权。
         self.declare_parameter('wait_for_spin', True)
         self._spin_done = not bool(self.get_parameter('wait_for_spin').value)
-        from rclpy.qos import DurabilityPolicy
         self.create_subscription(
             Bool, '/mapping/spin_done', self._on_spin_done,
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
