@@ -264,7 +264,11 @@ local_costmap:
         # 否则规划器无法从致命格起步，报"规划失败（找不到路径）"。
         footprint_clearing_enabled: true
       always_send_full_costmap: true
-      footprint_padding: 0.02
+      # 2026-11-03（自动建图过门仍贴门框）：膨胀加到 0.50 后还贴边，
+      # 再把 footprint 加厚 5 cm（车体半宽 0.215 + 0.05 = 0.265），
+      # 规划器会把它当更宽的车，路径进一步推向门洞中间。
+      # 比继续加 inflation 安全：不影响门洞的通行判定。
+      footprint_padding: 0.05
 global_costmap:
   global_costmap:
     ros__parameters:
@@ -347,7 +351,11 @@ global_costmap:
         # 实测路径离墙只有 0.18 m。回到 2.0，让 0.40 m 缓冲带整体保持高代价。
         cost_scaling_factor: 1.2
       always_send_full_costmap: true
-      footprint_padding: 0.02
+      # 2026-11-03（自动建图过门仍贴门框）：膨胀加到 0.50 后还贴边，
+      # 再把 footprint 加厚 5 cm（车体半宽 0.215 + 0.05 = 0.265），
+      # 规划器会把它当更宽的车，路径进一步推向门洞中间。
+      # 比继续加 inflation 安全：不影响门洞的通行判定。
+      footprint_padding: 0.05
 planner_server:
   ros__parameters:
     expected_planner_frequency: 20.0
