@@ -48,7 +48,13 @@ def generate_launch_description():
         # 把机器人脚下涂成空闲再给探索器（见节点 docstring）
         Node(package='fwr_bringup', executable='map_free_around_robot',
              name='map_free_around_robot', output='screen',
-             parameters=[{'use_sim_time': use_sim_time}]),
+             parameters=[{'use_sim_time': use_sim_time,
+                          # 2026-11-03：关掉探索器自己的"短退脱困"。
+                          # 它需要 /explore/state='reversing' 才允许后退，但监督器每
+                          # 50 ms 就把 state 覆盖成 navigating → 脱困永远退不出去，
+                          # 期间 manual_enabled 卡在 True → 自动链路被门控永久封锁。
+                          # Nav2 自身有恢复行为，不需要这套。
+                          'escape_after_failures': 9999}]),
         # 前沿探索（2026-10-31 换成 frontier_exploration_ros2）：
         # 比 explore_lite 强的地方：MRTSP 目标排序（不在原地折返）、
         # 支持非 360° 雷达、前沿抑制（门进不去就不反复撞）、自带完成事件。
