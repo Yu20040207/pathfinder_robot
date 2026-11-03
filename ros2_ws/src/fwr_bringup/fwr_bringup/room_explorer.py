@@ -167,7 +167,12 @@ class RoomExplorer(Node):
         y0d, y1d = max(0, cy - r_dead), min(h, cy + r_dead + 1)
         x0d, x1d = max(0, cx - r_dead), min(w, cx + r_dead + 1)
         patch = data[y0d:y1d, x0d:x1d]
-        if int((patch == 0).sum()) < int(self.get_parameter('dead_end_min_free').value):
+        # 2026-11-03 修：原来只数"代价恰好 0"的格子。inflation_radius 0.48 让墙边
+        # 大片区域的代价都 > 0，于是几乎所有前沿都被判成死胡同
+        # （实测同一目标连续 73 次"不可通行" → 永不派目标 → 车彻底不动）。
+        # 改为数"非致命格"（cost < 99），这才是可通行的净空。
+        free_cells = int((patch < 99).sum())
+        if free_cells < int(self.get_parameter('dead_end_min_free').value):
             return None
         best = None
         best_d = 1e9
