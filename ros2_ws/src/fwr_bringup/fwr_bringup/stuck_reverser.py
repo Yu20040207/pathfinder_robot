@@ -36,6 +36,11 @@ class StuckReverser(Node):
         self.declare_parameter('max_back_s', 8.0)
         self.declare_parameter('release_s', 1.5)     # 交还后静默多久
         self.declare_parameter('cooldown_s', 6.0)    # 两次自救的最小间隔
+        # 2026-11-03（用户要求）：倒多远不看固定距离，看"左右转得开没有"。
+        # 雷达判到前方左右两侧都 >= turn_clear_m 就认为能转，立刻结束倒车。
+        self.declare_parameter('turn_clear_m', 0.90)  # 左右都要达到的净空
+        self.declare_parameter('max_back_m', 1.20)    # 硬上限，防止一直倒
+        self.declare_parameter('scan_topic', '/scan')
 
         self._raw_at = 0.0
         self._filt_at = 0.0
@@ -57,6 +62,12 @@ class StuckReverser(Node):
                                  self._on_filtered, 20)
         self.create_subscription(Bool, '/base/rear_blocked', self._on_rear, 10)
         self.create_subscription(Odometry, '/wheel/odom', self._on_odom, 20)
+        from sensor_msgs.msg import LaserScan
+        from rclpy.qos import qos_profile_sensor_data
+        self._scan = None
+        self.create_subscription(LaserScan,
+                                 str(self.get_parameter('scan_topic').value),
+                                 self._on_scan, qos_profile_sensor_data)
         self.create_timer(0.05, self._tick)
         self.get_logger().info('卡死自救已启动')
 
@@ -71,6 +82,32 @@ class StuckReverser(Node):
 
     def _on_rear(self, msg: Bool) -> None:
         self._rear_blocked = bool(msg.data)
+
+    def _on_scan(self, msg) -> None:
+        self._scan = msg
+
+    def _turn_clearance(self):
+        """返回 (左, 右) 前方净空，单位 m；没数据返回 None。
+
+        雷达倒装：扫描角 0° = 车尾，|angle| > 155° = 车头方向。
+        取车头前 120° 弧（150°~210°），左半 150~180、右半 180~210。
+        """
+        m = self._scan
+        if m is None:
+            return None
+        import math as _math
+        left = right = None
+        for i, r in enumerate(m.ranges):
+            if not (0.05 < r < 3.5):
+                continue
+            a = _math.degrees(m.angle_min + i * m.angle_increment) % 360.0
+            if 150.0 <= a < 180.0:
+                left = r if left is None else min(left, r)
+            elif 180.0 <= a <= 210.0:
+                right = r if right is None else min(right, r)
+        if left is None or right is None:
+            return None
+        return (left, right)
 
     def _on_odom(self, msg: Odometry) -> None:
         p = msg.pose.pose.position
@@ -111,7 +148,12 @@ class StuckReverser(Node):
             if self._origin and self._pos:
                 moved = math.hypot(self._pos[0] - self._origin[0],
                                    self._pos[1] - self._origin[1])
-            done = (moved >= float(self.get_parameter('back_m').value) or
+            clear = self._turn_clearance()
+            room = (clear is not None and
+                    min(clear) >= float(self.get_parameter('turn_clear_m').value))
+            cap = max(float(self.get_parameter('back_m').value),
+                      float(self.get_parameter('max_back_m').value))
+            done = (room or moved >= cap or
                     now - self._state_at >= float(self.get_parameter('max_back_s').value) or
                     self._rear_blocked)
             if done:
@@ -119,7 +161,11 @@ class StuckReverser(Node):
                 self._set_manual(False)
                 self._state = 'releasing'
                 self._state_at = now
-                self.get_logger().info(f'倒车结束（{moved:.2f} m），交还导航')
+                why = ('左右已够转' if room else
+                       '车尾被挡' if self._rear_blocked else '到上限')
+                clr = f' 左右净空 {clear[0]:.2f}/{clear[1]:.2f} m' if clear else ''
+                self.get_logger().info(
+                    f'倒车结束（{moved:.2f} m，{why}{clr}），交还导航')
                 return
             cmd = Twist()
             cmd.linear.x = -abs(float(self.get_parameter('back_speed_mps').value))
