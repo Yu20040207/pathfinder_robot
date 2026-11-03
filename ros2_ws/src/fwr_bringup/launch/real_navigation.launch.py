@@ -29,7 +29,7 @@ def generate_launch_description():
             # 2026-11-03 多点导航：穿过多个点用独立的 BT（ComputePathThroughPoses）。
             # 不指定的话 nav2 会用官方默认 BT，而它依赖 /backup 动作，我们没启用 →
             # 目标 2 ms 就失败（同一个坑 2026-11-02 已经踩过一次）。
-            'default_navigate_through_poses_bt_xml': str(
+            'default_nav_through_poses_bt_xml': str(
                 share / 'behavior_trees' / 'real_navigate_through_poses.xml'),
         },
         convert_types=True,
