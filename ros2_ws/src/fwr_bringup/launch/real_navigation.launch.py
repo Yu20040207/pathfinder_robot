@@ -123,6 +123,9 @@ def generate_launch_description():
              parameters=[{'use_sim_time': use_sim_time}]),
         Node(package='fwr_bringup', executable='directional_safety_selector',
              name='directional_safety_selector', output='screen',
+             # 2026-11-03：把判定原因打出来。以前它静默把指令清零，
+             # 只能靠逐级抓话题才定位到是它在拦。
+             additional_env={'FWR_SELECTOR_DEBUG': '1'},
              parameters=[{'use_sim_time': use_sim_time, 'scan_topic': '/scan'}]),
         Node(package='nav2_collision_monitor', executable='collision_monitor',
              name='collision_monitor_forward', output='screen',
