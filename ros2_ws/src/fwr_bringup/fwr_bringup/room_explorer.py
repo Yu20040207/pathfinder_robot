@@ -141,9 +141,10 @@ class RoomExplorer(Node):
     def _on_costmap(self, msg: OccupancyGrid) -> None:
         self._costmap = msg
 
-    # 2026-11-03：8 格(0.4 m) 在墙脚不够 —— 目标周围全被膨胀覆盖 → None → 拉黑，
-    # 形成"连续失败 → 脱困 → 再失败"的循环。加到 16 格(0.8 m)。
-    def _goal_traversable(self, x: float, y: float, radius_cells: int = 16):
+    # 2026-11-03：8 格(0.4 m) 在墙脚不够 → 加到 16 格(0.8 m)；
+    # 门口处仍然找不到（前沿全在窄处）→ 再放到 24 格(1.2 m)，
+    # 并且**找不到就回退用前沿点本身**，不再直接拉黑（拉黑会形成死循环）。
+    def _goal_traversable(self, x: float, y: float, radius_cells: int = 24):
         """在全局代价地图上找目标附近可通行的点；找不到返回 None。
 
         2026-11-01 修正：前沿点天生就在"已知/未知"边界上，紧贴障碍 →
@@ -181,7 +182,9 @@ class RoomExplorer(Node):
                 if d < best_d:
                     best_d = d
                     best = (ox + nx * res, oy + ny * res)
-        return best
+        # 找不到合法落点时交给 Nav2 去试（它有 15 s 超时会换目标），
+        # 直接返回 None 会让探索器连续拉黑、彻底停摆。
+        return best if best is not None else (x, y)
 
     def _on_mapping_run(self, msg: Bool) -> None:
         if msg.data == self._running:
