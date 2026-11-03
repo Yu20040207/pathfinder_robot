@@ -323,6 +323,16 @@ class RoomExplorer(Node):
     def _tick(self) -> None:
         m = self._map
         robot = self._robot_xy()
+        # 2026-11-03：诊断日志 —— 之前它静默不干活，看不出卡在哪。
+        if not hasattr(self, '_dbg_at'):
+            self._dbg_at = 0.0
+        now_dbg = self.get_clock().now().nanoseconds * 1e-9
+        if now_dbg - self._dbg_at > 3.0:
+            self._dbg_at = now_dbg
+            self.get_logger().info(
+                f'[diag] map={"无" if m is None else str(m.info.width)+"x"+str(m.info.height)} '
+                f'robot={"无" if robot is None else (round(robot[0],2), round(robot[1],2))} '
+                f'map_age={round(now_dbg - self._map_at,1) if self._map_at else "?"}s')
         if m is None or robot is None:
             return
         now = self.get_clock().now().nanoseconds * 1e-9
