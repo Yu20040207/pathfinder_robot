@@ -23,6 +23,7 @@ from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import LaserScan
 from rcl_interfaces.msg import Parameter, ParameterType
 from rcl_interfaces.srv import SetParameters
+from std_msgs.msg import Bool
 from std_srvs.srv import Trigger
 
 
@@ -46,6 +47,12 @@ class InitialSpin(Node):
         self.create_subscription(LaserScan, '/scan', self._on_scan,
                                  qos_profile_sensor_data)
         self.create_subscription(Odometry, '/odom', self._on_odom, 20)
+        # 2026-11-03（用户思路）：转完就把控制权交给探索器 —— 用**事件**而不是
+        # 固定延迟。做 transient_local，后启动的探索器也能立刻收到。
+        from rclpy.qos import DurabilityPolicy, QoSProfile
+        self._done_pub = self.create_publisher(
+            Bool, '/mapping/spin_done',
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self._explore = self.create_client(Trigger, '/explore/start')
         self._params = self.create_client(SetParameters,
                                           '/base_bridge/set_parameters')
@@ -117,6 +124,9 @@ class InitialSpin(Node):
             self._pub.publish(Twist())    # 停
             self._done = True
             self._set_bool('manual_enabled', False)   # 交还自动通道
+            msg = Bool()
+            msg.data = True
+            self._done_pub.publish(msg)               # 通知探索器可以接管
             self.get_logger().info(f'自转结束（{stop_reason}）')
             if (bool(self.get_parameter('start_explorer_when_done').value)
                     and self._explore.service_is_ready()):
