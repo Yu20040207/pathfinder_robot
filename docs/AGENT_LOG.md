@@ -4602,3 +4602,35 @@ xy_goal_tolerance 0.4 / local_costmap 无 range_layer
 - `footprint_padding 0.05`：inscribed 半径变大 → 候选落点全 99 → 拉黑风暴 → 车完全不动。回到 0.02。
 - `inflation_radius 0.50`：同样让墙边全 99。回到 0.48。
   **结论：想"过门更居中"不能靠加膨胀/padding**，会先让探索器无点可派。
+
+### 15:55 · 又卡住：两条隐藏的"自杀"路径
+
+#### A. 硬编码的脱困触发绕过参数
+`room_explorer` 里有**两处**脱困触发：
+```python
+# ① 正常路径，受 escape_after_failures 控制
+if self._fail_count >= int(self.get_parameter('escape_after_failures').value): ...
+# ② 2026-10-31 加的：连续 3 次不可通行
+if self._skip_streak >= 3:            # ← 硬编码，参数管不到
+    self._start_escape(now)           #    → _set_manual(True)
+```
+第二条一旦触发就开手动模式 → `auto_command_gate` 把自动指令全部清零 →
+**车彻底停住**，而日志里只有"连续拉黑"看不出因果。
+修复：阈值也取 `escape_after_failures`（设 9999 即彻底关闭）。
+
+#### B. 死胡同判定只数"代价恰好 0"的格子
+```python
+if (patch == 0).sum() < dead_end_min_free:   # 旧
+    return None
+```
+`inflation_radius 0.48` 让墙边大片区域代价 >0，于是**几乎每个前沿**都被判死胡同：
+实测同一目标 **连续 73 次"不可通行"** → 永不派目标 → 无 `/plan`、地图不增长、车不动。
+修复：改为数**非致命格**（`cost < 99`），这才代表可通行的净空。
+
+#### 验证（60 秒实测）
+```
+不可通行跳过 73 次 → 0 次
+脱困 0 次，manual_enabled 0/70 True（不再卡手动模式）
+前进 42.9%  原地转 26.3%  静止 30.8%
+/plan 8 次  位移 4.03 m  地图 +6306
+```
