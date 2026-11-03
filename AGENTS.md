@@ -105,7 +105,8 @@
 | `auto_initial_pose.max_score_m` | 0.15 | 0.10 会拒绝 0.127 m 的正常匹配 |
 
 **控制 / 行为树（v1.0 定版）**
-- `angular_dist_threshold` **0.35**（RotationShim 转向阈值）
+- `angular_dist_threshold` **0.6**（RotationShim 转向阈值；0.35 时门口
+  每个弯都停下原地转，实测 150 s 内 4 次线速度归零 → 门口"特别慢"）
 - `use_velocity_scaled_lookahead_dist` **true**
 - BT `RateController` **0.5 Hz**（⚠️ 1 Hz 时远处目标要 1040 ms 规划，
   刚算完就被取消 → "点开始就结束"）
@@ -130,7 +131,8 @@
 
 **碰撞监控 / 代价地图（2026-11-02 最终）**
 - `front_stop` 深度 **0.32~0.38**（半宽 0.24，3 点触发）—— 浅于 0.30 会撞
-- `front_slow` 横向 **±0.22**、`max_points 3`、`slowdown_ratio 0.8`
+- `front_slow` 横向 **±0.22**、深度 **0.30~0.50**、`max_points 3`、`slowdown_ratio 0.8`
+  （深度 0.75 时穿过门会扫到"对面门框"→ 持续扣 20% 速度）
   （±0.30 / 1 点时会因侧墙和门框误触发，一次跑动 7 次）
 - `local_costmap.plugins = [obstacle_layer, inflation_layer]`
 - `footprint_padding 0.02`
