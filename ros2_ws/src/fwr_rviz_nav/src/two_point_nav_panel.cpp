@@ -523,50 +523,6 @@ private:
       add_marker(*points_.start(), 0, 0.1f, 0.9f, 0.2f);
     }
     if (points_.goal()) {add_marker(*points_.goal(), 1, 0.9f, 0.15f, 0.1f);}
-
-    // 2026-11-03（用户需求）：给导航点加"方向指示"箭头。
-    // 目标朝向和真正下发目标时用的一致：从当前位置指向目标点
-    // （two_point_nav_panel 里 request->yaw = atan2(dy, dx)），
-    // 双点模式下起点处的朝向则是"起点 → 终点"方向。
-    auto add_arrow = [&](double x, double y, double yaw, int id) {
-      visualization_msgs::msg::Marker arrow;
-      arrow.header.frame_id = "map";
-      arrow.header.stamp = node_->now();
-      arrow.ns = "two_point_direction";
-      arrow.id = id;
-      arrow.type = visualization_msgs::msg::Marker::ARROW;
-      arrow.action = visualization_msgs::msg::Marker::ADD;
-      arrow.pose.position.x = x;
-      arrow.pose.position.y = y;
-      arrow.pose.position.z = 0.14;
-      arrow.pose.orientation.z = std::sin(yaw * 0.5);
-      arrow.pose.orientation.w = std::cos(yaw * 0.5);
-      arrow.scale.x = 0.55;   // 箭杆长度
-      arrow.scale.y = 0.09;   // 箭杆粗细
-      arrow.scale.z = 0.14;   // 箭头大小
-      arrow.color.a = 1.0f;
-      arrow.color.r = 1.0f;
-      arrow.color.g = 0.85f;
-      arrow.color.b = 0.1f;
-      markers.markers.push_back(arrow);
-    };
-    const auto here = current_map_pose();
-    if (points_.goal()) {
-      // 终点朝向：从当前位置（或起点）指向终点的方向
-      double from_x = here ? here->x : 0.0;
-      double from_y = here ? here->y : 0.0;
-      if (points_.two_point() && points_.start()) {
-        from_x = points_.start()->x;
-        from_y = points_.start()->y;
-      }
-      const double yaw = std::atan2(points_.goal()->y - from_y,
-                                    points_.goal()->x - from_x);
-      add_arrow(points_.goal()->x, points_.goal()->y, yaw, 10);
-      if (points_.two_point() && points_.start()) {
-        // 起点处的朝向同样指向终点（车到起点后会转向这个方向）
-        add_arrow(points_.start()->x, points_.start()->y, yaw, 11);
-      }
-    }
     marker_pub_->publish(markers);
   }
 
