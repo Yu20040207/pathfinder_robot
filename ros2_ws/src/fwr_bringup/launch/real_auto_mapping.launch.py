@@ -54,7 +54,10 @@ def generate_launch_description():
                           # 50 ms 就把 state 覆盖成 navigating → 脱困永远退不出去，
                           # 期间 manual_enabled 卡在 True → 自动链路被门控永久封锁。
                           # Nav2 自身有恢复行为，不需要这套。
-                          'escape_after_failures': 9999}]),
+                          'escape_after_failures': 9999,
+                          # 2026-11-03：决策周期 3 s 太长 —— 实测每段静止
+                          # 1.9~2.7 s 就是在等它下一次 tick（占 18% 时间）。
+                          'replan_s': 1.5}]),
         # 前沿探索（2026-10-31 换成 frontier_exploration_ros2）：
         # 比 explore_lite 强的地方：MRTSP 目标排序（不在原地折返）、
         # 支持非 360° 雷达、前沿抑制（门进不去就不反复撞）、自带完成事件。
