@@ -548,7 +548,11 @@ class RoomExplorer(Node):
                 self._last_log = now
             # 2026-10-31：连续 3 次都不可通行 = 车被堵在死角，
             # 光跳过永远不会触发脱困 → 主动后退。
-            if self._skip_streak >= 3:
+            # 2026-11-03：这里原来是硬编码 3，绕过了 escape_after_failures 参数。
+            # 脱困会 _set_manual(True) → 自动链路被门控清零 → 车彻底停住。
+            # 改成也服从同一个参数（设 9999 即彻底关闭）。
+            if self._skip_streak >= int(
+                    self.get_parameter('escape_after_failures').value):
                 self.get_logger().warn(
                     f'连续 {self._skip_streak} 个目标都不可通行，车可能被堵 → 脱困')
                 self._skip_streak = 0
