@@ -4704,3 +4704,45 @@ else:
 - 运行时：三个服务（fixed/two_point/multi_point）+ `/navigate_through_poses` 均在位；
   未武装时正确返回 `preflight failed: arm`
 - **未验证：实车跑 3 个点以上**（需要现场点击）
+
+## 2026-11-03 17:50 · 收工：v1.3 定版（多点导航跑通，参数冻结）
+
+### 会话目标
+1. 用上午的地图跑一次导航并解决"一卡一卡"
+2. 开发多点导航（起点 + 多个途经点 + 终点，途经不停车）
+
+### 仓库改动
+- **新增** `fwr_interfaces/srv/StartMultiPointGoal.srv`
+- **新增** `behavior_trees/real_navigate_through_poses.xml`（`ComputePathThroughPoses`）
+- `frontier_explorer.py`：`/explore/start_multi_point_goal` + `NavigateThroughPoses` 派发；
+  终点距车 <1 m 的闭环自动改逐段执行；单点/两点启动时清空多点状态
+- `two_point_nav_panel.cpp`：点集合改 vector 追加、≥3 点走多点服务、
+  预览用 `compute_path_through_poses` 画出穿过所有途经点的完整折线、
+  标记按 起点绿/途经黄/终点红 绘制
+- `point_selection.hpp`：改为多点容器（1 点=单点、2 点=两点、≥3 点=多点）
+- `directional_safety_selector.py`：**修 `_sector_min` 左右分支相同**的 bug
+- `directional_safety_core.py`：**修 ω 符号抖动导致整帧归零**（前进行驶只归零转向）
+- `real_navigation.launch.py`：`FWR_SELECTOR_DEBUG`、`default_nav_through_poses_bt_xml`
+- `real_nav2.yaml` / `real_navigate_to_pose.xml`：**回退到 v1.2**
+- 测试：`test_point_selection.cpp` 更新为多点契约
+
+### 已验证（命令 + 结果）
+- `colcon build`（interfaces / bringup / rviz_nav）全部通过
+- C++ 15 项测试全过：`colcon test --packages-select fwr_rviz_nav` → 0 errors 0 failures
+- Python 239 项全过
+- **实车**：多点导航（8 点闭环）跑通；安全链拒绝帧 38 → 0；两次目标连续 succeeded
+
+### 未验证 / 遗留
+- `auto_initial_pose` 的 checkpoint 失配后会退回全局搜索，可能定位到错误位置
+  （今天多次出现，是"目标规划失败"的隐蔽根因）
+- 里程计标度疑点（`/cmd_vel` 均值 vs `/odom` 均值矛盾）仍未做卷尺标定
+- **明天的任务：靠近门口速度慢**
+
+### 当前运行状态
+- 导航栈运行中（地图 `real_map_manual_1101`），RViz 使用 `real_localization.rviz`
+- 已打标签 **v1.3**，参数冻结，未获用户同意不得改动
+
+### 下一步
+按用户要求先不改参数；明天开工直接查"门口减速"：
+先抓 `/cmd_vel_nav`（控制器输出）在门口的实际数值，再对比 `/cmd_vel`（平滑器后）
+和 `/cmd_vel_auto_safe`（安全链后），确定是哪一层在限速，然后一次只改一个参数。

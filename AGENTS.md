@@ -159,6 +159,42 @@
 > 2026-11-02 一起改（0.35→0.7、true→false、0.48→0.50、3→6）后出现
 > **起步即原地来回转**；全部回退后立刻恢复正常。改一个、跑一次，再动下一个。
 
+## 3.95 ⭐ v1.3 冻结快照（2026-11-03 收工，**用户要求：先不要改动**）
+
+明天开工先读这一节。**除用户明确要求外，下面这些值一个都不要动。**
+
+### 导航（`config/real_nav2.yaml`，实际运行值）
+| 参数 | 值 |
+| --- | --- |
+| `FollowPath.desired_linear_vel` | **0.20** |
+| `FollowPath.angular_dist_threshold` | **0.6** |
+| `FollowPath.lookahead_dist` / `min` / `max` | **0.60 / 0.40 / 0.85** |
+| `use_velocity_scaled_lookahead_dist` | true |
+| `inflation_radius`（全局/局部） | **0.48** |
+| `footprint_padding` | **0.02** |
+| `cost_scaling_factor` | 1.2 |
+| `xy_goal_tolerance` | 0.4 |
+| velocity_smoother `max_velocity` | **[0.20, 0.0, 1.0]** |
+| velocity_smoother `max_accel` | **[0.35, 0.0, 4.0]** |
+| BT `RateController` | **0.5 Hz** |
+
+### 底盘
+- `base_bridge.wheel_speed_scale` = **0.66**
+
+### 今天修好并冻结的行为
+- 安全链：左右扇区不再取同一个值；ω 符号抖动只归零转向、保留前进
+- 单点 / 两点 / **多点导航**（多点用 `NavigateThroughPoses`，途经点不停车；
+  终点距车 <1 m 的闭环自动改逐段执行）
+- 多点预览画出穿过所有途经点的完整折线
+
+### 明天的任务（用户指定）
+**解决"靠近门口速度慢"**。已知相关信息：
+- `front_slow` 参数（横向 ±0.22、深度 0.30~0.50、`slowdown_ratio 0.8`）
+- `approach_velocity_scaling_dist`（默认 0.6，**未显式设置**）
+- RPP 的曲率限速（转弯时 0.06~0.15）
+- 排查顺序：先看 `/cmd_vel_nav` 在门口的实际数值 vs `/cmd_vel`，确认是哪一层在降速
+  （控制器自身 / 平滑器 / collision_monitor 的 slowdown），再动参数。**一次只改一个。**
+
 ### ⚠️ 建图调参禁止修改导航共用文件（2026-11-03 血的教训）
 
 `real_nav2.yaml` 和 `real_navigate_to_pose.xml` 是**导航与建图共用**的。
