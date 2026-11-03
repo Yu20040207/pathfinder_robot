@@ -75,7 +75,10 @@ def generate_launch_description():
         # RViz：显示地图 / 激光 / 规划路径 / 沿墙规划 / 录制路线
         Node(package='rviz2', executable='rviz2', name='rviz2', output='log',
              condition=IfCondition(LaunchConfiguration('start_rviz')),
-             arguments=['-d', str(share / 'config' / 'real_localization.rviz')]),
+             # 2026-11-03 修：建图必须用 real_mapping.rviz。
+             # real_localization.rviz 里的 Map Edit 面板会持续重发一张旧 /map，
+             # 和 slam 的新地图交替刷屏 → 地图尺寸来回跳、看着像"不长"。
+             arguments=['-d', str(share / 'config' / 'real_mapping.rviz')]),
         # 卡死自救：前停区持续拦截且车尾空旷时，主动倒 0.4 m 再交还导航。
         # （脱困原来要等两次目标失败，现场表现为长时间卡死）
         Node(package='fwr_bringup', executable='stuck_reverser',
