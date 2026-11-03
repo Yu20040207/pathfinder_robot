@@ -25,6 +25,7 @@ import tty
 
 import rclpy
 from rclpy.node import Node
+from std_msgs.msg import String
 from sensor_msgs.msg import Range
 from std_msgs.msg import String
 
@@ -131,6 +132,12 @@ class UltrasonicRear(Node):
         self.declare_parameter('baud', 9600)
         self.declare_parameter('slave_id', 1)
         self.declare_parameter('poll_hz', 6.0)
+        # 2026-11-03（用户要求）：只有**需要倒车时**才轮询，其余时间串口静默。
+        # 触发信号用现有的 `/explore/state == 'reversing'`，与倒车链路一致。
+        # 关闭轮询时 rear_guard 因数据过期走 fail_safe_block=True → 禁止后退，
+        # 所以"静默=禁止倒车"是安全的；进入 reversing 后 1 秒内数据恢复。
+        self.declare_parameter('idle_unless_reversing', True)
+        self.declare_parameter('state_topic', '/explore/state')
         self.declare_parameter('frame_timeout_s', 0.6)
         # 接口 1~4 对应的 frame 与安装位置（见 docs/hardware/rear-a22-ultrasonic-layout.md）
         self.declare_parameter('frames', [
@@ -176,12 +183,31 @@ class UltrasonicRear(Node):
         self.declare_parameter('max_bad_frames', 3)
         self._rtu = None
 
+        self._active = not bool(
+            self.get_parameter('idle_unless_reversing').value)
+        if bool(self.get_parameter('idle_unless_reversing').value):
+            self.create_subscription(
+                String, str(self.get_parameter('state_topic').value),
+                self._on_state, 10)
+
         period = 1.0 / max(0.5, float(self.get_parameter('poll_hz').value))
         self.create_timer(period, self._poll)
         self.create_timer(1.0, self._publish_status)
         self.get_logger().info(
             f'后向超声节点启动：{self.get_parameter("port").value} '
             f'@ {self.get_parameter("baud").value} 8N1，4 路 Range')
+
+    def _on_state(self, msg) -> None:
+        """只在探索器进入倒车时开始采样；离开立刻停。"""
+        want = (msg.data == 'reversing')
+        if want == self._active:
+            return
+        self._active = want
+        if want:
+            self.get_logger().info('进入倒车状态 → 开始轮询后向超声')
+            self._poll()          # 立刻取一帧，缩短"刚倒车时无数据"的空窗
+        else:
+            self.get_logger().info('离开倒车状态 → 停止轮询，串口静默')
 
     # ---------- 串口管理 ----------
     def _ensure_open(self) -> bool:
@@ -226,6 +252,8 @@ class UltrasonicRear(Node):
         return decode_distances(resp)
 
     def _poll(self) -> None:
+        if not self._active:
+            return
         if not self._ensure_open():
             return
         try:
@@ -270,6 +298,10 @@ class UltrasonicRear(Node):
             self._last_valid[i] = now_s
 
     def _publish_status(self) -> None:
+        # 2026-11-03：报告当前是否在采样（只在倒车时采样）
+        if not getattr(self, '_active', True):
+            self._status_pub.publish(String(data='idle(not reversing)'))
+            return
         now_s = self.get_clock().now().nanoseconds * 1e-9
         parts = []
         for i, frame in enumerate(self._frames):
