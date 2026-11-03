@@ -143,6 +143,8 @@ class RoomExplorer(Node):
         m = self._costmap
         if m is None:
             return (x, y)          # 还没代价地图，先放行
+        if self._goal_xy is not None:
+            self._skip('pending-goal')
         res = m.info.resolution
         ox, oy = m.info.origin.position.x, m.info.origin.position.y
         w, h = m.info.width, m.info.height
@@ -319,11 +321,19 @@ class RoomExplorer(Node):
             return validated
         return None
 
+    def _skip(self, why: str) -> None:
+        """诊断：记录 _tick 为什么没派出目标（3 秒节流）。"""
+        now = self.get_clock().now().nanoseconds * 1e-9
+        if now - getattr(self, '_skip_at', 0.0) > 3.0:
+            self._skip_at = now
+            self.get_logger().info(f'[skip] {why}')
+
     # ---------- 主循环 ----------
     def _tick(self) -> None:
         m = self._map
         robot = self._robot_xy()
         if m is None or robot is None:
+            self._skip('no-map-or-robot')
             return
         now = self.get_clock().now().nanoseconds * 1e-9
         # 2026-10-31：地图 5 秒没更新 = 建图已结束（按了停止按钮）或 Cartographer 挂了。
@@ -351,16 +361,20 @@ class RoomExplorer(Node):
             else:
                 return
 
+        if self._goal_xy is not None:
+            self._skip('pending-goal')
         res = m.info.resolution
         ox, oy = m.info.origin.position.x, m.info.origin.position.y
         w, h = m.info.width, m.info.height
         d = np.array(m.data, dtype=np.int16).reshape(h, w)
         free = d == 0
         if not free.any():
+            self._skip('all-unknown')
             return
         rx, ry = robot
         cxp, cyp = int((rx - ox) / res), int((ry - oy) / res)
         if not (0 <= cxp < w and 0 <= cyp < h):
+            self._skip(f'robot-outside-map ({cxp},{cyp}) size={w}x{h}')
             return
 
         # 1) 房间分割：腐蚀掉门洞宽度的一半 → 房间独立
@@ -394,6 +408,7 @@ class RoomExplorer(Node):
         cand = np.argwhere(in_room if (use_gate and in_room.any()) else frontier)
         free_area = float(free.sum()) * res * res
         if len(cand) == 0:
+            self._skip('no-frontier')
             # 地图刚起来时 free 很小、前沿为 0 是正常的，不能立刻判结束。
             if free_area < 5.0:
                 self._empty_count = 0
