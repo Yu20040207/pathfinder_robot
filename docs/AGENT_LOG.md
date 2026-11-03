@@ -4670,3 +4670,37 @@ else:
 - **同样的代码块出现在 if/else 两侧**是最隐蔽的一类 bug，用 `grep` 通读时几乎看不出来；
   发现"某个兜底逻辑从来没生效过"时，要怀疑参数根本没被用到。
 - 安全链的**拒绝语义**不能随便改（有单测守护），要在"保留安全语义"的前提下减少误杀。
+
+## 2026-11-03 17:30 · 新增多点导航（起点 + 多个途经点 + 终点）
+
+### 用户需求
+"点两下是起点和终点，改成：第一个是起始点，再点一个是第二个点，再点一个是第三个点，
+最后的是终点"；并要求**中间途经点也画连线**、途经点**只减速不停车**。
+
+### 交互规则（最终）
+| 点击次数 | 行为 |
+| --- | --- |
+| 1 次 | 单点导航（旧功能不变） |
+| 2 次 | 两点导航（v1.2 已验证流程不变） |
+| **3 次及以上** | 多点路线：第 1 点=起点、最后 1 点=终点、中间全是途经点 |
+| 继续点 | 继续追加，最后点的自动成为终点 |
+| 清除选择 | 全部清空 |
+
+### 实现（4 个文件 + 1 个新接口 + 1 个新行为树）
+1. `fwr_interfaces/srv/StartMultiPointGoal.srv`（新）：`float64[] xs, ys` → `bool accepted, string reason`
+2. `frontier_explorer`：新服务 `/explore/start_multi_point_goal`，逐点校验后用
+   **`NavigateThroughPoses`** 一次规划穿过全部点（途经点不停车）；
+   单点/两点启动时清除多点状态，避免互相干扰
+3. `behavior_trees/real_navigate_through_poses.xml`（新）：`ComputePathThroughPoses` 版本
+   —— **必须自定义**，官方默认 BT 依赖 `/backup` 动作，我们没启用，直接用会 2 ms 失败
+4. `two_point_nav_panel`：点集合改为 vector 追加；≥3 点走多点服务；
+   预览用 `compute_path_through_poses` **画出穿过所有途经点的完整折线**
+5. 标记：起点绿、途经点黄、终点红；标签显示「起点｜途经 N 个点」和「终点」
+
+### 验证
+- 编译：fwr_interfaces / fwr_bringup / fwr_rviz_nav 全部通过
+- C++ 15 项测试全过（含新增的多点规则测试 `ThirdAndFurtherClicksAppendToTheSameRoute`）
+- Python 239 项全过
+- 运行时：三个服务（fixed/two_point/multi_point）+ `/navigate_through_poses` 均在位；
+  未武装时正确返回 `preflight failed: arm`
+- **未验证：实车跑 3 个点以上**（需要现场点击）
