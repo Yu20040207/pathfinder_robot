@@ -422,10 +422,14 @@ private:
       status_label_->setText("base_bridge 参数服务不可用");
       return;
     }
+    // 2026-11-03 修"点开始建图没反应"：
+    // 原来把 manual_enabled 也一起打开，而 base_bridge / auto_command_gate 的规则是
+    // "manual_enabled=True 时自动链路被封锁" → Nav2 的指令全被清零，车不动。
+    // 建图/导航只需要 motion_enabled；手动通道留给探索器自己的脱困用。
     std::vector<rclcpp::Parameter> params{
       rclcpp::Parameter("motion_enabled", enabled),
-      rclcpp::Parameter("manual_enabled", enabled),
-      rclcpp::Parameter("manual_allow_mixed", enabled)};
+      rclcpp::Parameter("manual_enabled", false),
+      rclcpp::Parameter("manual_allow_mixed", false)};
     base_param_client_->set_parameters(params);
   }
 
