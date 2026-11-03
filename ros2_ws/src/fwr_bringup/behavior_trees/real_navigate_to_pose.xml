@@ -7,11 +7,7 @@
         <!-- 2026-11-02：实测规划到远处目标要 1040 ms，而 1 Hz 重规划每 1000 ms
              就取消上一次还没返回的规划 → 永远拿不到路径 → 目标立刻失败
              （现象："点开始就结束"）。降到 0.5 Hz，给规划 2 秒预算。 -->
-        <!-- 2026-11-03：0.5 Hz(2 s) 时 RotationShim 会与重规划打架 ——
-             新路径起始方向一变，shim 就朝反方向原地转，实测 25 秒内角速度
-             符号翻转 26 次、线速度恒 0（原地左右转）。放到 0.25 Hz 给 shim
-             4 秒完成"对准 + 起步"。 -->
-        <RateController hz="0.25">
+        <RateController hz="0.5">
           <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
         </RateController>
         <FollowPath path="{path}" controller_id="FollowPath"/>

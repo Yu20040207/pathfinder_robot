@@ -118,10 +118,7 @@ controller_server:
       # 底盘是**双驱动轮 + 万向轮**（URDF: left/right_drive_wheel + caster），
       # 无刮擦阻力，弧线过弯完全可行，因此放宽到 0.6 rad(34°)：
       # 只有大偏差（接近反向）才停下原地对准。
-      # 2026-11-03（自动建图原地转占 66%）：1.2 仍然频繁接管。
-      # 本车是双驱动轮 + 万向轮，弧线转弯无阻力，直接放到 π = **永不平移转向**，
-      # 完全交给 RPP 边走边转。若出现路径左右徘徊再回退到 1.2。
-      angular_dist_threshold: 3.1416
+      angular_dist_threshold: 0.6
       forward_sampling_distance: 0.30
       # 2026-10-31 减少重影：雷达 10 Hz 扫一圈 0.1 s，
       # 0.8 rad/s 时车每帧转 4.6°，转角处点云被拉斜 → 同一面墙出现双线。
@@ -152,10 +149,8 @@ controller_server:
       # 打开速度自适应前视：0.10 m/s 巡航时前视约 0.30~0.45 m，转弯更贴合路径。
       # 前视距离加长：0.45→0.60（下限 0.30→0.40）。
       # 前视太短会"追着车轮跑"，一点点偏差就大幅打方向 → 左右摆。
-      # 2026-11-03（自动建图过门擦边）：0.60 m 前视太远，RPP 会切内弯、
-      # 贴着门框过去。收到 0.45 m 跟线更紧。
-      lookahead_dist: 0.45
-      min_lookahead_dist: 0.32
+      lookahead_dist: 0.60
+      min_lookahead_dist: 0.40
       max_lookahead_dist: 0.85
       # 曲率越大线速度越低（转弯自动减速），配合下面的平滑器实现"丝滑"切换
       # 2026-11-02 回退：开启后控制器每帧 abort、/cmd_vel 无输出（车不动）。
@@ -182,10 +177,6 @@ controller_server:
       # 真实障碍由 collision_monitor（原始雷达，30-45 cm 停车区）兜底，关掉 RPP 的重复判定。
       use_collision_detection: false
       max_allowed_time_to_collision_up_to_carrot: 1.5
-      # 2026-11-03（自动建图线速度只有 0.054、目标仅 1 m 远）：
-      # RPP 默认"接近减速区"0.6 m，而前沿目标普遍只 1~1.4 m →
-      # 全程都在减速区里，永远到不了 0.15 巡航速度。缩到 0.25 m。
-      approach_velocity_scaling_dist: 0.25
       min_approach_linear_velocity: 0.05
       transform_tolerance: 0.2
 local_costmap:
@@ -229,8 +220,6 @@ local_costmap:
         # inflation_radius 只影响**代价梯度**，不封路，所以调大是安全的。
         # 0.30 只比车体内切半径 0.215 多一点，路径没有空间离开墙。
         # 提到 0.45：路径会主动保持在墙 0.3~0.4 m 外，门洞照样能过。
-        # 2026-11-03 回退：0.50 会让墙边候选落点全部 cost>=99，
-        # 探索器连续拉黑目标 → 车不走。回到 0.48（两点导航也用它）。
         inflation_radius: 0.48
         # 2026-10-30：cost_scaling_factor 3.0 时代价衰减太快，缓冲区形同虚设；
         # 降到 2.0 让 0.30 m 缓冲带整体保持高代价，规划器才会绕开。
@@ -264,8 +253,6 @@ local_costmap:
         # 否则规划器无法从致命格起步，报"规划失败（找不到路径）"。
         footprint_clearing_enabled: true
       always_send_full_costmap: true
-      # 2026-11-03 回退：0.05 会让 inscribed 半径变大，探索器的候选落点
-      # （墙边 0.8 m 内找 cost<99）全部被判不可通行 → 目标被连续拉黑 → 车不动。
       footprint_padding: 0.02
 global_costmap:
   global_costmap:
@@ -340,8 +327,6 @@ global_costmap:
         # inflation_radius 只影响**代价梯度**，不封路，所以调大是安全的。
         # 0.30 只比车体内切半径 0.215 多一点，路径没有空间离开墙。
         # 提到 0.45：路径会主动保持在墙 0.3~0.4 m 外，门洞照样能过。
-        # 2026-11-03 回退：0.50 会让墙边候选落点全部 cost>=99，
-        # 探索器连续拉黑目标 → 车不走。回到 0.48（两点导航也用它）。
         inflation_radius: 0.48
         # 2026-10-30：cost_scaling_factor 3.0 时代价衰减太快，缓冲区形同虚设；
         # 降到 2.0 让 0.30 m 缓冲带整体保持高代价，规划器才会绕开。
@@ -349,8 +334,6 @@ global_costmap:
         # 实测路径离墙只有 0.18 m。回到 2.0，让 0.40 m 缓冲带整体保持高代价。
         cost_scaling_factor: 1.2
       always_send_full_costmap: true
-      # 2026-11-03 回退：0.05 会让 inscribed 半径变大，探索器的候选落点
-      # （墙边 0.8 m 内找 cost<99）全部被判不可通行 → 目标被连续拉黑 → 车不动。
       footprint_padding: 0.02
 planner_server:
   ros__parameters:
