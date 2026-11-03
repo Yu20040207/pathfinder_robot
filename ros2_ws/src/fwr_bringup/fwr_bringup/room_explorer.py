@@ -319,29 +319,11 @@ class RoomExplorer(Node):
             return validated
         return None
 
-    def _skip(self, why: str) -> None:
-        """诊断：记录 _tick 为什么没派出目标（3 秒节流）。"""
-        now = self.get_clock().now().nanoseconds * 1e-9
-        if now - getattr(self, '_skip_at', 0.0) > 3.0:
-            self._skip_at = now
-            self.get_logger().info(f'[skip] {why}')
-
     # ---------- 主循环 ----------
     def _tick(self) -> None:
         m = self._map
         robot = self._robot_xy()
-        # 2026-11-03：诊断日志 —— 之前它静默不干活，看不出卡在哪。
-        if not hasattr(self, '_dbg_at'):
-            self._dbg_at = 0.0
-        now_dbg = self.get_clock().now().nanoseconds * 1e-9
-        if now_dbg - self._dbg_at > 3.0:
-            self._dbg_at = now_dbg
-            self.get_logger().info(
-                f'[diag] map={"无" if m is None else str(m.info.width)+"x"+str(m.info.height)} '
-                f'robot={"无" if robot is None else (round(robot[0],2), round(robot[1],2))} '
-                f'map_age={round(now_dbg - self._map_at,1) if self._map_at else "?"}s')
         if m is None or robot is None:
-            self._skip('no-map-or-robot')
             return
         now = self.get_clock().now().nanoseconds * 1e-9
         # 2026-10-31：地图 5 秒没更新 = 建图已结束（按了停止按钮）或 Cartographer 挂了。
@@ -358,7 +340,6 @@ class RoomExplorer(Node):
             self._run_escape(now)      # 注意：这里必须真的调用（原来写成 or 短路了）
             return
         # 目标还没走完就等
-        self._skip('has-pending-goal')
         if self._goal_xy is not None:
             if math.hypot(self._goal_xy[0] - robot[0],
                           self._goal_xy[1] - robot[1]) < float(
@@ -376,12 +357,10 @@ class RoomExplorer(Node):
         d = np.array(m.data, dtype=np.int16).reshape(h, w)
         free = d == 0
         if not free.any():
-            self._skip('all-unknown')
             return
         rx, ry = robot
         cxp, cyp = int((rx - ox) / res), int((ry - oy) / res)
         if not (0 <= cxp < w and 0 <= cyp < h):
-            self._skip(f'robot-outside-map grid=({cxp},{cyp}) size={w}x{h}')
             return
 
         # 1) 房间分割：腐蚀掉门洞宽度的一半 → 房间独立

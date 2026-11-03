@@ -17,7 +17,7 @@ from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
 from rcl_interfaces.srv import SetParameters
 from rcl_interfaces.msg import Parameter, ParameterType
-from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
+from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import LaserScan
 
 
@@ -61,13 +61,6 @@ class AutoMappingSupervisor(Node):
         self._manual_ok = False
         self.create_subscription(Bool, '/base/ready',
                                  lambda m: setattr(self, '_ready_ok', m.data), 10)
-        # 2026-11-03：等 initial_spin 转完一圈再开始 kickstart，
-        # 否则它 15 s 后自己开门转向，会和自转抢控制权。
-        self.declare_parameter('wait_for_spin', True)
-        self._spin_done = not bool(self.get_parameter('wait_for_spin').value)
-        self.create_subscription(
-            Bool, '/mapping/spin_done', self._on_spin_done,
-            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.create_subscription(Bool, '/base/manual_enabled',
                                  lambda m: setattr(self, '_manual_ok', m.data), 10)
         self._front_min = float('inf')
@@ -75,6 +68,7 @@ class AutoMappingSupervisor(Node):
         self._right_min = float('inf')
         scan_qos = QoSProfile(depth=5, reliability=ReliabilityPolicy.BEST_EFFORT)
         self.create_subscription(LaserScan, '/scan', self._on_scan, scan_qos)
+        self.create_timer(0.05, self._tick)
 
     # ---------- 激光分扇区 ----------
     # 雷达倒装 180°：scan 角度范围 [-180°,+180°]，index 0 = -180°（车头方向），
@@ -108,11 +102,6 @@ class AutoMappingSupervisor(Node):
         self._right_min = sector(90.0, 45.0)    # 车头右侧
 
     # ---------- 参数/授权 ----------
-    def _on_spin_done(self, msg):
-        if msg.data and not self._spin_done:
-            self._spin_done = True
-            self.get_logger().info('收到 spin_done → 开始 kickstart 计时')
-
     def _set_bool(self, name, value):
         if not self._param_client.service_is_ready():
             return
@@ -172,7 +161,6 @@ class AutoMappingSupervisor(Node):
                     self._phase_at = now
                     self._leg_at = now
             return
-
         if self._phase == 'kick_return':
             # 直行段结束后倒车退回已建区域：探索器需要机器人在地图内部才能规划
             if now - self._leg_at < 6.0:
