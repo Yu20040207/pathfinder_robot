@@ -91,14 +91,19 @@ class InitialSpin(Node):
             self._set_bool('manual_enabled', True)
             self._gate_on = True
             return                        # 下一拍再开始计角度
-        start = getattr(self, '_start_yaw', None)
-        if start is None:
-            self._start_yaw = self._yaw
-            start = self._yaw
+        if not hasattr(self, '_last_yaw'):
+            self._last_yaw = self._yaw
+            self._swept = 0.0
             self._started_at = self.get_clock().now().nanoseconds * 1e-9
             self.get_logger().info('开始自转（只转不走），转满一圈后交给探索器')
-        swept = abs(math.atan2(math.sin(self._yaw - start),
-                               math.cos(self._yaw - start)))
+        # 2026-11-03 修 bug：原来用 |atan2(sin,cos)| 算"已转角"，它的值域是
+        # 0~π，**永远到不了 2π**，所以一圈永远转不完，只能靠 40 s 超时收场。
+        # 现在累加每一步的增量（取最短角差），与转向方向无关，能累积到 2π。
+        delta = math.atan2(math.sin(self._yaw - self._last_yaw),
+                           math.cos(self._yaw - self._last_yaw))
+        self._last_yaw = self._yaw
+        self._swept += abs(delta)
+        swept = self._swept
         front = self._front_min()
         elapsed = self.get_clock().now().nanoseconds * 1e-9 - self._started_at
         stop_reason = None

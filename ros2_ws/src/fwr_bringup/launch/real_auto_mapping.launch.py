@@ -33,7 +33,7 @@ def generate_launch_description():
         DeclareLaunchArgument('use_explorer', default_value='true'),
         DeclareLaunchArgument('initial_spin', default_value='true'),
         # 探索器延迟启动，留出自转时间（自转约 21 s + 启动余量）
-        DeclareLaunchArgument('explorer_start_delay_s', default_value='32.0'),
+        DeclareLaunchArgument('explorer_start_delay_s', default_value='40.0'),
         # 2026-10-31：探索策略
         #   room     = 房间级探索（先把当前房间扫完再出门，默认）
         #   frontier = 全局前沿探索（frontier_exploration_ros2）
