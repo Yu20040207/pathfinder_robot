@@ -160,8 +160,10 @@
 > **起步即原地来回转**；全部回退后立刻恢复正常。改一个、跑一次，再动下一个。
 
 **自动建图的坑（2026-11-03 全部踩过）**
-- **建图必须用 `real_mapping.rviz`**：`real_localization.rviz` 里的 Map Edit 面板会
-  持续重发旧 `/map`，与 slam 的新地图交替刷屏 → 看着像"地图不长"。
+- **建图必须用 `real_mapping.rviz`**（launch 里已改好）：`real_localization.rviz`
+  里的 Map Edit 面板会持续重发旧 `/map`，与 slam 的新地图交替刷屏 → 看着像"地图不长"。
+- **前沿不能太近**：兜底分支已要求 ≥0.5 m。以前会派 0.2 m 的前沿 → Nav2 认为已到点、
+  `/cmd_vel_nav` 恒 0 → 车原地不动、探索器反复派同一点。
 - **起步要开阔**：kickstart 在 `front < 0.45 m` 时会反复 blocked/orient，
   走不完就等 30 s 超时；这期间 `manual_enabled=True`，**自动链路全被门控清零**。
 - **建图前查雷达**：`ros2 topic hz /scan` 应 ≈10 Hz。残留 `sllidar` 进程会占着

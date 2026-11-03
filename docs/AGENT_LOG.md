@@ -4434,3 +4434,31 @@ xy_goal_tolerance 0.4 / local_costmap 无 range_layer
 /plan 11 次                                ✅ Nav2 在规划
 /base/ready 408/411                        ✅ 底盘正常
 ```
+
+## 2026-11-03 11:55 · 自动建图跑通（补充两个卡死原因）
+
+接上一条。修完 7 个 bug 后，现场又卡在门口，定位到另外两个问题：
+
+### 8. 探索器派了距车 0.2 m 的前沿
+所有前沿都 < `goal_min_m 0.8` 时，兜底分支退化成"选最近的" → 挑到 0.2 m 的点
+→ Nav2 认为已在终点，`/cmd_vel_nav` 恒 (0,0) → 车不动，探索器又反复派同一点。
+修复：兜底也要求 ≥0.5 m，否则本 tick 不派（日志 `[skip] frontier-too-close`）。
+
+### 9. 建图 launch 用错了 RViz 配置
+`real_auto_mapping.launch.py` 给 RViz 传的是 **`real_localization.rviz`**，
+里面的 Map Edit 面板持续重发一张旧 `/map`，与 slam 的新地图交替刷屏：
+实测尺寸在 107×126 与 216×187 之间来回跳、已知格数忽增忽减，
+**看着就是"地图不长"**。改为 `real_mapping.rviz`。
+
+### 最终验证（实机，连续两段）
+```
+20 s: 已知格 1273 → 7912 (+6639)   /plan 10 次   位移 2.52 m
+45 s: 已知格 8584 → 9130 (+546)    /plan 20 次   位移 1.52 m
+地图尺寸种类只有 1 种（不再交替）
+```
+
+### 当前可用的自动建图流程
+1. 车放在开阔处（前方 > 0.45 m）
+2. `ros2 topic hz /scan` 确认 ≈10 Hz（防残留 sllidar 占串口）
+3. `ros2 launch fwr_bringup real_auto_mapping.launch.py slam_engine:=slam`
+4. RViz 应显示 `real_mapping.rviz`（有「导航路径 /plan」蓝色线）
