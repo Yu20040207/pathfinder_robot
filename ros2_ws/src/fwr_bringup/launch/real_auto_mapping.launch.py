@@ -31,6 +31,7 @@ def generate_launch_description():
         DeclareLaunchArgument('start_rviz', default_value='true'),
         # 2026-10-31：补扫模式用 —— 关掉自动探索，手动发目标
         DeclareLaunchArgument('use_explorer', default_value='true'),
+        DeclareLaunchArgument('initial_spin', default_value='true'),
         # 2026-10-31：探索策略
         #   room     = 房间级探索（先把当前房间扫完再出门，默认）
         #   frontier = 全局前沿探索（frontier_exploration_ros2）
@@ -53,6 +54,12 @@ def generate_launch_description():
         # 比 explore_lite 强的地方：MRTSP 目标排序（不在原地折返）、
         # 支持非 360° 雷达、前沿抑制（门进不去就不反复撞）、自带完成事件。
         # 房间级探索：先把当前房间扫完整再出门
+        # 2026-11-03（用户要求）：建图一开始先原地慢速转一圈，
+        # 让 270° 雷达把四周墙面扫进来，再交给探索器。
+        # 只转不走、前方过近立即停、用 yaw 计角度。可用 initial_spin:=false 关闭。
+        Node(package='fwr_bringup', executable='initial_spin', name='initial_spin',
+             output='screen',
+             parameters=[{'enabled': LaunchConfiguration('initial_spin')}]),
         Node(package='fwr_bringup', executable='room_explorer',
              name='room_explorer', output='screen',
              condition=IfCondition(PythonExpression([
