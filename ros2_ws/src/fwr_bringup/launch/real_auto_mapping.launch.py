@@ -15,7 +15,6 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
-from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -32,7 +31,6 @@ def generate_launch_description():
         DeclareLaunchArgument('start_rviz', default_value='true'),
         # 2026-10-31：补扫模式用 —— 关掉自动探索，手动发目标
         DeclareLaunchArgument('use_explorer', default_value='true'),
-        DeclareLaunchArgument('initial_spin', default_value='true'),
         # 2026-10-31：探索策略
         #   room     = 房间级探索（先把当前房间扫完再出门，默认）
         #   frontier = 全局前沿探索（frontier_exploration_ros2）
@@ -55,19 +53,8 @@ def generate_launch_description():
         # 比 explore_lite 强的地方：MRTSP 目标排序（不在原地折返）、
         # 支持非 360° 雷达、前沿抑制（门进不去就不反复撞）、自带完成事件。
         # 房间级探索：先把当前房间扫完整再出门
-        # 2026-11-03（用户要求）：建图一开始先原地慢速转一圈，
-        # 让 270° 雷达把四周墙面扫进来，再交给探索器。
-        # 只转不走、前方过近立即停、用 yaw 计角度。可用 initial_spin:=false 关闭。
-        Node(package='fwr_bringup', executable='initial_spin', name='initial_spin',
-             output='screen',
-             # 2026-11-03 修 bug：LaunchConfiguration 传进来是**字符串** 'true'，
-             # 而 enabled 声明为 bool → get_parameter 抛 ParameterTypeException，
-             # 节点在第一次 tick 就静默挂掉（日志里只有 process started）。
-             # 必须用 ParameterValue(..., value_type=bool) 显式转类型。
-             parameters=[{'enabled': ParameterValue(
-                 LaunchConfiguration('initial_spin'), value_type=bool)}]),
         # 2026-11-03（用户思路）：不用固定延迟 —— room_explorer 订阅
-        # /mapping/spin_done，收到 initial_spin 的"转完"信号后才接管底盘。
+        # /mapping/spin_done，收到 supervisor 的"转完"信号后才接管底盘。
         # 事件驱动，转得快就早开始，转得慢也不会被抢走。
         Node(package='fwr_bringup', executable='room_explorer',
              name='room_explorer', output='screen',

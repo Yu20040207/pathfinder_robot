@@ -19,11 +19,14 @@ from rcl_interfaces.srv import SetParameters
 from rcl_interfaces.msg import Parameter, ParameterType
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import LaserScan
+from nav_msgs.msg import Odometry
+import math
 
 
 class AutoMappingSupervisor(Node):
     def __init__(self):
         super().__init__('auto_mapping_supervisor')
+        self.declare_parameter('spin_rad_s', 0.30)
         self.declare_parameter('kick_speed_mps', 0.15)
         self.declare_parameter('kick_turn_rad_s', 0.7)
         self.declare_parameter('startup_delay_s', 15.0)
@@ -76,6 +79,14 @@ class AutoMappingSupervisor(Node):
         self._right_min = float('inf')
         scan_qos = QoSProfile(depth=5, reliability=ReliabilityPolicy.BEST_EFFORT)
         self.create_subscription(LaserScan, '/scan', self._on_scan, scan_qos)
+        # 2026-11-03：首圈自转需要累计航向
+        self._yaw = None
+        self._last_yaw = None
+        self._swept = 0.0
+        self.create_subscription(Odometry, '/odom', self._on_odom, 20)
+        self._done_pub = self.create_publisher(
+            Bool, '/mapping/spin_done',
+            QoSProfile(depth=1, durability=__import__('rclpy.qos', fromlist=['DurabilityPolicy']).DurabilityPolicy.TRANSIENT_LOCAL))
         self.create_timer(0.05, self._tick)
 
     # ---------- 激光分扇区 ----------
@@ -114,6 +125,11 @@ class AutoMappingSupervisor(Node):
         if msg.data and not self._spin_done:
             self._spin_done = True
             self.get_logger().info('收到 spin_done → 开始 kickstart 计时')
+
+    def _on_odom(self, msg):
+        q = msg.pose.pose.orientation
+        self._yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                               1.0 - 2.0 * (q.y * q.y + q.z * q.z))
 
     def _set_bool(self, name, value):
         if not self._param_client.service_is_ready():
@@ -162,8 +178,6 @@ class AutoMappingSupervisor(Node):
             self._pause_pub.publish(pause)
 
         if self._phase == 'waiting':
-            if not self._spin_done:
-                return                    # 首圈自转还没结束，先不动
             if now - self._phase_at >= float(self.get_parameter('startup_delay_s').value):
                 if now - self._last_set_try > 2.0:
                     self._last_set_try = now
@@ -171,11 +185,47 @@ class AutoMappingSupervisor(Node):
                     self._set_bool('motion_enabled', True)
                     self._set_bool('manual_enabled', True)
                 if self._ready_ok and self._manual_ok:
-                    self.get_logger().info('kickstart: gates verified open')
-                    self._phase = 'kick_orient'
+                    self.get_logger().info('门已确认打开 → 开始原地自转一圈')
+                    self._phase = 'spin'
                     self._phase_at = now
-                    self._leg_at = now
+                    self._swept = 0.0
+                    self._last_yaw = None
             return
+
+        # ---------- 2026-11-03：首圈自转（用户要求）----------
+        if self._phase == 'spin':
+            if self._yaw is None:
+                return
+            if self._last_yaw is not None:
+                d = math.atan2(math.sin(self._yaw - self._last_yaw),
+                               math.cos(self._yaw - self._last_yaw))
+                self._swept += abs(d)
+            self._last_yaw = self._yaw
+            if self._swept >= 2 * math.pi:
+                self._cmd_manual.publish(Twist())
+                self.get_logger().info(
+                    f'自转完成（累计 {math.degrees(self._swept):.0f}°）→ 停 2 秒')
+                self._phase = 'spin_settle'
+                self._phase_at = now
+                return
+            t = Twist()
+            t.angular.z = float(self.get_parameter('spin_rad_s').value)
+            self._cmd_manual.publish(t)
+            return
+
+        if self._phase == 'spin_settle':
+            self._cmd_manual.publish(Twist())
+            if now - self._phase_at >= 2.0:
+                msg = Bool()
+                msg.data = True
+                self._done_pub.publish(msg)          # 放开 room_explorer
+                self.get_logger().info('自转+停顿结束 → 交给探索器')
+                self._phase = 'handover'
+                self._phase_at = now
+            return
+
+        if self._phase == 'handover':
+            return                                    # 不再动车，交给探索器
         if self._phase == 'kick_return':
             # 直行段结束后倒车退回已建区域：探索器需要机器人在地图内部才能规划
             if now - self._leg_at < 6.0:
