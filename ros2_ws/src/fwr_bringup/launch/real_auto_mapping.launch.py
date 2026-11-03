@@ -69,7 +69,11 @@ def generate_launch_description():
                  # 期间 manual_enabled 卡 True → 自动链路被门控永久封锁。
                  'escape_after_failures': 9999,
                  # 决策周期从 3 s 缩到 1.5 s，减少目标之间的空档。
-                 'replan_s': 1.5}]),
+                 'replan_s': 1.5,
+                 # 2026-11-03（现场：出了房间到走廊后只在走廊里转，进不去别的房间）：
+                 # 房间门控会把走廊当成一个"房间"，只要它还有前沿就永远不去别处。
+                 # 关掉 → 用全局前沿，能主动走进其他房间。
+                 'use_room_gate': False}]),
         Node(package='frontier_exploration_ros2', executable='frontier_explorer',
              name='frontier_explorer', output='screen',
              condition=IfCondition(PythonExpression([
