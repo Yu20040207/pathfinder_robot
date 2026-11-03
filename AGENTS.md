@@ -209,6 +209,12 @@
 - **节点"启动后一行日志都没有"= 大概率没挂上定时器**。已有回归测试
   `test_auto_mapping_nodes_wired` 守住这条。
 
+**安全链两个已修 bug（2026-11-03，别再引入）**
+- `directional_safety_selector._sector_min`：`if side>0 / else` 两块代码**曾经完全一样**，
+  导致左右永远取同一值、"往空旷一侧转"永不触发。左前 = 150~180°，右前 = -180~-150°。
+- `directional_safety_core`：ω 符号与监控回执不符时**整帧归零**会导致直线顿挫。
+  现在前进行驶只归零转向、保留前进；纯旋转仍整帧拒绝（有单测守护，别改）。
+
 **⚠️ 局部代价地图不要启用 `range_layer`**：它等不到超声数据时会把代价地图
 更新拖住 → 控制器拿不到新鲜地图 → `computeVelocityCommands` 失败 →
 `[follow_path] Aborting handle` 每秒一次、`/cmd_vel_nav` 恒 0。
