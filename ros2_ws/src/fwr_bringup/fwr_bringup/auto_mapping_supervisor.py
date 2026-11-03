@@ -33,7 +33,9 @@ class AutoMappingSupervisor(Node):
         self.declare_parameter('legs', 4)
         self.declare_parameter('leg_max_s', 8.0)
         # 2026-10-30：踢一脚最多跑这么久，超时就交给探索器（否则墙角死循环）
-        self.declare_parameter('kick_timeout_s', 90.0)
+        # 2026-11-03：90 s 太久 —— 车卡在墙边时会一直占着手动模式（manual_enabled=True），
+        # 自动链路被门控拦住，期间车完全不动。降到 30 s 更快交出去。
+        self.declare_parameter('kick_timeout_s', 30.0)
         self.declare_parameter('kick_max_backups', 3)
         # 被包围时后退到"前方够转弯"为止的上限（秒）
         self.declare_parameter('kick_back_max_s', 8.0)
