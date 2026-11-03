@@ -159,6 +159,19 @@
 > 2026-11-02 一起改（0.35→0.7、true→false、0.48→0.50、3→6）后出现
 > **起步即原地来回转**；全部回退后立刻恢复正常。改一个、跑一次，再动下一个。
 
+**自动建图的坑（2026-11-03 全部踩过）**
+- **建图必须用 `real_mapping.rviz`**：`real_localization.rviz` 里的 Map Edit 面板会
+  持续重发旧 `/map`，与 slam 的新地图交替刷屏 → 看着像"地图不长"。
+- **起步要开阔**：kickstart 在 `front < 0.45 m` 时会反复 blocked/orient，
+  走不完就等 30 s 超时；这期间 `manual_enabled=True`，**自动链路全被门控清零**。
+- **建图前查雷达**：`ros2 topic hz /scan` 应 ≈10 Hz。残留 `sllidar` 进程会占着
+  `/dev/ttyUSB0`，新雷达起不来且**不报错** → ready=False、slam 无输入、TF 外推失败。
+  用 `kill -9 <旧 PID>` 清掉。
+- **超声不要改成"只在倒车时轮询"**：`rear_guard` 无数据会 fail-safe 报车尾被挡，
+  探索器脱困永远失败 → `manual_enabled` 卡 True → 自动链路被门控清零。
+- **节点"启动后一行日志都没有"= 大概率没挂上定时器**。已有回归测试
+  `test_auto_mapping_nodes_wired` 守住这条。
+
 **⚠️ 局部代价地图不要启用 `range_layer`**：它等不到超声数据时会把代价地图
 更新拖住 → 控制器拿不到新鲜地图 → `computeVelocityCommands` 失败 →
 `[follow_path] Aborting handle` 每秒一次、`/cmd_vel_nav` 恒 0。
