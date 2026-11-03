@@ -346,7 +346,12 @@ void base_tick(base_control_t *c, int64_t now, int32_t left, int32_t right,
         bool pivot = c->target[0]*c->target[1] < 0 && goal*direction > 0;
         float effort;
         if (!pivot) {
-            float trial_i = clamp(c->integral[i]+.0015f*error*dt, 0, .75f);
+            // 2026-11-03：积分下限原来是 0，**不能为负** —— 前馈
+            // (0.22+0.0035v) 对低速偏高时（实测目标 141 实际 214 mm/s），
+            // 比例项只能抵消一部分，积分被钳死在 0 无法继续向下修正，
+            // 于是稳态永远偏快（指令 0.15 实际 0.27 m/s）。
+            // 放开负积分，让积分能把前馈的过冲削掉。
+            float trial_i = clamp(c->integral[i]+.0015f*error*dt, -.30f, .30f);
             // 2026-10-29：实测 0.5 占空比只能到 ~36 mm/s，原前馈(0.22+0.0017v)偏低，
 // 中高速下要靠积分慢慢爬、期间容易撞上失速判据。增益提到 0.0035。
             float feedforward = .22f + .0035f*desired;

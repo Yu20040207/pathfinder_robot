@@ -34,7 +34,14 @@
   - 任何拿 `/scan` 判断“是否被堵 / 能不能转向”的代码**必须忽略后方扇区**，
     否则会把自己车体当成墙（自动建图曾因此误判“三面被堵”进入死循环）。
   - 雷达倒装 180°：`/scan` 角度范围 [-180°,+180°]，**index 0 侧 = 车头方向**，index 中部 = 车尾。
-- ESP32-S3 底盘控制：`/dev/ttyACM1`、115200、`BASE_CONTROL_V2`，`S2` 为 14 字段；IMU：`/dev/ttyACM0`、921600。
+- **设备路径**（2026-11-03 实测更正，原文档写反了）：
+  - ESP32-S3 底盘 = **`/dev/ttyACM0`**（`ID_VENDOR=Espressif`），115200，
+    `BASE_CONTROL_V2`，`S2` 为 14 字段
+  - IMU DM-IMU-L1 = **`/dev/ttyACM1`**（`ID_VENDOR=DM-Tech`），921600
+  - ⚠️ **ACM 编号会随插拔/重启变化**，`base_bridge` 用的是
+    `DEFAULT_DEVICE`（by-id：`usb-Espressif_USB_JTAG_serial_debug_unit_...`），
+    **不要写死 ACM 编号**。烧录时要用 `idf.py -p <正确的 ACM>`，
+    端口被 `base_bridge` 占用时会报 `Invalid head of packet`。
 - Nav2 / AMCL / EKF / Collision Monitor 已能运行；`real_navigation.launch.py use_saved_map:=true` 曾连续运行 23 小时以上。
 - 已知坑：旧的 `sllidar_node` 可能残留成僵尸发布者，导致 `/scan` 有 2 个 publisher；重启导航栈前先清理。
 - `base_bridge` 默认 `motion_enabled=false`、`manual_enabled=false`，不会让车动。
