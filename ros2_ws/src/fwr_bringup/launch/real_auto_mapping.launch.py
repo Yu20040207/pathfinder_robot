@@ -10,7 +10,7 @@ from pathlib import Path
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, ExecuteProcess
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, ExecuteProcess, TimerAction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, PythonExpression
@@ -32,6 +32,8 @@ def generate_launch_description():
         # 2026-10-31：补扫模式用 —— 关掉自动探索，手动发目标
         DeclareLaunchArgument('use_explorer', default_value='true'),
         DeclareLaunchArgument('initial_spin', default_value='true'),
+        # 探索器延迟启动，留出自转时间（自转约 21 s + 启动余量）
+        DeclareLaunchArgument('explorer_start_delay_s', default_value='32.0'),
         # 2026-10-31：探索策略
         #   room     = 房间级探索（先把当前房间扫完再出门，默认）
         #   frontier = 全局前沿探索（frontier_exploration_ros2）
@@ -60,12 +62,19 @@ def generate_launch_description():
         Node(package='fwr_bringup', executable='initial_spin', name='initial_spin',
              output='screen',
              parameters=[{'enabled': LaunchConfiguration('initial_spin')}]),
-        Node(package='fwr_bringup', executable='room_explorer',
-             name='room_explorer', output='screen',
-             condition=IfCondition(PythonExpression([
-                 "'", LaunchConfiguration('use_explorer'), "' == 'true' and '",
-                 LaunchConfiguration('explorer'), "' == 'room'"])),
-             parameters=[{'use_sim_time': use_sim_time}]),
+        # 2026-11-03：room_explorer 会**自己直接驱动底盘**（往 /cmd_vel_manual
+        # 发速度、自己开关运动门），一启动就和 initial_spin 抢同一条通道，
+        # 表现为"刚启动就往前走、不转圈"。这里延迟启动，等自转结束后再接管。
+        TimerAction(
+            period=LaunchConfiguration('explorer_start_delay_s'),
+            actions=[Node(
+                package='fwr_bringup', executable='room_explorer',
+                name='room_explorer', output='screen',
+                condition=IfCondition(PythonExpression([
+                    "'", LaunchConfiguration('use_explorer'), "' == 'true' and '",
+                    LaunchConfiguration('explorer'), "' == 'room'"])),
+                parameters=[{'use_sim_time': use_sim_time}]),
+            ]),
         Node(package='frontier_exploration_ros2', executable='frontier_explorer',
              name='frontier_explorer', output='screen',
              condition=IfCondition(PythonExpression([
