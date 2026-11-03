@@ -4391,3 +4391,46 @@ xy_goal_tolerance 0.4 / local_costmap 无 range_layer
 - 固件速度环的稳态偏快未在固件层修复（ROS 侧补偿）。根治需
   **同时**降低前馈斜率 + 台架测速。
 - 直线仍有轻微顿挫（用户认为可接受）。
+
+## 2026-11-03 11:50 · 自动建图跑通：7 个真 bug + 2 个操作前提
+
+### 现象
+"启动自动建图后车不动、地图不增长、RViz 看不到路径"。排查过程反复得到
+"节点在跑但什么都不做"，因为**多个节点会在不报错的情况下静默失效**。
+
+### 真 bug（都有日志证据）
+1. **`auto_mapping_supervisor` 没有 `create_timer`**
+   我早前用正则删自转代码时误删了定时器创建行 → 节点停在 `waiting` 相，
+   永不打开运动门 → `/base/ready` 恒 False → Nav2 不规划 → 车不动。
+   **症状：该节点日志只有 "process started"。**
+2. **`room_explorer` 局部 import 遮蔽**
+   `from rclpy.qos import DurabilityPolicy, QoSProfile` 写在 `__init__` 里，
+   使 `QoSProfile` 成为整个函数的局部名，前面的地图订阅用了它 → `UnboundLocalError`
+   → 进程启动即崩。
+3. **`room_explorer` 房间腐蚀核吃光自由空间**
+   `door_closing_m 0.42 / res 0.05 = 8` → 核 17×17 格（0.85 m）。新建图自由空间
+   又窄又碎，一腐蚀 `lab` 全 0 → 代码 `if len(ys)==0: return` → **每 tick 静默退出，
+   永不派目标**。修复：无房间芯时退化为"整张自由空间算一个房间"。
+4. **超声"只在倒车时轮询"害了整个自动链路**
+   不轮询 → `rear_guard` 无数据 → fail-safe 报"车尾被挡" → 探索器脱困永远退不出去
+   → `manual_enabled` 卡在 True → 门控把自动指令全清零 → 车不动。**已恢复常开。**
+5. **RViz 用了错误的配置**（`real_localization.rviz`，内含 Map Edit 面板）
+   该面板持续重发一张旧 `/map`（137×180/1626 格），和 slam 的新地图（284×218）
+   交替刷屏 → 观感"地图不长/乱跳"。**建图必须用 `real_mapping.rviz`。**
+6. **残留 sllidar 进程占着 `/dev/ttyUSB0`**
+   新 launch 的雷达起不来 → `/scan` 0 Hz → `/base/ready` False、slam 无输入、
+   TF 时间戳对不上（`map→base_footprint` 外推失败）。需 `kill -9` 旧进程。
+7. **kickstart 超时 90 s 太久** 卡墙时全程 `manual_enabled=True`，自动链路被门控
+   拦住 90 秒。降到 30 s。
+
+### 操作前提（不是 bug）
+- **起步位置要开阔**：前方 <0.45 m 时 kickstart 会反复"blocked/orient"，
+  走不完 4 段，只能等超时。
+- **建图前确认雷达在发数据**：`ros2 topic hz /scan` 应为 ~10 Hz。
+
+### 最终验证（实机）
+```
+地图已知格 10790 → 11323  (+533 / 25 s)   ✅ 持续增长
+/plan 11 次                                ✅ Nav2 在规划
+/base/ready 408/411                        ✅ 底盘正常
+```
