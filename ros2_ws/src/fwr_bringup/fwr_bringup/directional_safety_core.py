@@ -195,6 +195,12 @@ class DirectionalSafetyCore:
             # 只保留线速度；角速度较大且真的反向时才拒绝。
             if raw_z_eff and output_z and (output_z > 0) != (raw_z_eff > 0):
                 if abs(output_z) > 0.05 or abs(raw_z_eff) > 0.05:
+                    # 2026-11-03（"一卡一卡"）：监控回执慢一拍时 ω 符号不符，
+                    # 原来**整帧归零**连线速度一起丢 → 直线上每翻一次符号就顿一下。
+                    # 现在只把转向归零、保留前进：不会反向（安全语义不变），
+                    # 下一拍回执跟上后转向自动恢复。纯旋转情形仍整帧拒绝。
+                    if self.direction != 'rotate' and raw_x:
+                        return (raw_x, 0.0)
                     return fail(f'sign-angular-{direction}')
             # 幅值超出的情形（10 Hz 回执 vs 20 Hz 输出，减速时回执仍偏大）
             # 按当前指令夹紧而不是丢弃，否则每两帧砍一帧、车起不了速。
