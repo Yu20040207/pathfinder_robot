@@ -162,6 +162,10 @@
 **自动建图的坑（2026-11-03 全部踩过）**
 - **建图必须用 `real_mapping.rviz`**（launch 里已改好）：`real_localization.rviz`
   里的 Map Edit 面板会持续重发旧 `/map`，与 slam 的新地图交替刷屏 → 看着像"地图不长"。
+- **`use_room_gate: False`**：房间门控会把走廊当成一个房间，只要它还有前沿就永不
+  进别的房间（实测出房间后困在走廊）。关掉用全局前沿。
+- **改完 launch 参数必须 `ros2 param get /<node> <param>` 核对**：曾把参数加到
+  相邻的 `map_free_around_robot` 上，探索器一直用默认值，优化实际没生效。
 - **效率参数（2026-11-03 实测最优）**：`angular_dist_threshold 3.1416`（不平移转向）、
   `approach_velocity_scaling_dist 0.25`、BT `RateController 0.25 Hz`、
   探索器 `replan_s 1.5`、目标超时 15 s。实测前进 45.6% / 静止 7.8% / 地图 +8529(80 s)。
