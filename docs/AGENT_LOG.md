@@ -4462,3 +4462,38 @@ xy_goal_tolerance 0.4 / local_costmap 无 range_layer
 2. `ros2 topic hz /scan` 确认 ≈10 Hz（防残留 sllidar 占串口）
 3. `ros2 launch fwr_bringup real_auto_mapping.launch.py slam_engine:=slam`
 4. RViz 应显示 `real_mapping.rviz`（有「导航路径 /plan」蓝色线）
+
+## 2026-11-03 11:58 · 自动建图最终跑通（第 10 个修复）
+
+### 现象
+车在墙脚左右转循环，日志反复出现：
+```
+目标 (-1.3, -0.9) 连续失败，拉黑
+连续失败 2 次 → 短退脱困（≤1.20 m）
+```
+
+### 根因
+`room_explorer._goal_traversable()` 在目标周围 `radius_cells = 8`（**0.4 m**）内
+搜索代价 <99 的落点。墙脚附近这片区域**全被膨胀覆盖**（代价 99），返回 None →
+目标被拉黑 → 连续 2 次失败进入脱困 → 脱困又选不出点 → **左右转循环**。
+
+### 修复
+搜索半径 **8 → 16 格（0.4 → 0.8 m）**。墙脚处 0.8 m 内总能找到合法的落点。
+
+### 验证（实机，连续两段）
+```
+18 s: 已知格 4256 → 7653 (+3397)   位移 1.11 m   拉黑 0 / 脱困 0
+60 s: 已知格 7653 → 10529 (+2876)  /plan 23 次   位移 1.72 m
+```
+
+### 自动建图总计修掉 10 个问题
+1. supervisor 缺 create_timer（误删）→ 空壳节点
+2. room_explorer 局部 import 遮蔽 QoSProfile → 启动即崩
+3. 房间腐蚀核 17×17 吃光自由空间 → 每 tick 静默退出
+4. 探索器选 0.2 m 前沿 → Nav2 认为已到点、速度恒 0
+5. 建图 launch 传错 RViz 配置 → 旧地图与 slam 交替刷屏
+6. 残留 sllidar 占 /dev/ttyUSB0 → /scan 0 Hz
+7. 超声改"只在倒车时轮询" → rear_guard fail-safe 卡死自动链路
+8. kickstart 超时 90 s → 卡墙时 90 秒不动
+9. 起步位置太靠墙（操作前提）
+10. 目标落点搜索半径 0.4 m 太小 → 墙脚拉黑/脱困循环
