@@ -102,8 +102,11 @@ class RoomExplorer(Node):
         # 连续"目标不可通行"计数：连续多次说明车被堵在死角，必须脱困
         self._skip_streak = 0
         self._last_log = 0.0
-        self.create_timer(float(self.get_parameter('replan_s').value), self._tick)
-        self.get_logger().info('房间级探索器启动：先把当前房间扫完再出门')
+        period = float(self.get_parameter('replan_s').value)
+        self._timer = self.create_timer(period, self._tick)
+        self._tick_calls = 0
+        self.get_logger().info(
+            f'房间级探索器启动：先把当前房间扫完再出门（tick 周期 {period}s）')
 
     def _on_map(self, msg: OccupancyGrid) -> None:
         self._map = msg
@@ -330,6 +333,9 @@ class RoomExplorer(Node):
 
     # ---------- 主循环 ----------
     def _tick(self) -> None:
+        self._tick_calls += 1
+        if self._tick_calls in (1, 5, 20):
+            self.get_logger().info(f'[tick] 第 {self._tick_calls} 次回调')
         m = self._map
         robot = self._robot_xy()
         if m is None or robot is None:
