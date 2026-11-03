@@ -57,6 +57,10 @@ class InitialSpin(Node):
         self._params = self.create_client(SetParameters,
                                           '/base_bridge/set_parameters')
         self._gate_on = False
+        self._done = False
+        self.create_timer(0.05, self._tick)   # 2026-11-03：这行之前被挤到
+                                              # return 后面了 → 定时器从未创建
+                                              # → _tick 不跑 → 整个节点静默。
 
     def _set_bool(self, name: str, value: bool) -> bool:
         """返回是否真的把请求发出去了（服务没就绪 → False，下一拍重试）。"""
@@ -70,8 +74,6 @@ class InitialSpin(Node):
         req.parameters = [p]
         self._params.call_async(req)
         return True
-        self._done = False
-        self.create_timer(0.05, self._tick)
 
     def _on_scan(self, msg) -> None:
         self._scan = msg
@@ -80,18 +82,36 @@ class InitialSpin(Node):
         self._yaw = _yaw(msg.pose.pose.orientation)
 
     def _front_min(self):
+        """车头 ±25° 的最近距离。
+
+        2026-11-03 修：原来用 `len(ranges)//2` 当车头，实测读到 0.09 m ——
+        那是**车体自击**。本车雷达倒装，scan 角 0° 对应车尾，车身自击在
+        角 0 附近（AGENTS.md 已记录 ±45° 遮挡）。所以必须**按角度**取车头，
+        而不是按下标猜。
+        """
         m = self._scan
         if m is None or not m.ranges:
             return None
-        span = int(math.radians(25.0) / abs(m.angle_increment))
-        mid = len(m.ranges) // 2          # 本车雷达：index 中部 = 车头
-        vals = [r for r in m.ranges[max(0, mid - span):mid + span]
-                if 0.05 < r < 3.5]
+        vals = []
+        for i, r in enumerate(m.ranges):
+            if not (0.05 < r < 3.5):
+                continue
+            ang = math.degrees(m.angle_min + i * m.angle_increment)
+            # 车头 = 角度接近 ±180°；跳过车尾 ±50°（车身自击区）
+            if abs(ang) > 155.0:
+                vals.append(r)
         return min(vals) if vals else None
 
     def _tick(self) -> None:
         if self._done or not bool(self.get_parameter('enabled').value):
             return
+        now_s = self.get_clock().now().nanoseconds * 1e-9
+        if now_s - getattr(self, '_dbg_at', 0.0) > 2.0:
+            self._dbg_at = now_s
+            self.get_logger().info(
+                f'[diag] yaw={"None" if self._yaw is None else round(self._yaw,2)} '
+                f'gate={self._gate_on} swept={round(getattr(self,"_swept",0.0),2)} '
+                f'front={self._front_min()}')
         if self._yaw is None:
             return                        # 等 odom
         if not self._gate_on:
