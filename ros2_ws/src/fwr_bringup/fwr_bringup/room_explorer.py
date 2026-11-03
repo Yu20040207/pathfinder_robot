@@ -87,12 +87,6 @@ class RoomExplorer(Node):
         scan_qos = QoSProfile(depth=5, reliability=ReliabilityPolicy.BEST_EFFORT)
         self.create_subscription(LaserScan, '/scan', self._on_scan, scan_qos)
         self.create_subscription(Bool, '/base/rear_blocked', self._on_rear_blocked, 10)
-        # 2026-11-03（用户思路）：等 initial_spin 转完一圈再接管，不用固定延迟。
-        self.declare_parameter('wait_for_spin', True)
-        self._spin_done = not bool(self.get_parameter('wait_for_spin').value)
-        self.create_subscription(
-            Bool, '/mapping/spin_done', self._on_spin_done,
-            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self._param_cli = self.create_client(SetParameters, '/base_bridge/set_parameters')
         # 2026-10-31：发目标前先在全局代价地图上验证，避开"注定失败"的目标
         # （否则要浪费 2 次失败 + 一次脱困才发现它到不了）
@@ -325,15 +319,8 @@ class RoomExplorer(Node):
             return validated
         return None
 
-    def _on_spin_done(self, msg) -> None:
-        if msg.data and not self._spin_done:
-            self._spin_done = True
-            self.get_logger().info('收到 spin_done → 开始房间探索')
-
     # ---------- 主循环 ----------
     def _tick(self) -> None:
-        if not self._spin_done:
-            return                        # 首圈自转还没结束，先不接管
         m = self._map
         robot = self._robot_xy()
         if m is None or robot is None:
