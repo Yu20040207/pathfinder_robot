@@ -15,6 +15,7 @@
 #include <geometry_msgs/msg/point_stamped.hpp>
 #include <geometry_msgs/msg/twist.hpp>
 #include <nav_msgs/msg/path.hpp>
+#include <nav2_msgs/action/compute_path_through_poses.hpp>
 #include <nav2_msgs/action/compute_path_to_pose.hpp>
 #include <nav2_msgs/action/navigate_to_pose.hpp>
 #include <fwr_interfaces/srv/start_fixed_goal.hpp>
@@ -143,6 +144,10 @@ protected:
       });
     plan_client_ = rclcpp_action::create_client<nav2_msgs::action::ComputePathToPose>(
       node_, "/compute_path_to_pose");
+    // 2026-11-03：多点路线的预览要连所有途经点，用"穿过多个点"的规划动作。
+    through_plan_client_ =
+      rclcpp_action::create_client<nav2_msgs::action::ComputePathThroughPoses>(
+      node_, "/compute_path_through_poses");
     if (guarded_) {
       tf_buffer_ = std::make_unique<tf2_ros::Buffer>(node_->get_clock());
       tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_, node_, false);
@@ -629,6 +634,48 @@ private:
 
   void request_real_preview(unsigned long revision)
   {
+    // 2026-11-03（用户要求）：多点路线把中间途经点也连起来。
+    // 用 compute_path_through_poses 一次规划"当前位置→起点→…→终点"，
+    // 返回的就是一条完整折线，中途不停车。
+    if (points_.size() >= 3) {
+      if (!through_plan_client_ || !through_plan_client_->action_server_is_ready()) {
+        status_label_->setText("多点预览不可用（规划服务未就绪）");
+        return;
+      }
+      auto request = std::make_shared<nav2_msgs::action::ComputePathThroughPoses::Goal>();
+      request->goals.reserve(points_.points().size());
+      for (const auto & point : points_.points()) {
+        geometry_msgs::msg::PoseStamped pose;
+        pose.header.frame_id = "map";
+        pose.header.stamp = node_->now();
+        pose.pose.position.x = point.x;
+        pose.pose.position.y = point.y;
+        pose.pose.orientation.w = 1.0;
+        request->goals.push_back(pose);
+      }
+      status_label_->setText(QString("正在规划穿过 %1 个点的路线…")
+        .arg(request->goals.size()));
+      rclcpp_action::Client<nav2_msgs::action::ComputePathThroughPoses>::SendGoalOptions options;
+      options.result_callback = [this, revision](
+        const rclcpp_action::ClientGoalHandle<
+          nav2_msgs::action::ComputePathThroughPoses>::WrappedResult & result) {
+        if (revision != selection_revision_) {return;}
+        if (result.code != rclcpp_action::ResultCode::SUCCEEDED || !result.result ||
+          result.result->path.poses.empty())
+        {
+          status_label_->setText("多点路线规划失败：请检查各点是否可通行");
+          return;
+        }
+        path_pub_->publish(result.result->path);
+        preview_ready_ = true;
+        start_button_->setEnabled(true);
+        status_label_->setText(QString(
+          "多点预览完成：%1 个路径点，经过 %2 个选点；开始后途经点不停车")
+          .arg(result.result->path.poses.size()).arg(points_.size()));
+      };
+      through_plan_client_->async_send_goal(*request, options);
+      return;
+    }
     const auto legs = make_real_preview_legs(points_, node_->now());
     if (!legs) {return;}
     status_label_->setText("正在规划当前位置到起点…");
@@ -971,6 +1018,8 @@ private:
   rclcpp::Client<Gate>::SharedPtr gate_client_;
   rclcpp::Client<RealGoal>::SharedPtr real_nav_client_;
   rclcpp::Client<MultiRealGoal>::SharedPtr multi_nav_client_;
+  rclcpp_action::Client<nav2_msgs::action::ComputePathThroughPoses>::SharedPtr
+    through_plan_client_;
   rclcpp::Client<RealSingleGoal>::SharedPtr real_single_goal_client_;
   rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr arm_client_;
   QComboBox * speed_box_ = nullptr;
