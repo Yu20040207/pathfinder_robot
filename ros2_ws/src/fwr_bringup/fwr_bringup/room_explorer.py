@@ -333,6 +333,18 @@ class RoomExplorer(Node):
 
     # ---------- 主循环 ----------
     def _tick(self) -> None:
+        """外壳：任何异常都要打出来，否则定时器静默失效、完全看不出原因。"""
+        try:
+            self._tick_impl()
+        except Exception:                     # noqa: BLE001
+            import traceback
+            now = self.get_clock().now().nanoseconds * 1e-9
+            if now - getattr(self, '_err_at', 0.0) > 5.0:
+                self._err_at = now
+                self.get_logger().error(
+                    f'_tick 异常: {traceback.format_exc()}')
+
+    def _tick_impl(self) -> None:
         self._tick_calls += 1
         if self._tick_calls in (1, 5, 20):
             self.get_logger().info(f'[tick] 第 {self._tick_calls} 次回调')
