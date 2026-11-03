@@ -96,6 +96,11 @@ class InitialSpin(Node):
             # 手动通道需要底盘运动门 + 手动模式；只在本节点转动期间打开
             self._set_bool('motion_enabled', True)
             self._set_bool('manual_enabled', True)
+            # 2026-11-03（用户要求）：自转期间不用车尾超声。
+            # 超声现在只在 state=='reversing' 时轮询，平时没数据 → 守卫
+            # fail_safe_block=True 会被误判成"车尾被挡"而拦住动作。
+            # 自转只转不走，后方保护没有意义，先关掉；转完立刻恢复。
+            self._set_bool('rear_guard_enabled', False)
             self._gate_on = True
             return                        # 下一拍再开始计角度
         if not hasattr(self, '_last_yaw'):
@@ -124,6 +129,7 @@ class InitialSpin(Node):
             self._pub.publish(Twist())    # 停
             self._done = True
             self._set_bool('manual_enabled', False)   # 交还自动通道
+            self._set_bool('rear_guard_enabled', True)  # 恢复车尾守卫
             msg = Bool()
             msg.data = True
             self._done_pub.publish(msg)               # 通知探索器可以接管

@@ -61,6 +61,14 @@ class AutoMappingSupervisor(Node):
         self._manual_ok = False
         self.create_subscription(Bool, '/base/ready',
                                  lambda m: setattr(self, '_ready_ok', m.data), 10)
+        # 2026-11-03：等 initial_spin 转完一圈再开始 kickstart，
+        # 否则它 15 s 后自己开门转向，会和自转抢控制权。
+        self.declare_parameter('wait_for_spin', True)
+        self._spin_done = not bool(self.get_parameter('wait_for_spin').value)
+        from rclpy.qos import DurabilityPolicy
+        self.create_subscription(
+            Bool, '/mapping/spin_done', self._on_spin_done,
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.create_subscription(Bool, '/base/manual_enabled',
                                  lambda m: setattr(self, '_manual_ok', m.data), 10)
         self._front_min = float('inf')
@@ -102,6 +110,11 @@ class AutoMappingSupervisor(Node):
         self._right_min = sector(90.0, 45.0)    # 车头右侧
 
     # ---------- 参数/授权 ----------
+    def _on_spin_done(self, msg):
+        if msg.data and not self._spin_done:
+            self._spin_done = True
+            self.get_logger().info('收到 spin_done → 开始 kickstart 计时')
+
     def _set_bool(self, name, value):
         if not self._param_client.service_is_ready():
             return
@@ -149,6 +162,8 @@ class AutoMappingSupervisor(Node):
             self._pause_pub.publish(pause)
 
         if self._phase == 'waiting':
+            if not self._spin_done:
+                return                    # 首圈自转还没结束，先不动
             if now - self._phase_at >= float(self.get_parameter('startup_delay_s').value):
                 if now - self._last_set_try > 2.0:
                     self._last_set_try = now
