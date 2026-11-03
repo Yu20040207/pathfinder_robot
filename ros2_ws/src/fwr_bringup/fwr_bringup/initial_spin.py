@@ -58,9 +58,10 @@ class InitialSpin(Node):
                                           '/base_bridge/set_parameters')
         self._gate_on = False
 
-    def _set_bool(self, name: str, value: bool) -> None:
+    def _set_bool(self, name: str, value: bool) -> bool:
+        """返回是否真的把请求发出去了（服务没就绪 → False，下一拍重试）。"""
         if not self._params.service_is_ready():
-            return
+            return False
         p = Parameter()
         p.name = name
         p.value.type = ParameterType.PARAMETER_BOOL
@@ -68,6 +69,7 @@ class InitialSpin(Node):
         req = SetParameters.Request()
         req.parameters = [p]
         self._params.call_async(req)
+        return True
         self._done = False
         self.create_timer(0.05, self._tick)
 
@@ -93,15 +95,17 @@ class InitialSpin(Node):
         if self._yaw is None:
             return                        # 等 odom
         if not self._gate_on:
-            # 手动通道需要底盘运动门 + 手动模式；只在本节点转动期间打开
-            self._set_bool('motion_enabled', True)
+            # 手动通道需要底盘运动门 + 手动模式；只在本节点转动期间打开。
+            # 2026-11-03 修 bug：原来不管服务是否就绪都置 _gate_on=True，
+            # 服务若没就绪就永远不再重试 → 门一直关着 → 车不动。
+            if not self._set_bool('motion_enabled', True):
+                return                    # 等参数服务就绪，下一拍再试
             self._set_bool('manual_enabled', True)
-            # 2026-11-03（用户要求）：自转期间不用车尾超声。
-            # 超声现在只在 state=='reversing' 时轮询，平时没数据 → 守卫
-            # fail_safe_block=True 会被误判成"车尾被挡"而拦住动作。
-            # 自转只转不走，后方保护没有意义，先关掉；转完立刻恢复。
+            # 自转期间不用车尾超声（超声平时不轮询，守卫会误判"车尾被挡"）。
+            # 只转不走，后方保护无意义；转完立刻恢复。
             self._set_bool('rear_guard_enabled', False)
             self._gate_on = True
+            self.get_logger().info('已请求打开运动门 + 手动模式')
             return                        # 下一拍再开始计角度
         if not hasattr(self, '_last_yaw'):
             self._last_yaw = self._yaw
