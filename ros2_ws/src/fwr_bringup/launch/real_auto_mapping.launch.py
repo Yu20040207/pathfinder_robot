@@ -57,7 +57,7 @@ def generate_launch_description():
         # /mapping/spin_done，收到 supervisor 的"转完"信号后才接管底盘。
         # 事件驱动，转得快就早开始，转得慢也不会被抢走。
         Node(package='fwr_bringup', executable='room_explorer',
-             name='room_explorer', output='screen',
+             name='room_explorer', output='both',
              condition=IfCondition(PythonExpression([
                  "'", LaunchConfiguration('use_explorer'), "' == 'true' and '",
                  LaunchConfiguration('explorer'), "' == 'room'"])),
@@ -88,7 +88,7 @@ def generate_launch_description():
         # 监督节点：踢一脚小方块让地图长轮廓 → 打开自动授权交给 explore_lite
         # （同时 10 Hz 发布 /explore/state=navigating 保持安全链）
         Node(package='fwr_bringup', executable='auto_mapping_supervisor',
-             name='auto_mapping_supervisor', output='screen',
+             name='auto_mapping_supervisor', output='both',
              parameters=[{'use_sim_time': use_sim_time,
                           'kick_leg_m': 1.0,
                           'kick_speed_mps': 0.15,
