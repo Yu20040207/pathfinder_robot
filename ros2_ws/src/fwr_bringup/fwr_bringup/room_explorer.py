@@ -405,8 +405,10 @@ class RoomExplorer(Node):
                           self._goal_xy[1] - robot[1]) < float(
                               self.get_parameter('goal_reached_m').value):
                 self._goal_xy = None
-            elif now - self._goal_sent_at > 60.0:
-                self.get_logger().warn('目标 60 秒没到，换一个')
+            elif now - self._goal_sent_at > 15.0:
+                # 2026-11-03：60 s 太久 —— 目标不可达时会长时间静止（实测占比 60%+）。
+                # 15 s 没到就换目标。
+                self.get_logger().warn('目标 15 秒没到，换一个')
                 self._goal_xy = None
             else:
                 self._skip(f'pending-goal ({self._goal_xy[0]:.1f},{self._goal_xy[1]:.1f}) '
