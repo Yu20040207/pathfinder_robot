@@ -40,6 +40,13 @@ class BaseBridgeNode(Node):
         self.declare_parameter('motion_enabled', False)
         self.declare_parameter('manual_enabled', False)
         self.declare_parameter('allow_pivot', False)
+        # 2026-11-03：固件速度环的**稳态标度误差**补偿。
+        # 实测：下发 141 mm/s，固件自己也报 214 mm/s（说明它知道跑快了，
+        # 但积分下限为 0、无法向下修正），实际就是 214。
+        # 试过放开负积分，结果引起极限环振荡（0↔0.46 m/s，12 次停走），已回退。
+        # 因此改在这里按固定比例补偿：乘 0.66 让实际速度≈指令速度。
+        # 同时缩放 v 和 ω，转弯半径不变。固件修正后应把它改回 1.0。
+        self.declare_parameter('wheel_speed_scale', 0.66)
         self._device = str(self.get_parameter('device').value)
         self._core = BaseBridgeCore()
         self._permit = RecoveryPermitCore()
@@ -269,6 +276,10 @@ class BaseBridgeNode(Node):
                 nav_v = max(nav_v, -cap)
             auto_v, auto_w = scale_velocity_to_wheel_limit(
                 nav_v, msg.angular.z, self._core.track_m)
+            # v 与 ω 同比缩放，保持曲率（转弯半径）不变
+            wheel_scale = float(self.get_parameter('wheel_speed_scale').value)
+            auto_v *= wheel_scale
+            auto_w *= wheel_scale
         else:
             self._reject_motion('mode-' + str(self._explore_mode))
             return
