@@ -142,10 +142,14 @@ class DirectionalSafetySelector(Node):
         vals = []
         for i, r in enumerate(scan.ranges):
             a = math.degrees(scan.angle_min + i * scan.angle_increment)
+            # 2026-11-03 修：原来两个分支完全一样，side 参数被忽略 →
+            # 左/右永远取到同一个值 → "请求方向被挡就转向另一边"的逻辑
+            # 永远不可能成立（opposite == requested）→ 贴边时转不动，
+            # 表现为"一卡一卡"。雷达倒装：150~180 是左前，-180~-150 是右前。
             if side > 0:
-                hit = 150.0 <= a <= 180.0 or -180.0 <= a <= -150.0
+                hit = 150.0 <= a <= 180.0
             else:
-                hit = 150.0 <= a <= 180.0 or -180.0 <= a <= -150.0
+                hit = -180.0 <= a <= -150.0
             if hit and math.isfinite(r) and r > 0.05:
                 vals.append(r)
         return min(vals) if vals else float('inf')
