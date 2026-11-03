@@ -180,6 +180,10 @@ controller_server:
       # 真实障碍由 collision_monitor（原始雷达，30-45 cm 停车区）兜底，关掉 RPP 的重复判定。
       use_collision_detection: false
       max_allowed_time_to_collision_up_to_carrot: 1.5
+      # 2026-11-03（自动建图线速度只有 0.054、目标仅 1 m 远）：
+      # RPP 默认"接近减速区"0.6 m，而前沿目标普遍只 1~1.4 m →
+      # 全程都在减速区里，永远到不了 0.15 巡航速度。缩到 0.25 m。
+      approach_velocity_scaling_dist: 0.25
       min_approach_linear_velocity: 0.05
       transform_tolerance: 0.2
 local_costmap:
