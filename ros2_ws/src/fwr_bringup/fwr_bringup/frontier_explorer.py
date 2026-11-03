@@ -4,10 +4,11 @@ import time
 
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped, Twist
-from nav2_msgs.action import NavigateToPose
+from nav2_msgs.action import NavigateThroughPoses, NavigateToPose
 from nav_msgs.msg import OccupancyGrid, Odometry
 from sensor_msgs.msg import LaserScan, Imu
-from fwr_interfaces.srv import RecoveryPermit, StartFixedGoal, StartTwoPointGoal
+from fwr_interfaces.srv import (RecoveryPermit, StartFixedGoal,
+                                StartMultiPointGoal, StartTwoPointGoal)
 import rclpy
 from rclpy.action import ActionClient
 from rclpy.node import Node
@@ -44,6 +45,10 @@ class FrontierExplorer(Node):
         self._last_map_xy = None
         self._last_odom_xy = None
         self._client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
+        # 2026-11-03 多点导航：一次规划穿过所有点（途经点不停车）
+        self._through_client = ActionClient(
+            self, NavigateThroughPoses, 'navigate_through_poses')
+        self._multi_points = None
         self._map = None
         self._odom = None
         self._map_at = None
@@ -85,6 +90,8 @@ class FrontierExplorer(Node):
         self.create_service(StartFixedGoal, '/explore/start_fixed_goal', self._start_fixed_goal)
         self.create_service(StartTwoPointGoal, '/explore/start_two_point_goal',
                             self._start_two_point_goal)
+        self.create_service(StartMultiPointGoal, '/explore/start_multi_point_goal',
+                            self._start_multi_point_goal)
         self.create_service(Trigger, '/explore/stop', self._stop)
         self.create_timer(.1, self._tick)
 
@@ -169,6 +176,7 @@ class FrontierExplorer(Node):
         if good:
             self._fixed_goal = None
             self._fixed_goals = None
+            self._multi_points = None
             self._sm.start()
             self._trial_started = now
         response.success = good
@@ -220,6 +228,7 @@ class FrontierExplorer(Node):
             self._goal = None
             self._fixed_goal = (request.x, request.y, request.yaw)
             self._fixed_goals = [self._fixed_goal]
+            self._multi_points = None   # 防止上一次多点路线残留
             self._status = 'idle'
             self._trial_started = now
             self._sm.start_fixed()
@@ -272,13 +281,89 @@ class FrontierExplorer(Node):
         if ok:
             self._goal = None
             self._fixed_goals = [start, end]
+            self._multi_points = None   # 防止上一次多点路线残留
             self._fixed_goal = start
             self._status = 'idle'
             self._trial_started = now
             self._sm.start_fixed(legs=2)
         return response
 
+    def _start_multi_point_goal(self, request, response):
+        """多点导航：第 1 个点是起点、最后 1 个是终点，中间是途经点。
+
+        用 NavigateThroughPoses 一次规划穿过全部点 —— 途经点只减速不停车，
+        到最后一个点才结束。坐标数不一致或点数 < 2 直接拒绝。
+        """
+        now = time.monotonic()
+        ready = (self._map_ready(now) and self._odom is not None and self._fault == 0
+                 and self._odom_at is not None and now - self._odom_at < .3
+                 and self._scan_at is not None and now - self._scan_at < .25
+                 and self._imu_at is not None and now - self._imu_at < .25
+                 and not self._manual and self._through_client.server_is_ready()
+                 and (not bool(self.get_parameter('require_bridge_arm').value)
+                      or self._bridge_armed)
+                 and not self._sm.enabled and self._handle is None
+                 and self._status not in ('sending', 'canceling', 'canceling_pending')
+                 and not (self._awaiting_permit or self._reversing))
+        if not ready:
+            failed = []
+            for name, condition in (
+                ('map', self._map_ready(now)),
+                ('odom', self._odom is not None and self._odom_at is not None
+                 and now - self._odom_at < .3),
+                ('scan', self._scan_at is not None and now - self._scan_at < .25),
+                ('imu', self._imu_at is not None and now - self._imu_at < .25),
+                ('Nav2', self._through_client.server_is_ready()),
+                ('arm', not bool(self.get_parameter('require_bridge_arm').value)
+                 or self._bridge_armed),
+                ('fault', self._fault == 0),
+                ('manual', not self._manual),
+                ('busy', not self._sm.enabled and self._handle is None),
+            ):
+                if not condition:
+                    failed.append(name)
+            response.accepted = False
+            response.reason = 'preflight failed: ' + ','.join(failed)
+            return response
+        xs, ys = list(request.xs), list(request.ys)
+        if len(xs) != len(ys) or len(xs) < 2:
+            response.accepted = False
+            response.reason = f'multi-point needs >=2 matched points (got {len(xs)}/{len(ys)})'
+            return response
+        mapped = self._odom_in_map(self._odom)
+        if mapped is None:
+            response.accepted = False
+            response.reason = 'map-to-odom transform unavailable'
+            return response
+        rx = mapped.pose.pose.position.x
+        ry = mapped.pose.pose.position.y
+        pts = []
+        for index, (gx, gy) in enumerate(zip(xs, ys)):
+            # 朝向：指向下一个点；最后一个点沿用前一段的朝向。
+            if index + 1 < len(xs):
+                yaw = math.atan2(ys[index + 1] - gy, xs[index + 1] - gx)
+            else:
+                yaw = pts[-1][2] if pts else math.atan2(gy - ry, gx - rx)
+            # 逐点校验（不限距离，只查地图内且非致命格）
+            ok, reason = validate_fixed_goal(self._map, rx, ry, gx, gy, yaw, 0.0)
+            if not ok:
+                response.accepted = False
+                response.reason = f'point {index + 1} rejected: {reason}'
+                return response
+            pts.append((gx, gy, yaw))
+        self._goal = None
+        self._fixed_goals = None
+        self._fixed_goal = None
+        self._multi_points = pts
+        self._status = 'idle'
+        self._trial_started = now
+        self._sm.start_fixed(legs=1)
+        response.accepted = True
+        response.reason = f'ok: {len(pts)} points'
+        return response
+
     def _stop(self, _, response):
+        self._multi_points = None
         self._sm.stop()
         self._end_recovery(False)
         response.success = True
@@ -505,6 +590,25 @@ class FrontierExplorer(Node):
             self._sm.stop()
             return
         self._last_map_xy = xy
+        if self._sm.fixed_goal and self._multi_points:
+            goal = NavigateThroughPoses.Goal()
+            for gx, gy, gyaw in self._multi_points:
+                ps = PoseStamped()
+                ps.header.frame_id = 'map'
+                ps.header.stamp = self.get_clock().now().to_msg()
+                ps.pose.position.x = gx
+                ps.pose.position.y = gy
+                ps.pose.orientation.z = math.sin(gyaw / 2)
+                ps.pose.orientation.w = math.cos(gyaw / 2)
+                goal.poses.append(ps)
+            self.get_logger().info(
+                'Multi-point route: %d points, last (%.2f, %.2f)'
+                % (len(goal.poses), goal.poses[-1].pose.position.x,
+                   goal.poses[-1].pose.position.y))
+            self._goal_pub.publish(goal.poses[-1])
+            self._status = 'sending'
+            self._through_client.send_goal_async(goal).add_done_callback(self._accepted)
+            return
         if self._sm.fixed_goal:
             if not self._fixed_goals or self._sm.fixed_leg_index >= len(self._fixed_goals):
                 self._sm.stop()

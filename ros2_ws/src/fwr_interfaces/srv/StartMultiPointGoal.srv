@@ -1,0 +1,7 @@
+# 多点导航：xs/ys 按顺序排列，第 1 个是起点、最后 1 个是终点，中间是途经点。
+# 执行时用 NavigateThroughPoses 一次规划穿过所有点，途经点只减速不停车。
+float64[] xs
+float64[] ys
+---
+bool accepted
+string reason

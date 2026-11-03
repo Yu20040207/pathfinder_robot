@@ -1,8 +1,11 @@
 <root main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree">
-    <RecoveryNode number_of_retries="2" name="NavigateThroughRecovery">
-      <PipelineSequence name="NavigateThroughWithReplanning">
-        <RateController hz="1.0">
+    <!-- 2026-11-03 多点导航：与 real_navigate_to_pose.xml 结构完全一致，
+         只把 ComputePathToPose 换成 ComputePathThroughPoses。
+         多点路线一次规划穿过所有点，途经点只减速不停车，只有最后一个点才结束。 -->
+    <RecoveryNode number_of_retries="6" name="NavigateRecovery">
+      <PipelineSequence name="NavigateWithReplanning">
+        <RateController hz="0.5">
           <ComputePathThroughPoses goals="{goals}" path="{path}" planner_id="GridBased"/>
         </RateController>
         <FollowPath path="{path}" controller_id="FollowPath"/>

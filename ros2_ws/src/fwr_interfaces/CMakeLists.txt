@@ -14,5 +14,6 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/RecoveryPermit.srv"
   "srv/StartFixedGoal.srv"
   "srv/StartTwoPointGoal.srv"
+  "srv/StartMultiPointGoal.srv"
   DEPENDENCIES std_msgs)
 ament_package()

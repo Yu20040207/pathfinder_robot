@@ -18,6 +18,7 @@
 #include <nav2_msgs/action/compute_path_to_pose.hpp>
 #include <nav2_msgs/action/navigate_to_pose.hpp>
 #include <fwr_interfaces/srv/start_fixed_goal.hpp>
+#include <fwr_interfaces/srv/start_multi_point_goal.hpp>
 #include <fwr_interfaces/srv/start_two_point_goal.hpp>
 #include <rcl_interfaces/srv/set_parameters.hpp>
 #include <std_srvs/srv/trigger.hpp>
@@ -149,6 +150,9 @@ protected:
         "/base_bridge/set_parameters");
       real_nav_client_ = node_->create_client<fwr_interfaces::srv::StartTwoPointGoal>(
         "/explore/start_two_point_goal");
+      // 2026-11-03 多点导航（3 个点及以上才走这条路；1 点/2 点仍用原来的流程）
+      multi_nav_client_ = node_->create_client<fwr_interfaces::srv::StartMultiPointGoal>(
+        "/explore/start_multi_point_goal");
       real_single_goal_client_ = node_->create_client<fwr_interfaces::srv::StartFixedGoal>(
         "/explore/start_fixed_goal");
       arm_client_ = node_->create_client<std_srvs::srv::Trigger>("/base/arm_auto");
@@ -259,6 +263,7 @@ private:
   using Plan = nav2_msgs::action::ComputePathToPose;
   using Navigate = nav2_msgs::action::NavigateToPose;
   using RealGoal = fwr_interfaces::srv::StartTwoPointGoal;
+  using MultiRealGoal = fwr_interfaces::srv::StartMultiPointGoal;
   using RealSingleGoal = fwr_interfaces::srv::StartFixedGoal;
   using Gate = rcl_interfaces::srv::SetParameters;
 
@@ -494,6 +499,11 @@ private:
     goal_label_->setText(points_.goal() ?
       QString("终点：(%1, %2)").arg(points_.goal()->x, 0, 'f', 2).arg(points_.goal()->y, 0, 'f', 2) :
       "终点：未选择");
+    if (points_.size() >= 3) {
+      start_label_->setText(QString("起点：(%1, %2)｜途经 %3 个点")
+        .arg(points_.start()->x, 0, 'f', 2).arg(points_.start()->y, 0, 'f', 2)
+        .arg(static_cast<int>(points_.size()) - 2));
+    }
   }
 
   void publish_empty_path()
@@ -538,10 +548,16 @@ private:
       marker.color.b = blue;
       markers.markers.push_back(marker);
     };
-    if (points_.two_point() && points_.start()) {
-      add_marker(*points_.start(), 0, 0.1f, 0.9f, 0.2f);
+    // 2026-11-03：多点路线把所有点都画出来（起点绿 / 途经黄 / 终点红）
+    const auto & pts = points_.points();
+    for (std::size_t i = 0; i < pts.size(); ++i) {
+      const bool is_last = (i + 1 == pts.size());
+      const bool is_first = (i == 0);
+      float r = 0.9f, g = 0.85f, b = 0.1f;          // 途经点：黄
+      if (is_first && pts.size() >= 2) {r = 0.1f; g = 0.9f; b = 0.2f;}   // 起点：绿
+      if (is_last) {r = 0.9f; g = 0.15f; b = 0.1f;}                       // 终点：红
+      add_marker(pts[i], static_cast<int>(i), r, g, b);
     }
-    if (points_.goal()) {add_marker(*points_.goal(), 1, 0.9f, 0.15f, 0.1f);}
     marker_pub_->publish(markers);
   }
 
@@ -847,6 +863,30 @@ private:
       });
       return;
     }
+    if (points_.size() >= 3) {
+      if (!multi_nav_client_ || !multi_nav_client_->service_is_ready()) {
+        fail_real_start("实车多点导航服务尚未就绪，已关闭运动门", revision);
+        return;
+      }
+      auto request = std::make_shared<MultiRealGoal::Request>();
+      for (const auto & point : points_.points()) {
+        request->xs.push_back(point.x);
+        request->ys.push_back(point.y);
+      }
+      status_label_->setText(QString("正在请求受控多点导航（%1 个点，途经点不停车）…")
+        .arg(points_.size()));
+      multi_nav_client_->async_send_request(request, [this, revision](
+        rclcpp::Client<MultiRealGoal>::SharedFuture future) {
+        if (revision != selection_revision_) {return;}
+        try {
+          const auto response = future.get();
+          handle_real_goal_response(response->accepted, response->reason, revision, false);
+        } catch (const std::exception & error) {
+          fail_real_start(QString("启动服务失败：%1").arg(error.what()), revision);
+        }
+      });
+      return;
+    }
     if (!real_nav_client_->service_is_ready()) {
       fail_real_start("实车两点导航服务尚未就绪，已关闭运动门", revision);
       return;
@@ -930,6 +970,7 @@ private:
   rclcpp_action::Client<Navigate>::SharedPtr nav_client_;
   rclcpp::Client<Gate>::SharedPtr gate_client_;
   rclcpp::Client<RealGoal>::SharedPtr real_nav_client_;
+  rclcpp::Client<MultiRealGoal>::SharedPtr multi_nav_client_;
   rclcpp::Client<RealSingleGoal>::SharedPtr real_single_goal_client_;
   rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr arm_client_;
   QComboBox * speed_box_ = nullptr;
