@@ -17,7 +17,7 @@ from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
 from rcl_interfaces.srv import SetParameters
 from rcl_interfaces.msg import Parameter, ParameterType
-from rclpy.qos import QoSProfile, ReliabilityPolicy
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import LaserScan
 
 
@@ -47,6 +47,12 @@ class AutoMappingSupervisor(Node):
         # 2026-10-31：踢一脚被包围时退到"前面够转弯"为止，车尾由超声守卫兜底
         self._rear_blocked = False
         self._rear_blocked_at = None
+        # 2026-11-03：面板"停止建图"发 /mapping/run=false，本节点必须停手，
+        # 否则它会周期性把运动门重新打开，车又动起来。
+        self._running = True
+        self.create_subscription(
+            Bool, '/mapping/run', self._on_mapping_run,
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.create_subscription(Bool, '/base/rear_blocked',
                                  lambda m: setattr(self, '_rear_blocked', bool(m.data)), 10)
         self._pause_pub = self.create_publisher(Bool, '/explore/pause', 10)
@@ -104,6 +110,16 @@ class AutoMappingSupervisor(Node):
         self._right_min = sector(90.0, 45.0)    # 车头右侧
 
     # ---------- 参数/授权 ----------
+    def _on_mapping_run(self, msg):
+        if msg.data == self._running:
+            return
+        self._running = bool(msg.data)
+        if self._running:
+            self.get_logger().info('收到 /mapping/run=true → 监督器恢复')
+        else:
+            self.get_logger().warn('收到 /mapping/run=false → 监督器停止，不再开门')
+            self._cmd_manual.publish(Twist())
+
     def _set_bool(self, name, value):
         if not self._param_client.service_is_ready():
             return
@@ -128,6 +144,8 @@ class AutoMappingSupervisor(Node):
 
     # ---------- 主状态机 ----------
     def _tick(self):
+        if not getattr(self, '_running', True):
+            return                        # 已按停止建图
         now = time.monotonic()
         state = 'navigating'
         if self._phase == 'arming':

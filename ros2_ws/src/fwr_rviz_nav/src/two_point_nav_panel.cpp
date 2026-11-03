@@ -112,6 +112,11 @@ protected:
     base_param_client_ =
       std::make_shared<rclcpp::AsyncParametersClient>(node_, "/base_bridge");
     mapping_save_client_ = node_->create_client<std_srvs::srv::Trigger>("/mapping/save");
+    // 2026-11-03：全局"建图运行中"开关。停止建图时必须让探索器/监督器一起停，
+    // 否则它们会自己把运动门重新打开 → 车又动起来（曾因此扯断 USB 线）。
+    // 用 transient_local，后启动的节点也能收到当前状态。
+    mapping_run_pub_ = node_->create_publisher<std_msgs::msg::Bool>(
+        "/mapping/run", rclcpp::QoS(1).transient_local());
     click_sub_ = node_->create_subscription<geometry_msgs::msg::PointStamped>(
       "/clicked_point", 10, [this](const geometry_msgs::msg::PointStamped::SharedPtr msg) {
         if (msg->header.frame_id != "map") {
@@ -204,6 +209,7 @@ protected:
         manual_vel_pub_->publish(geometry_msgs::msg::Twist());
       }
       set_base_gates(false);
+      publish_mapping_run(false);          // 通知探索器/监督器一起停
       if (!mapping_save_client_ || !mapping_save_client_->service_is_ready()) {
         status_label_->setText("已停止；但 /mapping/save 服务不可用，地图未保存");
         return;
@@ -222,6 +228,7 @@ protected:
       (void)future;
     });
     connect(map_start_button_, &QPushButton::clicked, this, [this]() {
+      publish_mapping_run(true);           // 允许探索
       set_base_gates(true);
       status_label_->setText("已打开运动门（motion/manual/mixed），可继续建图");
     });
@@ -401,6 +408,14 @@ private:
   }
 
   // 2026-10-31：建图急停/恢复用，直接改 base_bridge 的三道开关
+  void publish_mapping_run(bool running)
+  {
+    if (!mapping_run_pub_) {return;}
+    std_msgs::msg::Bool msg;
+    msg.data = running;
+    mapping_run_pub_->publish(msg);
+  }
+
   void set_base_gates(bool enabled)
   {
     if (!base_param_client_ || !base_param_client_->service_is_ready()) {
@@ -923,6 +938,7 @@ private:
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr manual_vel_pub_;
   std::shared_ptr<rclcpp::AsyncParametersClient> base_param_client_;
   rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr mapping_save_client_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr mapping_run_pub_;
   QPushButton * map_start_button_ = nullptr;
   QPushButton * map_stop_button_ = nullptr;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr ready_sub_;

@@ -87,6 +87,12 @@ class RoomExplorer(Node):
         scan_qos = QoSProfile(depth=5, reliability=ReliabilityPolicy.BEST_EFFORT)
         self.create_subscription(LaserScan, '/scan', self._on_scan, scan_qos)
         self.create_subscription(Bool, '/base/rear_blocked', self._on_rear_blocked, 10)
+        # 2026-11-03：面板"停止建图"会发 /mapping/run=false，
+        # 本节点必须一起停，否则它会自己重开运动门把车又开走。
+        self._running = True
+        self.create_subscription(
+            Bool, '/mapping/run', self._on_mapping_run,
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self._param_cli = self.create_client(SetParameters, '/base_bridge/set_parameters')
         # 2026-10-31：发目标前先在全局代价地图上验证，避开"注定失败"的目标
         # （否则要浪费 2 次失败 + 一次脱困才发现它到不了）
@@ -176,6 +182,19 @@ class RoomExplorer(Node):
                     best_d = d
                     best = (ox + nx * res, oy + ny * res)
         return best
+
+    def _on_mapping_run(self, msg: Bool) -> None:
+        if msg.data == self._running:
+            return
+        self._running = bool(msg.data)
+        if self._running:
+            self.get_logger().info('收到 /mapping/run=true → 恢复探索')
+        else:
+            self.get_logger().warn('收到 /mapping/run=false → 停止探索并交还底盘')
+            self._vel_pub.publish(Twist())
+            self._goal_xy = None
+            self._escaping = False
+            self._set_manual(False)
 
     def _on_rear_blocked(self, msg: Bool) -> None:
         self._rear_blocked = bool(msg.data)
@@ -354,6 +373,8 @@ class RoomExplorer(Node):
 
     def _tick_impl(self) -> None:
         self._tick_calls += 1
+        if not getattr(self, '_running', True):
+            return                        # 已按停止建图，什么都不做
         if self._tick_calls in (1, 5, 20):
             self.get_logger().info(f'[tick] 第 {self._tick_calls} 次回调')
         m = self._map
