@@ -146,8 +146,7 @@ class RoomExplorer(Node):
         m = self._costmap
         if m is None:
             return (x, y)          # 还没代价地图，先放行
-        if self._goal_xy is not None:
-            self._skip('pending-goal')
+        self._mark = 'no-pending-goal'
         res = m.info.resolution
         ox, oy = m.info.origin.position.x, m.info.origin.position.y
         w, h = m.info.width, m.info.height
@@ -333,7 +332,8 @@ class RoomExplorer(Node):
 
     # ---------- 主循环 ----------
     def _tick(self) -> None:
-        """外壳：任何异常都要打出来，否则定时器静默失效、完全看不出原因。"""
+        """外壳：记录退出点 + 捕获异常（否则定时器静默失效，看不出原因）。"""
+        self._mark = 'entry'
         try:
             self._tick_impl()
         except Exception:                     # noqa: BLE001
@@ -343,6 +343,12 @@ class RoomExplorer(Node):
                 self._err_at = now
                 self.get_logger().error(
                     f'_tick 异常: {traceback.format_exc()}')
+        now2 = self.get_clock().now().nanoseconds * 1e-9
+        if now2 - getattr(self, '_mark_at', 0.0) > 3.0:
+            self._mark_at = now2
+            self.get_logger().info(
+                f'[exit] {self._mark} escaping={self._escaping} '
+                f'goal={"无" if self._goal_xy is None else (round(self._goal_xy[0],2), round(self._goal_xy[1],2))}')
 
     def _tick_impl(self) -> None:
         self._tick_calls += 1
@@ -350,6 +356,7 @@ class RoomExplorer(Node):
             self.get_logger().info(f'[tick] 第 {self._tick_calls} 次回调')
         m = self._map
         robot = self._robot_xy()
+        self._mark = 'got-inputs'
         if m is None or robot is None:
             self._skip('no-map-or-robot')
             return
@@ -363,7 +370,9 @@ class RoomExplorer(Node):
             self._goal_xy = None
             return
         self._frozen_logged = False
+        self._mark = 'map-fresh'
         # 脱困短退期间不派新目标
+        self._mark = 'not-escaping'
         if self._escaping:
             self._run_escape(now)      # 注意：这里必须真的调用（原来写成 or 短路了）
             return
@@ -377,10 +386,10 @@ class RoomExplorer(Node):
                 self.get_logger().warn('目标 60 秒没到，换一个')
                 self._goal_xy = None
             else:
+                self._skip(f'pending-goal ({self._goal_xy[0]:.1f},{self._goal_xy[1]:.1f}) '
+                           f'age={now - self._goal_sent_at:.0f}s')
                 return
 
-        if self._goal_xy is not None:
-            self._skip('pending-goal')
         res = m.info.resolution
         ox, oy = m.info.origin.position.x, m.info.origin.position.y
         w, h = m.info.width, m.info.height
@@ -400,10 +409,19 @@ class RoomExplorer(Node):
         core = binary_erosion(free, np.ones((2 * r + 1, 2 * r + 1)))
         lab, _ = label(core, structure=np.ones((3, 3)))
         room_id = lab[cyp, cxp]
+        if lab.max() == 0:
+            # 2026-11-03 修：door_closing_m=0.42 m 对应的腐蚀核是 17×17 格
+            # （0.85 m），新建图时自由空间又窄又碎，一腐蚀就全没了 →
+            # lab 全 0 → 原来直接 return，于是探索器每个 tick 静默退出、
+            # 永远不派目标。改为退化成"整张自由空间算一个房间"继续工作。
+            lab = np.ones_like(lab)
+            room_id = 1
+            self._skip('room-core-empty→whole-map')
         if room_id == 0:
             # 机器人不在任何"房间芯"里（在门口/窄处）→ 找最近的芯
             ys, xs = np.where(lab > 0)
             if len(ys) == 0:
+                self._skip('no-room-core-at-all')
                 return
             idx = int(np.argmin((ys - cyp) ** 2 + (xs - cxp) ** 2))
             room_id = lab[ys[idx], xs[idx]]
@@ -423,6 +441,7 @@ class RoomExplorer(Node):
         in_room = frontier & room_mask
         use_gate = bool(self.get_parameter('use_room_gate').value)
 
+        self._mark = 'frontier-computed'
         cand = np.argwhere(in_room if (use_gate and in_room.any()) else frontier)
         free_area = float(free.sum()) * res * res
         if len(cand) == 0:
