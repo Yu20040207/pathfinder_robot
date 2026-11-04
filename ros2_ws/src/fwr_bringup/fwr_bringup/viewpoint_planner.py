@@ -75,6 +75,9 @@ class ViewpointPlanner(Node):
         self.declare_parameter('lookahead', 3)
         self.declare_parameter('refill_at', 2)
         self.declare_parameter('waypoint_reach_m', 0.9)
+        # 房间成型后绕边缘一圈的冷却时间（防止反复绕圈）
+        self.declare_parameter('perimeter_cooldown_s', 180.0)
+        self.declare_parameter('perimeter_coverage', 0.85)   # 半径内看见 85% → 绕边缘一圈
         # 雷达起步：地图还没长开时，转向最开阔方向并前进一小段，
         # 让 slam_toolbox 整合新扫描（它要求移动 >=0.5 m 才会更新地图）
         self.declare_parameter('bootstrap_forward_m', 1.0)
@@ -114,6 +117,7 @@ class ViewpointPlanner(Node):
         self._nav_many = ActionClient(self, NavigateThroughPoses, '/navigate_through_poses')
         self._batch = []
         self._chaining = False
+        self._perimeter_at = 0.0
         # 去过但失败的门（前沿）拉黑，避免反复撞同一个过不去的门洞
         self._bad_frontiers: list[tuple[int, int]] = []
         self._last_label = ''
@@ -467,7 +471,24 @@ class ViewpointPlanner(Node):
             self._set_state('expand-radius %.0f m' % self._radius)
             return
 
-        # ③ 只要还有前沿（门/没看过的区域）→ 必须去，**绝不判完成**
+        # ③ 半径内没有值得去的点了 → 房间大致成型：先沿边缘走一圈确认墙壁，
+        #    然后再考虑出门（用户 2026-11-04 的思路）
+        # 用"半径内自由格的已看见比例"判定房间是否大致成型（比"没候选"更可靠：
+        # 只要有候选就会一直挑，永远轮不到边缘环线）
+        cover_r = self._radius_coverage(cell, free)
+        if (int(free.sum()) > int(self.get_parameter('bootstrap_max_cells').value)
+                and cover_r >= float(self.get_parameter('perimeter_coverage').value)
+                and (now - self._perimeter_at)
+                > float(self.get_parameter('perimeter_cooldown_s').value)):
+            loop = self._perimeter_batch(cell, free, drivable)
+            if loop:
+                self._perimeter_at = now
+                self.get_logger().info('房间成型 → 沿边缘绕一圈（%d 个点）' % len(loop))
+                self._dispatch_batch(loop, now)
+                self._set_state('perimeter %d' % len(loop))
+                return
+
+        # ④ 只要还有前沿（门/没看过的区域）→ 必须去，**绝不判完成**
         #    距离要求逐级放宽：1.2 → 0.84 → 0.54 m（太近会被 Nav2 判已达，但
         #    总比原地不动强；放宽到 0.5 m 仍不行才认为这一片暂时去不了）
         if has_frontier:
@@ -698,6 +719,10 @@ class ViewpointPlanner(Node):
             batch.append(cands[idx])
             covered[vis[idx]] = True
             prev = cands[idx]
+        # 2026-11-04：批次内必须按"离车距离递增"排序，否则会出现
+        # 远→近→远 的折返（用户反馈"一个在前一个在后，开过去又折返"）
+        if len(batch) > 1:
+            batch.sort(key=lambda c: (c[0] - seed[0]) ** 2 + (c[1] - seed[1]) ** 2)
         return batch
 
     def _dispatch_batch(self, cells, now, chain: bool = False) -> None:
@@ -744,6 +769,39 @@ class ViewpointPlanner(Node):
         self._goal_future = self._nav_many.send_goal_async(goal)
         self._goal_future.add_done_callback(self._on_goal_response)
         self._set_state('batch %d' % len(cells))
+
+    def _radius_coverage(self, cell, free) -> float:
+        """当前半径内，已知自由格里"已看见"的比例。"""
+        res = self._map.info.resolution
+        h, w = free.shape
+        yy, xx = np.ogrid[:h, :w]
+        r = int(self._radius / res)
+        disk = (yy - cell[0]) ** 2 + (xx - cell[1]) ** 2 <= r ** 2
+        zone = free & disk
+        total = int(zone.sum())
+        if total == 0:
+            return 0.0
+        return float((self._covered & zone).sum()) / total
+
+    def _perimeter_batch(self, cell, free, drivable) -> list:
+        """沿"房间内缩轮廓"采样一圈点（按环绕顺序，不会折返）。"""
+        res = self._map.info.resolution
+        radius_cells = int(self._radius / res)
+        clearance = int(round(float(self.get_parameter('clearance_m').value) / res))
+        step = int(round(1.2 / res))
+        seed = self._snap(cell, drivable) or cell
+        pts = vc.perimeter_waypoints(free, seed, radius_cells, clearance, step)
+        if not pts:
+            return []
+        # 从离车最近的点开始，取前 batch_size 个（滚动续点会继续补）
+        pts.sort(key=lambda c: (c[0] - cell[0]) ** 2 + (c[1] - cell[1]) ** 2)
+        n = max(2, int(self.get_parameter('batch_size').value))
+        chosen = pts[:n]
+        # 保证够远（否则会被 Nav2 判已到达）
+        min_cells = float(self.get_parameter('min_goal_m').value) / res
+        chosen = [c for c in chosen
+                  if math.hypot(c[0] - cell[0], c[1] - cell[1]) >= min_cells] or chosen
+        return chosen
 
     def _goto_frontier(self, drivable, free, unknown, cell, now,
                        min_dist_m: float = None) -> bool:

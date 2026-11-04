@@ -227,3 +227,38 @@ def coverage_ratio(covered: np.ndarray, free: np.ndarray) -> float:
     if total == 0:
         return 1.0
     return float(((covered & free).sum()) / total)
+
+
+def perimeter_waypoints(free: np.ndarray, seed: tuple[int, int], radius_cells: int,
+                        clearance_cells: int, step_cells: int) -> list[tuple[int, int]]:
+    """房间"边缘一圈"的采样点（内缩 clearance 后的轮廓，按环绕顺序排列）。
+
+    用户 2026-11-04 的思路：房间大致成型后，先沿边缘走一圈把墙确认清楚，再出门。
+    中间乱挑"信息量最大"的点容易来回折返，沿轮廓走是一条闭合的环，不会折返。
+    """
+    h, w = free.shape
+    yy, xx = np.ogrid[:h, :w]
+    disk = (yy - seed[0]) ** 2 + (xx - seed[1]) ** 2 <= radius_cells ** 2
+    room = free & disk
+    if not room.any():
+        return []
+    inner = erode(room, max(1, clearance_cells))
+    if not inner.any():
+        inner = room
+    ring = inner & ~erode(inner, 1)          # 轮廓（1 格厚）
+    ys, xs = np.nonzero(ring)
+    if ys.size == 0:
+        return []
+    # 按极角排序 → 得到环绕一圈的顺序（不会来回折返）
+    cy, cx = float(ys.mean()), float(xs.mean())
+    order = np.argsort(np.arctan2(ys - cy, xs - cx))
+    pts = [(int(ys[i]), int(xs[i])) for i in order]
+    # 等距抽样
+    step = max(1, int(step_cells))
+    out = []
+    last = None
+    for p_ in pts:
+        if last is None or (p_[0] - last[0]) ** 2 + (p_[1] - last[1]) ** 2 >= step ** 2:
+            out.append(p_)
+            last = p_
+    return out
