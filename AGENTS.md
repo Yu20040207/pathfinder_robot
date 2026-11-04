@@ -159,6 +159,62 @@
 > 2026-11-02 一起改（0.35→0.7、true→false、0.48→0.50、3→6）后出现
 > **起步即原地来回转**；全部回退后立刻恢复正常。改一个、跑一次，再动下一个。
 
+## 3.97 🔒 参数冻结规则（2026-11-04 用户明确要求）
+
+**用户原话：「把这些参数都记下来，不要随便修改，后面改的时候一定要经过我批准」**
+
+### 硬规则（违反即为事故）
+1. 下列参数**未经用户在当次会话里明确批准，一律不许改**（包括"顺手优化"）。
+2. 需要改时：先说清**改哪个、从多少改到多少、为什么、预期效果、如何验证**，
+   等用户确认后再动手。
+3. 一次只改一个，改完必须实机验证并把数字写进 `docs/AGENT_LOG.md`。
+4. 有护栏测试守着的值（见各节注释）**连提议都要先说明为什么护栏允许**。
+
+### 冻结清单（v1.4 实际运行值）
+**导航 `config/real_nav2.yaml`**
+| 参数 | 值 |
+| --- | --- |
+| `FollowPath.desired_linear_vel` | 0.20 |
+| `FollowPath.lookahead_dist` / `min` / `max` | **0.55** / 0.40 / 0.85 |
+| `FollowPath.angular_dist_threshold` | 0.6 |
+| `FollowPath.rotate_to_heading_angular_vel` | **0.55** |
+| `FollowPath.max_angular_accel` | 4.0 |
+| `FollowPath.use_regulated_linear_velocity_scaling` | false |
+| `FollowPath.use_cost_regulated_linear_velocity_scaling` | **false** |
+| `inflation_radius`（全局/局部） | 0.48 |
+| `cost_scaling_factor` | 1.2 |
+| `footprint_padding` | 0.02 |
+| `xy_goal_tolerance` | 0.4 |
+| velocity_smoother `max_velocity` / `max_accel` | [0.20,0,1.0] / [0.35,0,4.0] |
+| BT `RateController` | 0.5 Hz |
+
+**碰撞监控 `config/real_collision_monitor_forward.yaml`**
+| 参数 | 值 |
+| --- | --- |
+| `front_stop.points` | [0.32,0.22, 0.38,0.22, 0.38,-0.22, 0.32,-0.22]（半宽 **0.22**，护栏下限）|
+| `front_slow.points` | [0.30,0.22, 0.50,0.22, 0.50,-0.22, 0.30,-0.22] |
+| `stop_pub_timeout` | **18.0**（护栏要求 ≥17）|
+| `source_timeout` | 0.6 |
+
+**底盘 `base_bridge`**
+| 参数 | 值 |
+| --- | --- |
+| `wheel_speed_scale` | **0.66** |
+| `sensor_timeout_s` | 0.5 |
+
+**探索器 `frontier_explorer`（导航侧）**
+| 参数 | 值 |
+| --- | --- |
+| `stuck_cancel_s` | 2.5 |
+| `max_stuck_retries` | 2 |
+
+**建图侧（`real_auto_mapping.launch.py` 传给 room_explorer 的）**
+| 参数 | 值 |
+| --- | --- |
+| `escape_after_failures` | 9999 |
+| `replan_s` | 1.5 |
+| `use_room_gate` | False |
+
 ## 3.96 ⭐ v1.4 定版（2026-11-04，解决"过门慢 / 门口卡住"）
 
 v1.3 之后的改动（都已实车验证）：
