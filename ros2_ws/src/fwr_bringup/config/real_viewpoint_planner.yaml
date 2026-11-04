@@ -1,0 +1,19 @@
+# 视点规划器参数（自动建图专用，默认 enabled: false = 完全不影响现有行为）
+viewpoint_planner:
+  ros__parameters:
+    enabled: false            # ← 只有显式打开才会参与建图
+    sensor_range_m: 6.0       # 有效射程（C1 可到 8 m，留余量）
+    rays: 180                 # 射线数；必须与 fill 匹配（6 m 处间隔 ~0.5 m → 需 180 条）
+    fill_cells: 2             # 射线缝隙填充（模拟雷达扇面，否则只标记'射线经过的线'）
+    candidate_step_m: 1.0     # 候选视点网格
+    clearance_m: 0.25         # 视点离墙最小距离（车体半径 + 余量）
+    inset_m: 0.40             # 前沿扩展时，目标离未知边界的距离
+    radius_start_m: 4.0       # 初始搜索半径（房间尺度，天然"先扫本房间"）
+    radius_max_m: 8.0         # 半径上限，超过就转去"门口扩展"
+    cover_target: 0.90        # 视点阶段的目标覆盖率（剩下的交给扩展）
+    min_gain_cells: 400       # 新增可见格 <1 m² 就不值得跑（实测 12 会陷入抠细节）
+    dwell_s: 3.0              # 到点停留时间（让雷达扫一圈）
+    hop_timeout_s: 45.0       # 单跳超时
+    arrive_m: 0.45            # 判定"到了"的距离
+    replan_period_s: 1.0      # 决策周期
+    map_topic: /map
