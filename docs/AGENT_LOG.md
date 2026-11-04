@@ -4796,3 +4796,54 @@ front_stop 触发     42 次 → 0 次
 - 卡住取消 0 次、重试 0 次、`front_stop` 2 次但未造成卡死
 - 日志特征：`终点距车仅 0.35 m（闭环路线）→ 改为逐段执行 6 段`
 - 多点导航从"未验证"升级为**实车已验证**
+
+## 2026-11-04 14:10 · 安装效率工具（免 sudo）+ ruff 查出真 bug
+
+### 背景
+用户要求"在网上安装一些对本项目有用或提高效率的插件"。
+本机 **sudo 需要密码**、`apt-cache` 索引为空 → **系统包装不了**，
+改用免 sudo 方式：静态二进制进 `~/.local/bin`、Python 工具进 `.venv`。
+
+### 已安装并验证
+**`~/.local/bin`（已在 PATH）**
+| 工具 | 版本 | 用途 |
+| --- | --- | --- |
+| fzf | 0.74.5 | 模糊搜索文件/日志/历史 |
+| fd | 10.5.0 | 快速文件查找（自动忽略 build/install）|
+| bat | 0.26.1 | 带语法高亮看日志/配置 |
+| hyperfine | 2.0.0 | 命令耗时基准（验证改动是否变慢）|
+| btop | 1.4.8 | 资源监视（排查节点吃满 CPU → TF 滞后）|
+
+**`.venv`**
+| 工具 | 版本 |
+| --- | --- |
+| ruff | 0.17.3 |
+| pre-commit | 4.6.2（**未配 hook，等你同意**）|
+| pytest-xdist / pytest-html | 已装 |
+
+### 新增文件
+- `ruff.toml` —— 只选 `F` + `E9`（真 bug），**不选风格规则**，避免稳定项目产生大批无意义改动
+- `docs/agent/toolchain.md` —— 工具说明 + 用法 + 需要 sudo 的那批 GUI 工具清单
+
+### ruff 立刻查出的真 bug
+`fwr_bringup/wall_follower.py:409-410` —— **`twist` 未定义就被使用**
+（`twist = Twist()` 在 420 行，而 409 行在它前面的 `return` 分支里）：
+```python
+if now < self._reverse_until:
+    twist.linear.x = -float(...)     # NameError！
+    self._pub.publish(twist)
+```
+进入"倒车恢复"分支必然抛 `NameError`，节点崩。
+`wall_follower` 已不在主链路（现为 frontier/room_explorer），**暂不影响现场**，但建议修掉或删除。
+另有 5 个赋值后未使用的变量、4 个未使用导入（`ruff --fix` 可安全清理）。
+
+### 未安装（需 sudo，已给用户命令）
+`rqt_plot` / `rqt_reconfigure` / `rqt_tf_tree` / `rqt_image_view` / `rqt_console` /
+`plotjuggler-ros` / `foxglove-bridge` —— 命令写在 `docs/agent/toolchain.md` 第 4 节。
+
+### 基线（供回归对比）
+```
+source /opt/ros/humble/setup.bash && source ros2_ws/install/setup.bash
+PYTHONPATH="ros2_ws/src/fwr_bringup:$PYTHONPATH" .venv/bin/python -m pytest ros2_ws/src/fwr_bringup/test -q
+→ 255 passed, 1 warning in 1.41s
+```

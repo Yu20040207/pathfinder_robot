@@ -1,0 +1,21 @@
+# ruff 配置：只查"真 bug"，不做风格检查
+#
+# 目的：守住 AGENTS.md 里记录过的那类事故 ——
+#   · 未定义变量（运行时 NameError → 节点崩 → 车不动）
+#   · 未使用的导入/变量（多数是无害噪音，但常常是"改了但没接上"的线索）
+# 不选风格规则（E1/E2/E5/W/I/UP…），避免对一个已稳定运行的项目产生大批无意义改动。
+#
+# 用法：
+#   .venv/bin/ruff check ros2_ws/src/fwr_bringup/fwr_bringup/
+#   .venv/bin/ruff check ros2_ws/src/fwr_bringup/ --fix    # 只修可安全修复的
+
+target-version = "py310"
+line-length = 100
+extend-exclude = ["build", "install", "log", "third_party"]
+
+[lint]
+select = ["F", "E9"]
+
+[lint.per-file-ignores]
+# 测试里会有"为了注册 fixture 而导入"的情况
+"test/*" = ["F401"]
