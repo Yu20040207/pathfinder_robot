@@ -147,10 +147,12 @@ def pick_next_viewpoint(candidates: Sequence[tuple[int, int]],
                         dist: np.ndarray,
                         radius_cells: int,
                         visited: Iterable[tuple[int, int]] = (),
-                        min_gain_cells: int = 12) -> int | None:
+                        min_gain_cells: int = 12,
+                        home_dist: np.ndarray | None = None) -> int | None:
     """在半径内挑"性价比最高"（新增可见/路径长度）的视点，返回候选下标。
 
-    - 只考虑 radius_cells 内、可达（dist>=0）的候选
+    - 半径限制用 home_dist（相对车本身）判断，dist 只用来算性价比；
+      两者分开是为了支持"滚动续点"：选点要连贯（相对上一点），但不能越选越远。
     - 新增可见格少于 min_gain_cells 的不要（避免为 1 格跑很远）
     """
     visited_set = set(visited)
@@ -159,7 +161,11 @@ def pick_next_viewpoint(candidates: Sequence[tuple[int, int]],
         if cell in visited_set:
             continue
         d = int(dist[cell[0], cell[1]])
-        if d < 0 or d > radius_cells:
+        if d < 0:
+            continue
+        anchor = home_dist if home_dist is not None else dist
+        a = int(anchor[cell[0], cell[1]])
+        if a < 0 or a > radius_cells:
             continue
         gain = int((~covered[visibility[i]]).sum())
         if gain < min_gain_cells:

@@ -69,7 +69,12 @@ class ViewpointPlanner(Node):
         # 太近的目标会被判"已到达"，车一步不走 —— 2026-11-04 实测死锁）
         self.declare_parameter('min_goal_m', 1.2)
         # 每批打包几个视点（1 = 退回逐点走，会一停一停）
-        self.declare_parameter('batch_size', 4)
+        self.declare_parameter('batch_size', 3)
+        # 滚动续点：队列里始终保留 lookahead 个点；当剩余点 <= refill_at 时
+        # 立刻补一个新点并重发整条路线（用户思路：到第一个点之前就把第二个算好）
+        self.declare_parameter('lookahead', 3)
+        self.declare_parameter('refill_at', 2)
+        self.declare_parameter('waypoint_reach_m', 0.9)
         # 雷达起步：地图还没长开时，转向最开阔方向并前进一小段，
         # 让 slam_toolbox 整合新扫描（它要求移动 >=0.5 m 才会更新地图）
         self.declare_parameter('bootstrap_forward_m', 1.0)
@@ -108,6 +113,10 @@ class ViewpointPlanner(Node):
         # 经过时不停车（多点导航已实车验证这套机制）
         self._nav_many = ActionClient(self, NavigateThroughPoses, '/navigate_through_poses')
         self._batch = []
+        self._chaining = False
+        # 去过但失败的门（前沿）拉黑，避免反复撞同一个过不去的门洞
+        self._bad_frontiers: list[tuple[int, int]] = []
+        self._last_label = ''
         self._param_client = self.create_client(SetParameters, '/base_bridge/set_parameters')
         self._arm_client = self.create_client(Trigger, '/base/arm_auto')
         self._ready = False
@@ -379,6 +388,36 @@ class ViewpointPlanner(Node):
         if self._boot is not None:
             return
 
+        # ---- 滚动续点：队列里始终留 lookahead 个点，途经点不停车 ----
+        if self._batch:
+            res = self._map.info.resolution
+            reach = float(self.get_parameter('waypoint_reach_m').value) / res
+            # 到达队首 → 记为已访问并出队
+            while self._batch:
+                hd = self._batch[0]
+                d = math.hypot(cell[0] - hd[0], cell[1] - hd[1])
+                if d <= reach:
+                    self._visited.add(self._batch.pop(0))
+                else:
+                    break
+            if not self._batch:
+                self._dwell_until = now + float(self.get_parameter('dwell_s').value)
+                self._target = None
+                self._set_state('arrived')
+                return
+            # 剩余不足 → 提前补一个新点并整条重发
+            if len(self._batch) <= int(self.get_parameter('refill_at').value):
+                nxt = self._plan_batch(self._batch[-1], free, blocked, unknown, drivable)
+                if nxt:
+                    fresh = [c for c in nxt if c not in self._batch]
+                    if fresh:
+                        self._batch.append(fresh[0])
+                        self._dispatch_batch(self._batch, now, chain=True)
+                        self._set_state('chain %d' % len(self._batch))
+                        return
+            self._set_state('rolling %d' % len(self._batch))
+            return
+
         # 诊断：每 10 秒打一次内部数字（排查"不动"时非常有用）
         if now - getattr(self, '_dbg_at', 0.0) > 10.0:
             self._dbg_at = now
@@ -643,14 +682,17 @@ class ViewpointPlanner(Node):
         radius_cells = int(self._radius / res)
         batch = []
         prev = seed
+        # ⚠️ 半径必须相对**车自己**（seed）算：相对"上一个点"算的话，
+        # 链式选点会一步一步把车带出房间 → 房间没扫完就出门（2026-11-04 实测）。
+        # 而排序用的距离仍然相对上一个点，避免 Z 字形来回拐。
+        home_dist = dist
         for _ in range(max(1, int(self.get_parameter('batch_size').value))):
-            # ⚠️ 2026-11-04：每一步的距离必须相对**上一个点**算，否则选出来的
-            # 顺序会是 远→近→远，规划器只能连成 Z 字形，车来回拐（用户截图确认）
             step_dist = vc.bfs_distance(drivable, prev)
             idx = vc.pick_next_viewpoint(
                 cands, vis, covered, step_dist, radius_cells,
                 visited=self._visited | set(batch),
-                min_gain_cells=int(self.get_parameter('min_gain_cells').value))
+                min_gain_cells=int(self.get_parameter('min_gain_cells').value),
+                home_dist=home_dist)
             if idx is None:
                 break
             batch.append(cands[idx])
@@ -658,10 +700,17 @@ class ViewpointPlanner(Node):
             prev = cands[idx]
         return batch
 
-    def _dispatch_batch(self, cells, now) -> None:
-        """把一串视点打包成 NavigateThroughPoses（途经点不停车）。"""
+    def _dispatch_batch(self, cells, now, chain: bool = False) -> None:
+        """把一串视点打包成 NavigateThroughPoses（途经点不停车）。
+
+        chain=True 表示"滚动续点"：取消上一条路线，立刻用"剩余点+新点"重发，
+        这样机器人不会在视点处停车（用户 2026-11-04 的想法）。
+        """
         if not cells:
             return
+        if chain:
+            self._chaining = True          # 旧目标是我们主动取消的，回调要忽略
+            self._cancel_goal_only()
         if len(cells) == 1 or not self._nav_many.server_is_ready():
             # 只有一个点、或批量服务不可用 → 退回单点
             self._visited.add(cells[0])
@@ -713,7 +762,12 @@ class ViewpointPlanner(Node):
         want = float(min_dist_m if min_dist_m is not None
                      else self.get_parameter('min_goal_m').value)
         nearest = int(want / self._map.info.resolution)
-        reachable = [f for f in fronts if dist[f[0], f[1]] >= 0]
+        def _blacklisted(c):
+            return any(math.hypot(c[0] - b[0], c[1] - b[1]) * self._map.info.resolution < 0.8
+                       for b in self._bad_frontiers)
+
+        reachable = [f for f in fronts
+                     if dist[f[0], f[1]] >= 0 and not _blacklisted(f)]
         reachable.sort(key=lambda f: dist[f[0], f[1]])
         far = [f for f in reachable if dist[f[0], f[1]] >= nearest]
         tgt = vc.expansion_target(far, drivable, dist, inset_cells=inset) if far else None
@@ -780,6 +834,7 @@ class ViewpointPlanner(Node):
         goal.pose.pose.position.x = float(x)
         goal.pose.pose.position.y = float(y)
         goal.pose.pose.orientation.w = 1.0
+        self._last_label = label
         self.get_logger().info('%s → (%.2f, %.2f)' % (label, x, y))
         self._goal_future = self._nav_client.send_goal_async(
             goal, feedback_callback=self._on_feedback)
@@ -806,6 +861,10 @@ class ViewpointPlanner(Node):
         self._active_since = time.monotonic()
 
     def _on_goal_result(self, future) -> None:
+        if getattr(self, '_chaining', False):
+            # 这条结果是"滚动续点"主动取消的旧目标，不能当失败处理
+            self._chaining = False
+            return
         status = None
         try:
             status = future.result().status
@@ -830,6 +889,10 @@ class ViewpointPlanner(Node):
                 self.get_parameter('dwell_s').value)
         else:
             self._batch = []
+            # 目标过不去 → 如果是门（前沿/起步），把它附近的前沿拉黑，换下一个门试
+            if self._target is not None and self._last_label in ('frontier', 'bootstrap'):
+                self._bad_frontiers.append(self._target)
+                self.get_logger().warn('目标未达成 → 拉黑该处前沿 (%d,%d)，换下一个门' % self._target)
             self._close_gate()                        # 失败立刻关门，等下一轮重开
         self._target = None
 
