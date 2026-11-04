@@ -17,8 +17,8 @@ import time
 
 import numpy as np
 import rclpy
-from geometry_msgs.msg import Twist
-from nav2_msgs.action import NavigateToPose
+from geometry_msgs.msg import PoseStamped, Twist
+from nav2_msgs.action import NavigateThroughPoses, NavigateToPose
 from nav_msgs.msg import OccupancyGrid
 from rclpy.action import ActionClient
 from rclpy.node import Node
@@ -68,6 +68,8 @@ class ViewpointPlanner(Node):
         # 最短目标距离：小于它就不派（Nav2 的 xy_goal_tolerance 是 0.4 m，
         # 太近的目标会被判"已到达"，车一步不走 —— 2026-11-04 实测死锁）
         self.declare_parameter('min_goal_m', 1.2)
+        # 每批打包几个视点（1 = 退回逐点走，会一停一停）
+        self.declare_parameter('batch_size', 4)
         # 雷达起步：地图还没长开时，转向最开阔方向并前进一小段，
         # 让 slam_toolbox 整合新扫描（它要求移动 >=0.5 m 才会更新地图）
         self.declare_parameter('bootstrap_forward_m', 1.0)
@@ -102,6 +104,10 @@ class ViewpointPlanner(Node):
         # 2026-11-04 用户要求（方案A）：不再依赖 frontier_explorer 提供的服务，
         # 自己管门控 + 自己调 Nav2 动作，这样可以关掉旧探索器而互不影响。
         self._nav_client = ActionClient(self, NavigateToPose, '/navigate_to_pose')
+        # 2026-11-04：一停一停的根治办法 —— 把多个视点打包成"途经点"，
+        # 经过时不停车（多点导航已实车验证这套机制）
+        self._nav_many = ActionClient(self, NavigateThroughPoses, '/navigate_through_poses')
+        self._batch = []
         self._param_client = self.create_client(SetParameters, '/base_bridge/set_parameters')
         self._arm_client = self.create_client(Trigger, '/base/arm_auto')
         self._ready = False
@@ -384,7 +390,12 @@ class ViewpointPlanner(Node):
                     len(vc.candidate_viewpoints(drivable, step)),
                     has_frontier, self._radius, len(self._visited)))
 
-        # ① 先找半径内值得去的视点
+        # ① 先打包一串视点（途经不停车，根治"走一段停一下"）
+        if int(self.get_parameter('batch_size').value) > 1:
+            batch = self._plan_batch(cell, free, blocked, unknown, drivable)
+            if batch:
+                self._dispatch_batch(batch, now)
+                return
         picked = self._pick(cell, free, blocked, unknown, drivable)
         if picked is not None:
             self._visited.add(picked)
@@ -417,12 +428,27 @@ class ViewpointPlanner(Node):
             self._set_state('expand-radius %.0f m' % self._radius)
             return
 
-        # ③ 半径到顶 → 去门口扩展（目标落在已知区一侧）
-        if has_frontier and self._goto_frontier(drivable, free, unknown, cell, now):
-            self._radius = float(self.get_parameter('radius_start_m').value)
+        # ③ 只要还有前沿（门/没看过的区域）→ 必须去，**绝不判完成**
+        #    距离要求逐级放宽：1.2 → 0.84 → 0.54 m（太近会被 Nav2 判已达，但
+        #    总比原地不动强；放宽到 0.5 m 仍不行才认为这一片暂时去不了）
+        if has_frontier:
+            base = float(self.get_parameter('min_goal_m').value)
+            for relax in (1.0, 0.7, 0.45):
+                if self._goto_frontier(drivable, free, unknown, cell, now,
+                                       min_dist_m=base * relax):
+                    self._radius = float(self.get_parameter('radius_start_m').value)
+                    return
+            # 有前沿但一个合法目标都找不到 → 用雷达起步强行往前推进
+            # （否则车会一直原地不动，地图永远不长）
+            boot = self._scan_bootstrap_cell(cell, drivable, free)
+            if boot is not None:
+                self._visited.add(boot)
+                self._dispatch(boot, now, label='bootstrap-forced')
+                return
+            self._set_state('frontier-blocked')
             return
 
-        # ④ 真的没地方去了：只有地图也停止增长才算完成
+        # ④ 没有前沿了：还要地图也停止增长，才算真的探完
         if stable:
             ratio = vc.coverage_ratio(self._covered.ravel(), free.ravel())
             self._set_state('done %.0f%%' % (100 * ratio))
@@ -537,13 +563,20 @@ class ViewpointPlanner(Node):
         yaw = self._robot_heading()
         if yaw is None:
             return None
-        dx = math.cos(yaw + heading) * steps
-        dy = math.sin(yaw + heading) * steps
-        ty, tx = int(round(cell[0] + dy)), int(round(cell[1] + dx))
         h, w = drivable.shape
-        if not (0 <= ty < h and 0 <= tx < w):
-            return None
-        if not free[ty, tx]:
+        # 沿射线往回退，取**最远的已知空闲格**（不要求刚好 1.5 m，
+        # 否则地图边缘稍微短一点就整个起步失败）
+        dx = math.cos(yaw + heading)
+        dy = math.sin(yaw + heading)
+        ty = tx = None
+        for k in range(steps, 3, -1):
+            yy, xx = int(round(cell[0] + dy * k)), int(round(cell[1] + dx * k))
+            if not (0 <= yy < h and 0 <= xx < w):
+                continue
+            if free[yy, xx]:
+                ty, tx = yy, xx
+                break
+        if ty is None:
             return None
         self.get_logger().info('雷达起步：开阔方向 %.0f°（净空 %.1f m）→ 目标格 (%d,%d)' % (
             math.degrees(ang), clear, ty, tx))
@@ -586,7 +619,85 @@ class ViewpointPlanner(Node):
                 best, best_d = c, d
         return best
 
-    def _goto_frontier(self, drivable, free, unknown, cell, now) -> bool:
+    def _plan_batch(self, cell, free, blocked, unknown, drivable) -> list:
+        """在当前半径内贪心选一串视点（用累积可见性避免重复），供打包下发。"""
+        res = self._map.info.resolution
+        step = max(1, int(round(float(self.get_parameter('candidate_step_m').value) / res)))
+        cands = vc.candidate_viewpoints(drivable, step)
+        if not cands:
+            return []
+        seed = self._snap(cell, drivable)
+        if seed is None:
+            return []
+        dist = vc.bfs_distance(drivable, seed)
+        min_cells = float(self.get_parameter('min_goal_m').value) / res
+        keep = [i for i, c in enumerate(cands) if dist[c[0], c[1]] >= min_cells]
+        if not keep:
+            return []
+        cands = [cands[i] for i in keep]
+        range_cells = int(float(self.get_parameter('sensor_range_m').value) / res)
+        fill = int(self.get_parameter('fill_cells').value)
+        rays = int(self.get_parameter('rays').value)
+        vis = [vc.visible_cells(blocked, unknown, c, range_cells, rays, fill) for c in cands]
+        covered = self._covered.ravel().copy()
+        radius_cells = int(self._radius / res)
+        batch = []
+        prev = seed
+        for _ in range(max(1, int(self.get_parameter('batch_size').value))):
+            # ⚠️ 2026-11-04：每一步的距离必须相对**上一个点**算，否则选出来的
+            # 顺序会是 远→近→远，规划器只能连成 Z 字形，车来回拐（用户截图确认）
+            step_dist = vc.bfs_distance(drivable, prev)
+            idx = vc.pick_next_viewpoint(
+                cands, vis, covered, step_dist, radius_cells,
+                visited=self._visited | set(batch),
+                min_gain_cells=int(self.get_parameter('min_gain_cells').value))
+            if idx is None:
+                break
+            batch.append(cands[idx])
+            covered[vis[idx]] = True
+            prev = cands[idx]
+        return batch
+
+    def _dispatch_batch(self, cells, now) -> None:
+        """把一串视点打包成 NavigateThroughPoses（途经点不停车）。"""
+        if not cells:
+            return
+        if len(cells) == 1 or not self._nav_many.server_is_ready():
+            # 只有一个点、或批量服务不可用 → 退回单点
+            self._visited.add(cells[0])
+            self._dispatch(cells[0], now, label='viewpoint')
+            return
+        if self._manual:
+            # 手动门还开着（起步残留）→ 自动链路被关，必须先关掉
+            self._set_bool_param('manual_enabled', False)
+            self._set_state('closing-manual-gate')
+            return
+        if not self._open_gate():
+            self._set_state('waiting-gate')
+            return
+        res = self._map.info.resolution
+        ox = self._map.info.origin.position.x
+        oy = self._map.info.origin.position.y
+        goal = NavigateThroughPoses.Goal()
+        for (cy, cx) in cells:
+            ps = PoseStamped()
+            ps.header.frame_id = 'map'
+            ps.header.stamp = self.get_clock().now().to_msg()
+            ps.pose.position.x = float(ox + (cx + 0.5) * res)
+            ps.pose.position.y = float(oy + (cy + 0.5) * res)
+            ps.pose.orientation.w = 1.0
+            goal.poses.append(ps)
+        self._batch = list(cells)
+        self._target = cells[-1]
+        self._target_at = now
+        self._active_since = now
+        self.get_logger().info('打包 %d 个视点 → 途经不停车' % len(cells))
+        self._goal_future = self._nav_many.send_goal_async(goal)
+        self._goal_future.add_done_callback(self._on_goal_response)
+        self._set_state('batch %d' % len(cells))
+
+    def _goto_frontier(self, drivable, free, unknown, cell, now,
+                       min_dist_m: float = None) -> bool:
         """去门口扩展：目标必须落在已知区一侧（不能打进未知区）。"""
         fronts = vc.frontier_cells(free, unknown)
         if not fronts:
@@ -597,17 +708,19 @@ class ViewpointPlanner(Node):
         dist = vc.bfs_distance(drivable, seed)
         inset = max(1, int(round(float(self.get_parameter('inset_m').value)
                                  / self._map.info.resolution)))
-        # 前沿目标也必须够远：太近会被 Nav2 判"已到达" → 走一步就停、
-        # 反复 dwell（2026-11-04 实测：地图长出来后卡在这里）
-        nearest = int(float(self.get_parameter('min_goal_m').value) / self._map.info.resolution)
-        far_fronts = [f for f in fronts
-                      if dist[f[0], f[1]] < 0 or dist[f[0], f[1]] >= nearest]
-        if not far_fronts:
-            return False
-        tgt = vc.expansion_target(far_fronts, drivable, dist, inset_cells=inset)
+        # 前沿目标要够远（太近会被 Nav2 判"已到达"），但这里**按距离从近到远逐个尝试**，
+        # 而不是一刀切返回 False —— 否则"有前沿但被过滤掉"会导致假完成（2026-11-04）
+        want = float(min_dist_m if min_dist_m is not None
+                     else self.get_parameter('min_goal_m').value)
+        nearest = int(want / self._map.info.resolution)
+        reachable = [f for f in fronts if dist[f[0], f[1]] >= 0]
+        reachable.sort(key=lambda f: dist[f[0], f[1]])
+        far = [f for f in reachable if dist[f[0], f[1]] >= nearest]
+        tgt = vc.expansion_target(far, drivable, dist, inset_cells=inset) if far else None
+        if tgt is None and reachable:
+            # 再退一步：用离车最近的前沿（放宽距离要求）
+            tgt = vc.expansion_target(reachable, drivable, dist, inset_cells=inset)
         if tgt is None:
-            return False
-        if dist[tgt[0], tgt[1]] < nearest:
             return False
         self._dispatch(tgt, now, label='frontier')
         return True
@@ -710,9 +823,13 @@ class ViewpointPlanner(Node):
             QoSProfile(depth=5, reliability=ReliabilityPolicy.BEST_EFFORT))
         self._goal_future = None
         if ok:
+            for c in self._batch:
+                self._visited.add(c)
+            self._batch = []
             self._dwell_until = time.monotonic() + float(
                 self.get_parameter('dwell_s').value)
         else:
+            self._batch = []
             self._close_gate()                        # 失败立刻关门，等下一轮重开
         self._target = None
 

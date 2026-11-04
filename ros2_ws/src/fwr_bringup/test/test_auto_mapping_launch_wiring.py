@@ -116,3 +116,33 @@ def test_stuck_guard_exists_and_never_drives_forward():
     launch = LAUNCH.read_text()
     assert "executable='mapping_stuck_guard'" in launch
     assert "DeclareLaunchArgument('stuck_guard', default_value='true')" in launch
+
+
+def test_viewpoint_planner_batches_and_never_fakes_completion():
+    """两道防线：① 打包多个视点（根治一停一停）② 有前沿时不许判完成。"""
+    src = (ROOT / 'fwr_bringup' / 'viewpoint_planner.py').read_text()
+    # ① 批量：走 NavigateThroughPoses，且批量点会全部标记为已访问
+    assert 'NavigateThroughPoses' in src and '/navigate_through_poses' in src
+    assert '_dispatch_batch' in src and 'batch_size' in src
+    # ② 假完成：前沿分支必须在 done 之前，且遇到前沿直接 return
+    guard = src.index('if has_frontier:')
+    done = src.index("'done %.0f%%'")
+    assert guard < done, '前沿判断必须在"done"之前'
+    block = src[guard:guard + 700]
+    assert 'frontier-blocked' in src, '有前沿但去不了时不能判完成'
+    # 逐级放宽距离
+    assert 'for relax in' in src
+
+
+def test_batch_goal_uses_the_real_field_name():
+    """NavigateThroughPoses.Goal 的字段是 poses（不是 goals）。
+
+    2026-11-04：写成 goals 导致 AttributeError → 节点崩溃 → 底盘停住。
+    这个测试直接问 ROS 消息定义，防止再次写错。
+    """
+    from nav2_msgs.action import NavigateThroughPoses
+    fields = set(NavigateThroughPoses.Goal.get_fields_and_field_types())
+    assert 'poses' in fields
+    src = (ROOT / 'fwr_bringup' / 'viewpoint_planner.py').read_text()
+    assert 'goal.poses.append' in src, '必须用 poses 字段'
+    assert 'goal.goals.append' not in src, 'goals 字段不存在，会导致节点崩溃'
