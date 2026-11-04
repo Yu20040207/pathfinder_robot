@@ -125,6 +125,16 @@ class FrontierExplorer(Node):
             self._local_map = msg
             self._local_at = time.monotonic()
 
+    def _on_gate_cmd(self, msg):
+        """门控最后一次给出非零指令的时刻（判断"监控在压零"用）。"""
+        if abs(msg.linear.x) > 1e-3 or abs(msg.angular.z) > 1e-3:
+            self._gate_nz_at = time.monotonic()
+
+    def _on_monitor_out(self, msg):
+        """监控最后一次放行非零指令的时刻。"""
+        if abs(msg.linear.x) > 1e-3 or abs(msg.angular.z) > 1e-3:
+            self._fwd_nz_at = time.monotonic()
+
     def _on_odom(self, msg):
         # EKF 输出偶尔滞后 0.3 s 以上；0.25 s 会把正常里程计整帧丢掉，
         # 进而让 pose_ok 变假、探索器静默停止任务。
