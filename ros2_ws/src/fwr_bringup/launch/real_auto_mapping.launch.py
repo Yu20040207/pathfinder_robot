@@ -11,8 +11,8 @@ from pathlib import Path
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, ExecuteProcess, TimerAction
-from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.conditions import IfCondition
+from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 
@@ -36,6 +36,14 @@ def generate_launch_description():
         #   frontier = 全局前沿探索（frontier_exploration_ros2）
         DeclareLaunchArgument('explorer', default_value='room'),
         DeclareLaunchArgument('load_state', default_value=''),
+        # 2026-11-04 视点规划（新策略）：
+        #   viewpoint_planner=true   → 启动视点规划节点
+        #   viewpoint_enabled=true   → 它才真正开始派目标（默认 false = 只看不动）
+        # 两个都默认 false ⇒ 不传参数时行为与之前**完全一致**。
+        DeclareLaunchArgument('viewpoint_planner', default_value='false'),
+        DeclareLaunchArgument('viewpoint_enabled', default_value='false'),
+        # 建图专用行为树（条件重规划，防中途改道）。默认 = 导航版，行为不变。
+        DeclareLaunchArgument('mapping_bt', default_value='false'),
         # 建图 + Nav2 + 门控/碰撞监控/方向选择器（复用 real_navigation 的 use_saved_map:=false 分支）
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(str(share / 'launch' / 'real_navigation.launch.py')),
@@ -44,7 +52,13 @@ def generate_launch_description():
                               'start_explorer': 'false',
                               # 2026-10-30：离线 bag 对比后确定用 Cartographer
                               'slam_engine': LaunchConfiguration('slam_engine'),
-                              'load_state': LaunchConfiguration('load_state')}.items()),
+                              'load_state': LaunchConfiguration('load_state'),
+                              # mapping_bt:=true 才换成"条件重规划"的建图专用 BT
+                              'to_pose_bt_xml': PythonExpression([
+                                  "'", str(share / 'behavior_trees' / 'real_navigate_to_pose_mapping.xml'),
+                                  "' if '", LaunchConfiguration('mapping_bt'), "' == 'true' else '",
+                                  str(share / 'behavior_trees' / 'real_navigate_to_pose.xml'), "'"]),
+                              }.items()),
         # 把机器人脚下涂成空闲再给探索器（见节点 docstring）
         Node(package='fwr_bringup', executable='map_free_around_robot',
              name='map_free_around_robot', output='screen',
@@ -109,4 +123,12 @@ def generate_launch_description():
                           'kick_speed_mps': 0.15,
                           'kick_turn_rad_s': 0.7,
                           'startup_delay_s': 15.0}]),
+        # 视点规划器（默认不启动；视点规划是新策略，旧的 room_explorer 仍可用）
+        Node(package='fwr_bringup', executable='viewpoint_planner',
+             name='viewpoint_planner', output='both',
+             condition=IfCondition(LaunchConfiguration('viewpoint_planner')),
+             parameters=[str(share / 'config' / 'real_viewpoint_planner.yaml'),
+                         {'use_sim_time': use_sim_time,
+                          'enabled': PythonExpression([
+                              "'", LaunchConfiguration('viewpoint_enabled'), "' == 'true'"])}]),
     ])

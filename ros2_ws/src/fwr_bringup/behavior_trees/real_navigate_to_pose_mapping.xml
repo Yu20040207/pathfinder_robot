@@ -1,0 +1,35 @@
+<root main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <!-- 2026-11-04 建图专用（导航仍用 real_navigate_to_pose.xml，不受影响）。
+
+         与导航版的唯一区别：**条件重规划**。
+         原来每 2 秒无条件重算，两条代价接近的通路时"最优"会在它们之间跳，
+         车就一下左拐一下右拐（用户反馈）。这里改成：
+
+           路径还有效  → 沿用，不重算（AlwaysSuccess 直接通过）
+           路径失效    → 才重算（比如被新障碍挡住）
+
+         另留一个 0.1 Hz 的兜底重算（RecoveryNode 的恢复分支），防止
+         "路径有效但已经很差"的情况一直不更新。
+    -->
+    <RecoveryNode number_of_retries="6" name="NavigateRecovery">
+      <PipelineSequence name="NavigateWithReplanning">
+        <Fallback name="ReplanOnlyWhenNeeded">
+          <Sequence name="ReplanIfInvalid">
+            <Inverter>
+              <IsPathValid path="{path}"/>
+            </Inverter>
+            <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
+          </Sequence>
+          <!-- 路径有效：直接通过，保持原路径，不改道 -->
+          <AlwaysSuccess/>
+        </Fallback>
+        <FollowPath path="{path}" controller_id="FollowPath"/>
+      </PipelineSequence>
+      <Sequence name="RecoveryActions">
+        <Spin spin_dist="1.05" name="RecoverySpin"/>
+        <Wait wait_duration="1.0"/>
+      </Sequence>
+    </RecoveryNode>
+  </BehaviorTree>
+</root>

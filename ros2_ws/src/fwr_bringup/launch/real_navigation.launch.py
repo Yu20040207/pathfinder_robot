@@ -24,8 +24,9 @@ def generate_launch_description():
         # - 空字符串 ≠ 默认，那是**空树**（目标 2 ms 失败）
         # - 直接用官方 XML 会因缺 /backup 动作导致 BT 加载失败
         param_rewrites={
-            'default_nav_to_pose_bt_xml': str(share / 'behavior_trees' /
-                                              'real_navigate_to_pose.xml'),
+            # 2026-11-04：改成可被 launch 参数覆盖（默认值仍是原来那个文件，
+            # 不传参数时行为与之前完全一致）。建图专用 BT 通过 to_pose_bt_xml 传入。
+            'default_nav_to_pose_bt_xml': LaunchConfiguration('to_pose_bt_xml'),
             # 2026-11-03 多点导航：穿过多个点用独立的 BT（ComputePathThroughPoses）。
             # 不指定的话 nav2 会用官方默认 BT，而它依赖 /backup 动作，我们没启用 →
             # 目标 2 ms 就失败（同一个坑 2026-11-02 已经踩过一次）。
@@ -36,6 +37,10 @@ def generate_launch_description():
     )
     return LaunchDescription([
         DeclareLaunchArgument('use_sim_time', default_value='false'),
+        # 建图专用行为树（条件重规划，防中途改道）。默认 = 导航版，行为不变。
+        DeclareLaunchArgument('to_pose_bt_xml',
+                              default_value=str(share / 'behavior_trees' /
+                                                'real_navigate_to_pose.xml')),
         DeclareLaunchArgument('lidar_port', default_value='/dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_Controller_e00aaf475431f111b7818c5f30d20014-if00-port0'),
         DeclareLaunchArgument('start_imu', default_value='true'),
         DeclareLaunchArgument('use_saved_map', default_value='false'),
