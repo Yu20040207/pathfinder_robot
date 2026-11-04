@@ -11,6 +11,11 @@ collision_monitor_forward:
     # 0.25 s 会间歇性整帧丢弃，导致安全层时有时无。
     source_timeout: 0.6
     base_shift_correction: true
+    # 2026-11-04：试过把它降到 2.0（想让门口别僵住 18 秒），被两条护栏测试否决：
+    #   test_monitor_is_only_automatic_bridge_input: 17.0 <= stop_pub_timeout <= 20.0
+    #   test_auto_sim_nav2_speed_matches_gate_limit: stop_pub_timeout >= 15 + 2
+    # 设计意图：停车后保持零速 ≥17 秒，让 Nav2 的 15 秒进度检查超时并**放弃目标**，
+    # 而不是继续挤过去。保持 18.0。
     stop_pub_timeout: 18.0
     polygons: [front_stop, front_slow]
     # 停车区从车头外缘 0.30 m 起、只留 0.08 m 深度：0.06 m/s 下制动距离约 1 cm，
