@@ -74,6 +74,9 @@ class FrontierExplorer(Node):
         self._fixed_goal = None
         self._fixed_goals = None
         self._handle = None
+        # 2026-11-04：监控压零检测（stuck_cancel_s 用）
+        self._gate_nz_at = None
+        self._fwd_nz_at = None
         self._cancel_after_accept = False
         self._cancel_future = None
         self._status = 'idle'
