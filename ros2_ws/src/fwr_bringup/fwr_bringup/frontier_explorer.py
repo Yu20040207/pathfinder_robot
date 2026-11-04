@@ -33,6 +33,11 @@ class FrontierExplorer(Node):
         self.declare_parameter('require_bridge_arm', False)
         self.declare_parameter('max_trial_duration_s', 120.0)
         self.declare_parameter('max_fixed_goal_distance_m', .5)
+        # 2026-11-04（用户："掉头撞到门框后停了很久"）：碰撞监控触发 stop 后，
+        # stop_pub_timeout=18s 会让它**继续发零**很久（实测一段连续 15.3 秒，
+        # 期间扫描里停车框早就是空的）。这里自己判"监控持续压零"，
+        # 超过 stuck_cancel_s 就取消当前目标、立刻重新规划，不等它 18 秒。
+        self.declare_parameter('stuck_cancel_s', 2.5)
         self.declare_parameter('static_map', False)
         self._static_map = bool(self.get_parameter('static_map').value)
         self._trial_started = None
@@ -83,6 +88,10 @@ class FrontierExplorer(Node):
         self.create_subscription(Odometry, '/odom', self._on_odom, 10)
         self.create_subscription(Int32, '/base/fault', self._on_fault, 10)
         self.create_subscription(Bool, '/base/manual_enabled', self._on_manual, 10)
+        # 监控层是否在压零（用于识别 stop_pub_timeout 残留）
+        self.create_subscription(Twist, '/cmd_vel_auto_unchecked', self._on_gate_cmd, 20)
+        self.create_subscription(Twist, '/cmd_vel_auto_forward_filtered',
+                                 self._on_monitor_out, 20)
         self.create_subscription(Bool, '/base/auto_armed', self._on_bridge_arm, 10)
         self.create_subscription(LaserScan, '/scan', self._on_scan, qos_profile_sensor_data)
         self.create_subscription(Imu, '/imu/data', self._on_imu, qos_profile_sensor_data)
@@ -413,6 +422,17 @@ class FrontierExplorer(Node):
                     f'[fixed-diag] status={self._status} dispatched={self._sm._fixed_dispatched} '
                     f'legs={self._sm._fixed_legs} enabled={self._sm.enabled} '
                     f'leg_idx={self._sm.fixed_leg_index}')
+        # 2026-11-04：监控在压零 -> 取消目标，立即重规划（见 stuck_cancel_s 注释）
+        if (self._handle is not None and self._gate_nz_at is not None
+                and self._fwd_nz_at is not None
+                and now - self._gate_nz_at < 0.3
+                and now - self._fwd_nz_at >= float(self.get_parameter('stuck_cancel_s').value)):
+            self.get_logger().warn(
+                '监控已持续 %.1f 秒只发零速（扫描里停车框已空，是 stop_pub_timeout 残留）'
+                ' → 取消当前目标，立即重新规划'
+                % (now - self._fwd_nz_at))
+            self._fwd_nz_at = now
+            self._cancel_goal()
         decision = self._sm.update(map_ok, pose_ok, self._fault, self._status, now,
                                    self._goal.grid_index if self._goal else None)
         state = String()
