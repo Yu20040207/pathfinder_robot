@@ -27,7 +27,9 @@ from nav_msgs.msg import OccupancyGrid, Odometry
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
-from std_msgs.msg import String
+from std_msgs.msg import Bool, Int32, String
+from rcl_interfaces.msg import Parameter as ParamMsg, ParameterType
+from rcl_interfaces.srv import SetParameters
 from std_srvs.srv import Trigger
 
 
@@ -41,6 +43,7 @@ class MappingStuckGuard(Node):
         self.declare_parameter('max_escalations', 3)
         self.declare_parameter('spin_angle_rad', 0.8)   # 第3级旋转角度（约 46°）
         self.declare_parameter('cooldown_s', 20.0)
+        self.declare_parameter('max_fault_clear', 5)
 
         self._pose = None
         self._cells = None
@@ -62,6 +65,18 @@ class MappingStuckGuard(Node):
         self._stop = self.create_client(Trigger, '/explore/stop')
         self._start = self.create_client(Trigger, '/explore/start')
         self._spin = ActionClient(self, Spin, '/spin')
+        # 2026-11-04：窄走廊里四轮刮擦转向会被墙别住 → 固件判堵转(fault 1)锁死
+        # → 底盘 disarm → ready=False → 一切导航停摆。这里负责自动复位。
+        self._fault = 0
+        self._ready = True
+        self.create_subscription(Int32, '/base/fault',
+                                 lambda m: setattr(self, '_fault', int(m.data)), 10)
+        self.create_subscription(Bool, '/base/ready',
+                                 lambda m: setattr(self, '_ready', bool(m.data)), 10)
+        self._clear_fault = self.create_client(Trigger, '/base/clear_fault')
+        self._params = self.create_client(SetParameters, '/base_bridge/set_parameters')
+        self._fault_tries = 0
+        self._fault_at = 0.0
         self._pub = self.create_publisher(String, '/mapping/stuck_guard', 10)
         self.create_timer(2.0, self._tick)
         self.get_logger().info(
@@ -85,6 +100,9 @@ class MappingStuckGuard(Node):
         if not bool(self.get_parameter('enabled').value):
             return
         now = time.monotonic()
+        if self._fault:
+            self._recover_fault(now, self._fault)
+            return
         if self._win_pose is None:
             self._win_pose = self._pose
             self._win_cells = self._cells
@@ -100,6 +118,8 @@ class MappingStuckGuard(Node):
         grew = (self._cells or 0) - (self._win_cells or 0)
         self._win_pose, self._win_cells, self._win_at = self._pose, self._cells, now
 
+        if not self._fault:
+            self._fault_tries = 0
         if self._explore_state not in ('', 'navigating', 'running', 'starting'):
             self._level = 0                       # 建图没在跑，不算卡住
             return
@@ -111,6 +131,40 @@ class MappingStuckGuard(Node):
             return
 
         self._recover(now, moved, grew)
+
+    def _set_bool(self, name: str, value: bool) -> None:
+        if not self._params.service_is_ready():
+            return
+        req = SetParameters.Request()
+        msg = ParamMsg()
+        msg.name = name
+        msg.value.type = ParameterType.PARAMETER_BOOL
+        msg.value.bool_value = value
+        req.parameters.append(msg)
+        self._params.call_async(req)
+
+    def _recover_fault(self, now: float, code: int) -> None:
+        """底盘故障锁死 → 关掉所有运动门 → 调 /base/clear_fault 复位。
+
+        固件的 fault_clear 要求所有运动路径都关闭（motion/manual/auto 全为假），
+        所以这里绝不发运动指令，只做"关门 + 复位"。
+        """
+        if now - self._fault_at < 5.0:
+            return
+        self._fault_at = now
+        if self._fault_tries >= int(self.get_parameter('max_fault_clear').value):
+            self.get_logger().error('底盘故障 %d 复位 %d 次仍失败，停止尝试' % (
+                code, self._fault_tries))
+            return
+        self._fault_tries += 1
+        names = {1: '堵转', 2: '方向错误', 3: '超速', 4: '编码器', 5: '时序', 6: '跟踪'}
+        self.get_logger().warn('底盘故障 %d（%s）→ 关闭运动门并请求复位（第 %d 次）' % (
+            code, names.get(code, '未知'), self._fault_tries))
+        self._set_bool('motion_enabled', False)
+        self._set_bool('manual_enabled', False)
+        if self._clear_fault.service_is_ready():
+            self._clear_fault.call_async(Trigger.Request())
+        self._pub.publish(String(data='fault %d -> clear_fault' % code))
 
     def _recover(self, now: float, moved: float, grew: int) -> None:
         if now - self._last_action_at < float(self.get_parameter('cooldown_s').value):

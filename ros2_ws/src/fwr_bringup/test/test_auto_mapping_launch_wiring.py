@@ -146,3 +146,13 @@ def test_batch_goal_uses_the_real_field_name():
     src = (ROOT / 'fwr_bringup' / 'viewpoint_planner.py').read_text()
     assert 'goal.poses.append' in src, '必须用 poses 字段'
     assert 'goal.goals.append' not in src, 'goals 字段不存在，会导致节点崩溃'
+
+
+def test_stuck_guard_recovers_base_faults_without_motion():
+    """底盘故障（窄走廊堵转）必须能自动复位，且复位过程不发任何运动指令。"""
+    src = (ROOT / 'fwr_bringup' / 'mapping_stuck_guard.py').read_text()
+    assert '/base/clear_fault' in src, '必须调用底盘的故障复位服务'
+    assert "'/base/fault'" in src and "'/base/ready'" in src
+    # 复位前必须把所有运动门关掉（固件要求）
+    assert "motion_enabled', False" in src and "manual_enabled', False" in src
+    assert 'Twist' not in src, '守卫节点仍然不得直接发速度指令'
