@@ -95,6 +95,9 @@ class FrontierExplorer(Node):
         self.create_subscription(Odometry, '/odom', self._on_odom, 10)
         self.create_subscription(Int32, '/base/fault', self._on_fault, 10)
         self.create_subscription(Bool, '/base/manual_enabled', self._on_manual, 10)
+        self._stop_box_pts = 0
+        self.create_subscription(LaserScan, '/scan', self._on_scan_stopbox,
+                                 qos_profile_sensor_data)
         # 监控层是否在压零（用于识别 stop_pub_timeout 残留）
         self.create_subscription(Twist, '/cmd_vel_auto_unchecked', self._on_gate_cmd, 20)
         self.create_subscription(Twist, '/cmd_vel_auto_forward_filtered',
@@ -131,6 +134,25 @@ class FrontierExplorer(Node):
         if self._stamp_fresh(msg, .5):
             self._local_map = msg
             self._local_at = time.monotonic()
+
+    def _on_scan_stopbox(self, msg):
+        """统计落在 front_stop 矩形内的扫描点数（雷达倒装：车头 = ±pi）。
+
+        2026-11-04：卡住检测必须**真的**确认停车框是空的，否则会把
+        "门框确实贴上来" 的合法停车误判成 stop_pub_timeout 残留，
+        反复取消重试直到把任务作废（现场就是这样结束的）。
+        """
+        x0, x1, hy = 0.32, 0.38, 0.22
+        n = 0
+        for i, r in enumerate(msg.ranges):
+            if not (0.05 < r < 3.5):
+                continue
+            a = msg.angle_min + i * msg.angle_increment
+            x = -r * math.cos(a)
+            y = -r * math.sin(a)
+            if x0 <= x <= x1 and abs(y) <= hy:
+                n += 1
+        self._stop_box_pts = n
 
     def _on_gate_cmd(self, msg):
         """门控最后一次给出非零指令的时刻（判断"监控在压零"用）。"""
@@ -446,11 +468,12 @@ class FrontierExplorer(Node):
         if (self._handle is not None and self._gate_nz_at is not None
                 and self._fwd_nz_at is not None
                 and now - self._gate_nz_at < 0.3
-                and now - self._fwd_nz_at >= float(self.get_parameter('stuck_cancel_s').value)):
+                and now - self._fwd_nz_at >= float(self.get_parameter('stuck_cancel_s').value)
+                and self._stop_box_pts == 0):
             self.get_logger().warn(
-                '监控已持续 %.1f 秒只发零速（扫描里停车框已空，是 stop_pub_timeout 残留）'
-                ' → 取消当前目标，立即重新规划'
-                % (now - self._fwd_nz_at))
+                '监控已持续 %.1f 秒只发零速，且停车框确认已空（%d 点）'
+                ' → 判定为 stop_pub_timeout 残留，取消当前目标并重新规划'
+                % (now - self._fwd_nz_at, self._stop_box_pts))
             self._fwd_nz_at = now
             self._retry_pending = True
             self._cancel_goal()
