@@ -12,7 +12,7 @@ viewpoint_planner:
     radius_max_m: 8.0         # 半径上限，超过就转去"门口扩展"
     cover_target: 0.90        # 视点阶段的目标覆盖率（剩下的交给扩展）
     min_gain_cells: 400       # 新增可见格 <1 m² 就不值得跑（实测 12 会陷入抠细节）
-    dwell_s: 3.0              # 到点停留时间（让雷达扫一圈）
+    dwell_s: 1.0              # 到点停留（3 秒会明显"走一段停一下"；1 秒够雷达转 10 帧）
     hop_timeout_s: 45.0       # 单跳超时
     arrive_m: 0.45            # 判定"到了"的距离
     replan_period_s: 1.0      # 决策周期
@@ -21,7 +21,7 @@ viewpoint_planner:
     open_gate: true           # false = 只计算不派目标（纯离线调试）
     gate_timeout_s: 60.0      # 无活动多久自动关门
     map_stable_s: 20.0        # 地图连续这么久没新增已知格，才算真探完
-    bootstrap_max_cells: 4000 # 已知格少于此值时先"起步"把地图撑开
+    bootstrap_max_cells: 4000 # 实测值：太大反而卡住（起步要求目标格已知空闲）
     min_goal_m: 1.2           # 最短目标距离（太近会被判"已到达"，车不走）
     bootstrap_forward_m: 1.0  # 雷达起步前进距离
     bootstrap_speed_mps: 0.12

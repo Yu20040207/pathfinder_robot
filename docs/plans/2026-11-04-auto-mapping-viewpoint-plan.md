@@ -177,3 +177,31 @@ if R=8 m 仍没有:
 - 建图 BT（0.2 Hz）：/plan 7 次、位移 0.33 m、地图 +2723
 
 两者都能跑，建图版重规划更慢 → 改道机会更少。
+
+
+## 8. 实机跑通（2026-11-04 下午）
+
+### 可用配置（已实测）
+```
+slam_engine:=slam mapping_bt:=true use_explorer:=false
+viewpoint_planner:=true viewpoint_enabled:=true
+stuck_reverser:=false kickstart:=false
+```
+实测：**13 个导航目标全部成功、0 失败**，地图 9500 → 11664 格，每跳前进约 0.88 m。
+
+### 又修掉的 3 个死结
+| 问题 | 现象 | 修法 |
+| --- | --- | --- |
+| 目标太近 | 1 m 内的目标被 Nav2 判"已到达"，走一步就停 | `min_goal_m: 1.2`（视点**和**前沿目标都过滤）|
+| 手动起步不可靠 | `/cmd_vel_manual` 被底盘丢弃（`sensors_ready` 间歇为 0）| 起步改用 **Nav2 目标**（`_scan_bootstrap_cell`）|
+| 起步被导航目标挡住 | `command_source_allowed`：有目标在跑时手动指令一律丢弃 | 起步前先 `cancel_goal` |
+
+### 参数取值教训
+- `bootstrap_max_cells` **4000 可用、20000 反而卡死**：起步要求"目标格已知空闲"，
+  门槛设太高时地图太小、找不到合法目标 → 一直空转。
+- `dwell_s` 3.0 → **1.0**：3 秒会明显"走一段停一下"。
+
+### 已知未解决
+- **走一段停一下**：每跳是一个独立 `NavigateToPose`，Nav2 到点要减速停车，
+  加上 dwell 就形成顿挫。下一步：**把 4~6 个视点打包成 `NavigateThroughPoses`**，
+  途经点不停车（多点导航已实车验证过这套机制）。
