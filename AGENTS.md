@@ -379,6 +379,27 @@ front_stop 触发        0 次        （v1.3 前 42 次）
    加新按钮/新逻辑时**复用已验证的函数**（如 `loadAndPublishMap`），
    不要另写一套并行实现。每次改完必须回归：旧路径至少跑一次。
 
+## 3.98 🛡 防"车不动"的两道自检（2026-11-04）
+
+2026-11-04 连续两次因为**低级代码错误**导致"点开始导航但车完全不动"：
+新增回调方法没插进文件、新增字段没在 `__init__` 赋值。都补了自动检查。
+
+### ① 静态守护（每次跑测试都会执行）
+`test_nodes_attributes_defined.py`：AST 扫描所有节点类，
+**读取了从未赋值过的 `self.xxx`** 就报错。这类 bug 运行时表现就是节点崩、车不动。
+```bash
+source /opt/ros/humble/setup.bash && source ros2_ws/install/setup.bash
+PYTHONPATH=ros2_ws/src/fwr_bringup .venv/bin/python -m pytest ros2_ws/src/fwr_bringup/test -q
+```
+
+### ② 运行自检（每次启动栈、开导航之前跑）
+```bash
+bash tools/check_stack.sh /tmp/fwr_runs/<本次日志>.log
+```
+检查六项：进程存活 / 节点在 ROS 图里 / 三个导航服务在位 /
+**冻结参数是否被意外改动** / 雷达频率 / launch 日志有无 `process has died`。
+全绿才开导航；不绿会列出具体哪一项。
+
 ## 4. 验证矩阵（先跑最小集，最后再全量）
 
 | 改动类型 | 最小验证 |
