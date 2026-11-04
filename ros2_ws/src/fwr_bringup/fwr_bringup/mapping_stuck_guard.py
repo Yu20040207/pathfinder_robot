@@ -78,6 +78,9 @@ class MappingStuckGuard(Node):
         self._fault_tries = 0
         self._fault_at = 0.0
         self._pub = self.create_publisher(String, '/mapping/stuck_guard', 10)
+        # clear_fault 的前提之一是 explore_mode == 'stopped'；
+        # 建图时 supervisor 一直在发 'navigating'，所以复位前必须先发 stopped
+        self._state_pub = self.create_publisher(String, '/explore/state', 10)
         self.create_timer(2.0, self._tick)
         self.get_logger().info(
             '建图卡住守卫已启动（窗口 %.0f s，位移<%.2f m 且地图+<%d 格 → 逐级自愈）' % (
@@ -162,6 +165,11 @@ class MappingStuckGuard(Node):
             code, names.get(code, '未知'), self._fault_tries))
         self._set_bool('motion_enabled', False)
         self._set_bool('manual_enabled', False)
+        # 关键：把探索状态置为 stopped，并把探索循环停掉（clear_fault 的前置条件）
+        for _ in range(3):
+            self._state_pub.publish(String(data='stopped'))
+        if self._stop.service_is_ready():
+            self._stop.call_async(Trigger.Request())
         if self._clear_fault.service_is_ready():
             self._clear_fault.call_async(Trigger.Request())
         self._pub.publish(String(data='fault %d -> clear_fault' % code))
