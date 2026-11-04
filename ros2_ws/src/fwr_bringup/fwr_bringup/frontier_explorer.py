@@ -5,6 +5,7 @@ import time
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped, Twist
 from nav2_msgs.action import NavigateThroughPoses, NavigateToPose
+from nav2_msgs.srv import ClearEntireCostmap
 from nav_msgs.msg import OccupancyGrid, Odometry
 from sensor_msgs.msg import LaserScan, Imu
 from fwr_interfaces.srv import (RecoveryPermit, StartFixedGoal,
@@ -40,6 +41,10 @@ class FrontierExplorer(Node):
         self.declare_parameter('stuck_cancel_s', 2.5)
         # 取消后自动重试几次（用户要求"取消后立即重新规划"，而不是任务直接结束）
         self.declare_parameter('max_stuck_retries', 2)
+        # 2026-11-04（实测）：跑久了全局代价地图会累积"幽灵障碍"（障碍层的旧标记
+        # 在 260° 视野下永远清不掉），最终所有目标都规划失败、只能重启栈。
+        # 连续失败到阈值就主动清空一次代价地图，让规划恢复。
+        self.declare_parameter('clear_costmap_after_failures', 2)
         self.declare_parameter('static_map', False)
         self._static_map = bool(self.get_parameter('static_map').value)
         self._trial_started = None
@@ -81,6 +86,8 @@ class FrontierExplorer(Node):
         self._fwd_nz_at = None
         self._retry_pending = False
         self._stuck_retries = 0
+        self._consecutive_failures = 0
+        self._clear_clients = []
         self._cancel_after_accept = False
         self._cancel_future = None
         self._status = 'idle'
@@ -95,6 +102,9 @@ class FrontierExplorer(Node):
         self.create_subscription(Odometry, '/odom', self._on_odom, 10)
         self.create_subscription(Int32, '/base/fault', self._on_fault, 10)
         self.create_subscription(Bool, '/base/manual_enabled', self._on_manual, 10)
+        for srv in ('/global_costmap/global_costmap/clear_entirely_global_costmap',
+                    '/local_costmap/local_costmap/clear_entirely_local_costmap'):
+            self._clear_clients.append(self.create_client(ClearEntireCostmap, srv))
         self._stop_box_pts = 0
         self.create_subscription(LaserScan, '/scan', self._on_scan_stopbox,
                                  qos_profile_sensor_data)
@@ -609,6 +619,19 @@ class FrontierExplorer(Node):
             self._sm.stop()
         self._status = 'idle'
 
+    def _clear_costmaps(self) -> None:
+        """清空全局/局部代价地图（治"跑久了到处规划失败"的幽灵障碍累积）。"""
+        asked = False
+        for client in self._clear_clients:
+            if client.service_is_ready():
+                client.call_async(ClearEntireCostmap.Request())
+                asked = True
+        if asked:
+            self.get_logger().warn(
+                '连续规划失败达到阈值 → 已请求清空代价地图（清除累积的陈旧障碍标记）')
+        else:
+            self.get_logger().warn('连续规划失败，但清空代价地图服务不可用')
+
     def _retry_after_stuck(self):
         """监控压零导致取消后，立刻按原任务重新规划（最多 max_stuck_retries 次）。
 
@@ -780,6 +803,14 @@ class FrontierExplorer(Node):
                             'canceled' if status == GoalStatus.STATUS_CANCELED else 'failed')
         except Exception:
             self._status = 'failed'
+        if self._status == 'failed':
+            self._consecutive_failures += 1
+            limit = int(self.get_parameter('clear_costmap_after_failures').value)
+            if limit > 0 and self._consecutive_failures >= limit:
+                self._consecutive_failures = 0
+                self._clear_costmaps()
+        else:
+            self._consecutive_failures = 0
         self._handle = None
         self._cancel_future = None
         self._cancel_after_accept = False
