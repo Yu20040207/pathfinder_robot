@@ -15,7 +15,7 @@ from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Bool, String
 from tf2_ros import Buffer, TransformException, TransformListener
 
-from .directional_safety_core import DirectionalSafetyCore
+from .directional_safety_core import DirectionalSafetyCore, latch_choice
 
 
 class DirectionalSafetySelector(Node):
@@ -33,6 +33,8 @@ class DirectionalSafetySelector(Node):
         # 之前用 0.34（相当于要求 0.55 m 实际余量），难怪"能转却不转"。
         self.declare_parameter('rotate_clear_m', 0.16)
         # 前进被挡的判定距离（= 碰撞监控 front_stop 的外沿 0.45 m）
+        # 翻转方向迟滞时间：防止阈值附近逐帧翻转导致堵转
+        self.declare_parameter('flip_hold_s', 0.7)
         self.declare_parameter('forward_block_m', 0.45)
         self._last_scan = None
         self._front_min_m = float('inf')
@@ -107,6 +109,22 @@ class DirectionalSafetySelector(Node):
         self.create_timer(.05, self._tick)
         self.create_timer(.1, self._poll_monitors)
         self.publisher.publish(Twist())
+
+    def core_latch(self, blocked: bool, want):
+        """翻转方向的迟滞锁定（见 directional_safety_core.latch_choice）。
+
+        2026-11-04：前方被挡时选择器会把角速度取反（往空旷一侧转）。但旋转净空
+        阈值(0.16 m)在雷达噪声下逐帧抖动 → 正反转逐帧切换 → 两后轮反复反向 →
+        车几乎不动而 PWM 持续 → 固件 2 s 判堵转(fault 1)。这里锁 0.7 s。
+        """
+        now = time.monotonic()
+        hold = float(self.get_parameter('flip_hold_s').value)
+        prev = getattr(self, '_flip_choice', None)
+        prev_at = getattr(self, '_flip_at', 0.0)
+        choice = latch_choice(prev, prev_at, now, hold, want, blocked)
+        if choice != prev:
+            self._flip_choice, self._flip_at = choice, now
+        return choice
 
     def _poll_monitors(self):
         now = time.monotonic()
@@ -212,8 +230,13 @@ class DirectionalSafetySelector(Node):
         # 前进被挡时改原地转：用**前进停车距离**判断（不是旋转阈值！）
         # 前进停车区 0.45 m；旋转只需 0.16 m（雷达前置偏移已扣除）。
         blocked = self._front_min_m < float(self.get_parameter('forward_block_m').value)
-        self.core.blocked_rotate_same = blocked and requested >= clear
-        self.core.blocked_rotate_ok = blocked and (not self.core.blocked_rotate_same) and opposite >= clear
+        # 2026-11-04：翻转方向必须**迟滞锁定**，否则阈值附近逐帧翻转 →
+        # 两后轮反复正反转 → 固件判堵转（fault 1）。见 latch_choice 注释。
+        want = ('same' if requested >= clear else
+                ('flip' if opposite >= clear else None))
+        choice = self.core_latch(blocked, want)
+        self.core.blocked_rotate_same = blocked and choice == 'same'
+        self.core.blocked_rotate_ok = blocked and choice == 'flip'
         linear_x, angular_z = self.core.select(now)
 
         # ---- 2026-11-01 卡住脱困 ----

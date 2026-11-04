@@ -296,3 +296,17 @@ def test_forward_arc_is_not_mistaken_for_rotation():
     core = ready()
     core.observe_raw(.06, .1, 1.01)
     assert core.direction == 'forward'
+
+
+def test_latch_choice_holds_the_flip_direction():
+    """翻转方向必须迟滞锁定：阈值噪声下不能逐帧翻转（会导致固件判堵转）。"""
+    from fwr_bringup.directional_safety_core import latch_choice
+
+    # 第一次决定翻转 → 立即生效
+    assert latch_choice(None, 0.0, 10.0, 0.7, 'flip', True) == 'flip'
+    # 0.7 s 内即使想变回 same，也保持 flip（避免逐帧反向）
+    assert latch_choice('flip', 10.0, 10.3, 0.7, 'same', True) == 'flip'
+    # 超过保持时间后才允许切换
+    assert latch_choice('flip', 10.0, 11.0, 0.7, 'same', True) == 'same'
+    # 不再被挡（前方开阔）→ 立刻解除锁定
+    assert latch_choice('flip', 10.0, 10.1, 0.7, None, False) is None

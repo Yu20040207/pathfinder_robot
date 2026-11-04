@@ -225,3 +225,25 @@ class DirectionalSafetyCore:
         output_x, output_z = outputs[0]
         self.last_reason = 'ok'
         return output_x, output_z
+
+
+def latch_choice(prev: str | None, prev_at: float, now: float,
+                 hold_s: float, new: str | None, blocked: bool) -> str | None:
+    """翻转方向的迟滞锁定（2026-11-04）。
+
+    背景：前方被挡时选择器会把角速度取反（"往空旷一侧转"）。但 0.16 m 的旋转
+    净空阈值在雷达噪声下逐帧抖动 → 每帧在"正转/反转"之间切换 → 两后轮反复
+    反向 → 车几乎不动而 PWM 持续 > 12% → 固件 2 s 判堵转（fault 1）。
+
+    规则：一旦选定方向，在 hold_s 内**锁住**，且必须"仍在 blocked 状态"才锁；
+    不再 blocked（前方开阔了）立即解除。
+    """
+    if not blocked:
+        return None
+    if prev is not None and (now - prev_at) < hold_s_safe(hold_s):
+        return prev
+    return new
+
+
+def hold_s_safe(hold_s: float) -> float:
+    return max(0.0, float(hold_s))
