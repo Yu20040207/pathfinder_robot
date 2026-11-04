@@ -44,6 +44,11 @@ def generate_launch_description():
         DeclareLaunchArgument('viewpoint_enabled', default_value='false'),
         # 建图专用行为树（条件重规划，防中途改道）。默认 = 导航版，行为不变。
         DeclareLaunchArgument('mapping_bt', default_value='false'),
+        # stuck_reverser 会把"没人派目标"误判成"被堵"然后倒车。用视点规划时可以关掉。
+        DeclareLaunchArgument('stuck_reverser', default_value='true'),
+        # kickstart（直行+倒车退回）开关；用视点规划时可以关掉，只靠导航转弯
+        DeclareLaunchArgument('kickstart', default_value='true'),
+        DeclareLaunchArgument('kick_reverse', default_value='true'),
         # 建图 + Nav2 + 门控/碰撞监控/方向选择器（复用 real_navigation 的 use_saved_map:=false 分支）
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(str(share / 'launch' / 'real_navigation.launch.py')),
@@ -109,6 +114,7 @@ def generate_launch_description():
         # （脱困原来要等两次目标失败，现场表现为长时间卡死）
         Node(package='fwr_bringup', executable='stuck_reverser',
              name='stuck_reverser', output='screen',
+             condition=IfCondition(LaunchConfiguration('stuck_reverser')),
              parameters=[{'use_sim_time': use_sim_time}]),
         # 链路看门狗：碰撞监控卡死时自动重启（老毛病，见 AGENTS.md）
         ExecuteProcess(
@@ -122,7 +128,11 @@ def generate_launch_description():
                           'kick_leg_m': 1.0,
                           'kick_speed_mps': 0.15,
                           'kick_turn_rad_s': 0.7,
-                          'startup_delay_s': 15.0}]),
+                          'startup_delay_s': 15.0,
+                          'kick_enabled': PythonExpression([
+                              "'", LaunchConfiguration('kickstart'), "' == 'true'"]),
+                          'kick_reverse_enabled': PythonExpression([
+                              "'", LaunchConfiguration('kick_reverse'), "' == 'true'"])}]),
         # 视点规划器（默认不启动；视点规划是新策略，旧的 room_explorer 仍可用）
         Node(package='fwr_bringup', executable='viewpoint_planner',
              name='viewpoint_planner', output='both',

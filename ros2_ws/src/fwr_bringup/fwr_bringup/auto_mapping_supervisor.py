@@ -37,6 +37,12 @@ class AutoMappingSupervisor(Node):
         # 自动链路被门控拦住，期间车完全不动。降到 30 s 更快交出去。
         self.declare_parameter('kick_timeout_s', 30.0)
         self.declare_parameter('kick_max_backups', 3)
+        # 2026-11-04（用户要求）：用视点规划时不需要 kickstart 的"直行+倒车退回"。
+        # 关掉后直接进入授权阶段，全靠导航自己走路（转弯即可，不必倒车）。
+        self.declare_parameter('kick_enabled', True)
+        # 2026-11-04（用户）：kickstart 的"倒车退回"这一段可以关掉 —— 转弯就够。
+        # 前进段保留（slam_toolbox 需要移动 ≥0.5 m 才会整合新扫描，车不动地图就永远不长）。
+        self.declare_parameter('kick_reverse_enabled', True)
         # 被包围时后退到"前方够转弯"为止的上限（秒）
         self.declare_parameter('kick_back_max_s', 8.0)
         # 2026-10-31：车尾暂时被挡（超声报警）时最多等这么久再退，
@@ -169,6 +175,17 @@ class AutoMappingSupervisor(Node):
             self._pause_pub.publish(pause)
 
         if self._phase == 'waiting':
+            if not bool(self.get_parameter('kick_enabled').value):
+                # 直接开授权，不走 kickstart（不倒车）
+                if now - self._last_set_try > 2.0:
+                    self._last_set_try = now
+                    self.get_logger().info('kickstart 已关闭 → 直接打开运动门交给导航')
+                    self._set_bool('motion_enabled', True)
+                if self._ready_ok and not self._manual_ok:
+                    self._phase = 'arming'
+                    self._phase_at = now
+                    self._leg_at = now
+                return
             if now - self._phase_at >= float(self.get_parameter('startup_delay_s').value):
                 if now - self._last_set_try > 2.0:
                     self._last_set_try = now
@@ -183,6 +200,14 @@ class AutoMappingSupervisor(Node):
             return
         if self._phase == 'kick_return':
             # 直行段结束后倒车退回已建区域：探索器需要机器人在地图内部才能规划
+            # 2026-11-04：kick_reverse_enabled=False 时跳过倒车，直接交还导航
+            if not bool(self.get_parameter('kick_reverse_enabled').value):
+                self._cmd_manual.publish(Twist())
+                self.get_logger().info('kickstart: 跳过倒车 → 直接交给导航（只前进/转弯）')
+                self._set_bool('manual_enabled', False)
+                self._phase = 'arming'
+                self._leg_at = now
+                return
             if now - self._leg_at < 6.0:
                 twist = Twist()
                 twist.linear.x = -0.15

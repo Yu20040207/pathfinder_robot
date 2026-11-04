@@ -17,3 +17,8 @@ viewpoint_planner:
     arrive_m: 0.45            # 判定"到了"的距离
     replan_period_s: 1.0      # 决策周期
     map_topic: /map
+    # 门控：自己开运动门（与 supervisor 同一套接口）
+    open_gate: true           # false = 只计算不派目标（纯离线调试）
+    gate_timeout_s: 60.0      # 无活动多久自动关门
+    map_stable_s: 20.0        # 地图连续这么久没新增已知格，才算真探完
+    bootstrap_max_cells: 4000 # 已知格少于此值时先"起步"把地图撑开

@@ -87,3 +87,21 @@ def test_mapping_bt_nodes_all_exist():
                              'inverter', 'script')}
     unknown = sorted(n for n in used if n not in known and n not in core)
     assert not unknown, f'建图 BT 使用了未注册的节点: {unknown}'
+
+
+def test_viewpoint_planner_owns_its_gate_and_closes_it():
+    """方案A：视点规划自己调 Nav2、自己管门控；任何退出路径都必须关门。
+
+    2026-11-04 事故：关掉旧探索器后没人派目标，stuck_reverser 误判"被堵"反复倒车。
+    新方案必须能独立于 frontier_explorer 工作。
+    """
+    src = (ROOT / 'fwr_bringup' / 'viewpoint_planner.py').read_text()
+    # 自己调导航（不再依赖 /explore/start_fixed_goal）
+    assert 'NavigateToPose' in src and '/navigate_to_pose' in src
+    assert 'StartFixedGoal' not in src, '不能依赖旧探索器的服务'
+    # 门控三件套
+    assert "'motion_enabled'" in src and '/base/arm_auto' in src and '/base/ready' in src
+    # 关门出现在：正常失败、超时取消、停止建图、进程退出
+    assert src.count('_close_gate()') >= 4
+    assert '_cancel_active_goal' in src
+    assert 'open_gate' in src, '需要 open_gate 开关（调试时可只算不发）'
