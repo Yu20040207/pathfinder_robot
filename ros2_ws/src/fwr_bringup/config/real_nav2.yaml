@@ -157,6 +157,12 @@ controller_server:
       # 曲率越大线速度越低（转弯自动减速），配合下面的平滑器实现"丝滑"切换
       # 2026-11-02 回退：开启后控制器每帧 abort、/cmd_vel 无输出（车不动）。
       # 疑似曲率限速把线速度压到接近 0，RPP 判定"无进展"。
+      # 2026-11-04（用户观察："车头刚过门一半时开始变慢"）：
+      # RPP 的**代价降速**默认是开的 —— 它按车身边的代价地图数值给线速度打折。
+      # 过门时车身两侧同时落在两个门框的膨胀区（0.48 m）里 → 代价饱和 → 车速被压低；
+      # 等门框退到身后，代价下降，速度自动恢复。这正是"过门慢"的主因。
+      # 曲率降速早就是 false，这一条一直漏着。关掉它：
+      use_cost_regulated_linear_velocity_scaling: false
       use_regulated_linear_velocity_scaling: false
       regulated_linear_scaling_min_radius: 0.9
       regulated_linear_scaling_min_speed: 0.06
