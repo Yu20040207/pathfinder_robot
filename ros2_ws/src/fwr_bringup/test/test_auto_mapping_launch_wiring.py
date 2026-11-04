@@ -58,3 +58,30 @@ def test_mapping_bt_uses_conditional_replanning():
     nav_bt = BT_NAV.read_text()
     assert '<IsPathValid' not in nav_bt, '导航 BT 不能被改动'
     assert '<ComputePathToPose' in nav_bt and '<FollowPath ' in nav_bt
+
+
+def test_mapping_bt_nodes_all_exist():
+    """BT 里用到的每个节点都必须是 Nav2 已注册的，或 BT.CPP 内置的。
+
+    否则运行时会报 "Behavior tree threw exception" / 找不到节点，
+    表现就是"点开始导航立刻结束"（2026-11-03 踩过：参数写错导致空树）。
+    """
+    import os
+    from xml.etree import ElementTree as ET2
+
+    nav2_nodes = Path('/opt/ros/humble/share/nav2_behavior_tree/nav2_tree_nodes.xml')
+    if not nav2_nodes.exists():
+        return                                    # 环境里没有 Nav2，跳过
+    known = {e.get('ID') for e in ET2.parse(nav2_nodes).getroot().iter()
+             if e.get('ID')}
+    core = {'AlwaysSuccess', 'AlwaysFailure', 'Inverter', 'Sequence', 'Fallback',
+            'Parallel', 'ReactiveSequence', 'ReactiveFallback', 'SubTree',
+            'RetryUntilSuccessful', 'KeepRunningUntilFailure', 'ForceSuccess',
+            'ForceFailure', 'PipelineSequence', 'RoundRobin', 'IfThenElse',
+            'RateController', 'RecoveryNode', 'Repeat', 'Delay', 'Timeout'}
+    tree = ET2.parse(BT_MAP).getroot()
+    used = {e.tag for e in tree.iter()
+            if e.tag not in ('root', 'BehaviorTree', 'input_port', 'output_port',
+                             'inverter', 'script')}
+    unknown = sorted(n for n in used if n not in known and n not in core)
+    assert not unknown, f'建图 BT 使用了未注册的节点: {unknown}'

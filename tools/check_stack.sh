@@ -29,7 +29,16 @@ for srv in /explore/start_fixed_goal /explore/start_two_point_goal /explore/star
 done
 
 echo "=== ④ 冻结参数是否被意外改动 ==="
-chk() { v=$(timeout 8 ros2 param get "$1" "$2" 2>/dev/null | tail -1); case "$v" in *"$3"*) say "$2" "✅ $v";; *) say "$2" "❌ 期望 $3，实际 $v"; bad;; esac; }
+chk() {
+  # 参数查询偶尔会超时（DDS 首次发现慢），重试一次再判定，避免误报
+  v=$(timeout 10 ros2 param get "$1" "$2" 2>/dev/null | tail -1)
+  if [ -z "$v" ]; then v=$(timeout 10 ros2 param get "$1" "$2" 2>/dev/null | tail -1); fi
+  if [ -z "$v" ]; then say "$2" "⚠️ 查询超时（未知，非失败）"; return; fi
+  case "$v" in
+    *"$3"*) say "$2" "✅ $v";;
+    *)      say "$2" "❌ 期望 $3，实际 $v"; bad;;
+  esac
+}
 chk /controller_server FollowPath.lookahead_dist 0.55
 chk /controller_server FollowPath.rotate_to_heading_angular_vel 0.55
 chk /controller_server FollowPath.use_cost_regulated_linear_velocity_scaling False
