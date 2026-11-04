@@ -17,11 +17,13 @@ import time
 
 import numpy as np
 import rclpy
+from geometry_msgs.msg import Twist
 from nav2_msgs.action import NavigateToPose
 from nav_msgs.msg import OccupancyGrid
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
 from tf2_ros import Buffer, TransformListener
@@ -63,6 +65,20 @@ class ViewpointPlanner(Node):
         # 地图已知格少于这个数时，认为还没长开，需要"起步"把地图撑开
         # （350 m² 的场地约 130k 格；用它的一小部分做门槛）
         self.declare_parameter('bootstrap_max_cells', 4000)
+        # 最短目标距离：小于它就不派（Nav2 的 xy_goal_tolerance 是 0.4 m，
+        # 太近的目标会被判"已到达"，车一步不走 —— 2026-11-04 实测死锁）
+        self.declare_parameter('min_goal_m', 1.2)
+        # 雷达起步：地图还没长开时，转向最开阔方向并前进一小段，
+        # 让 slam_toolbox 整合新扫描（它要求移动 >=0.5 m 才会更新地图）
+        self.declare_parameter('bootstrap_forward_m', 1.0)
+        self.declare_parameter('bootstrap_speed_mps', 0.12)
+        self.declare_parameter('bootstrap_turn_rate', 0.5)
+        self.declare_parameter('bootstrap_min_clear_m', 1.3)
+        # 手动起步通道（/cmd_vel_manual）默认关闭：实测底盘 sensors_ready 间歇为 0，
+        # 指令会被丢弃、转向超时。起步改用 Nav2 目标（_scan_bootstrap_cell）。
+        self.declare_parameter('bootstrap_manual_enabled', False)
+        self.declare_parameter('bootstrap_turn_timeout_s', 12.0)
+        self.declare_parameter('bootstrap_fwd_timeout_s', 20.0)
 
         self._map: OccupancyGrid | None = None
         self._covered: np.ndarray | None = None
@@ -98,6 +114,13 @@ class ViewpointPlanner(Node):
         self.create_subscription(
             Bool, '/mapping/run', lambda m: setattr(self, '_running', bool(m.data)),
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
+        self._scan = None
+        self._cmd_manual = self.create_publisher(Twist, '/cmd_vel_manual', 10)
+        self._boot = None            # 起步动作状态机
+        # 雷达算方向必须忽略后方扇区（倒装 + 后部被屏蔽，读到的是车身）
+        self.create_subscription(
+            LaserScan, '/scan', self._on_scan,
+            QoSProfile(depth=5, reliability=ReliabilityPolicy.BEST_EFFORT))
         self._goal_future = None
         self._goal_handle = None
         self._gate_open = False
@@ -105,6 +128,8 @@ class ViewpointPlanner(Node):
         self._state_pub = self.create_publisher(String, '/viewpoint_planner/state', 10)
         period = float(self.get_parameter('replan_period_s').value)
         self.create_timer(max(0.2, period), self._tick)
+        # 起步动作必须高频发布：底盘有指令超时，1 Hz 推不动（2026-11-04 实测转向超时）
+        self.create_timer(0.05, self._bootstrap_tick)
         self.get_logger().info(
             '视点规划器已启动（enabled=%s；半径 %.1f→%.1f m；目标覆盖 %.0f%%）' % (
                 self.get_parameter('enabled').value,
@@ -132,6 +157,158 @@ class ViewpointPlanner(Node):
         col = int((x - m.info.origin.position.x) / m.info.resolution)
         row = int((y - m.info.origin.position.y) / m.info.resolution)
         return (row, col), (x, y)
+
+    def _on_scan(self, msg: LaserScan) -> None:
+        self._scan = msg
+
+    def _open_direction(self):
+        """从 /scan 找最开阔方向，返回 (角度 rad, 净空 m)。
+
+        只考虑有效视场（跳过后方 ±50°：雷达倒装，那里读到的是车身）。
+        """
+        if self._scan is None:
+            return None
+        r = np.asarray(self._scan.ranges, dtype=float)
+        n = r.size
+        if n == 0:
+            return None
+        ang = self._scan.angle_min + np.arange(n) * self._scan.angle_increment
+        ok = np.isfinite(r) & (r > 0.12)
+        rear = np.abs(ang) < math.radians(50.0)      # 后方扇区，忽略
+        usable = ok & ~rear
+        if not usable.any():
+            return None
+        sector = math.radians(10.0)
+        best_deg, best_clear = None, -1.0
+        edges = np.arange(-math.pi, math.pi, sector)
+        for a0 in edges:
+            m = usable & (ang >= a0) & (ang < a0 + sector)
+            if not m.any():
+                continue
+            clear = float(np.percentile(r[m], 30))    # 用 30% 分位，避免单点尖刺
+            if clear > best_clear:
+                best_clear, best_deg = clear, a0 + sector / 2.0
+        if best_deg is None or best_clear < float(
+                self.get_parameter('bootstrap_min_clear_m').value):
+            return None
+        return best_deg, best_clear
+
+    def _start_bootstrap(self, now: float) -> bool:
+        """雷达起步：转向最开阔方向 → 前进 1 m。只前进/原地转，**不倒车**。
+
+        ⚠️ 2026-11-04 实测：只开 motion_enabled 不够 —— `/cmd_vel_manual` 还要求
+        `manual_enabled=true`，否则底盘直接丢弃手动指令（车一动不动，转向超时）。
+        """
+        # 先取消在跑的导航目标：底盘规定"有导航目标时手动指令一律丢弃"
+        if self._goal_handle is not None:
+            self._cancel_goal_only()
+            self._set_state('bootstrap-cancel-goal')
+            return True                        # 下一拍再开手动门
+
+        # 手动通道要求：motion_enabled=True 且 manual_enabled=True（不能走 _open_gate，
+        # 那个函数要求 manual 为假 —— 二者互斥，会死锁在 waiting-gate）
+        if not self._ready:
+            self._set_bool_param('motion_enabled', True)
+            self._set_state('waiting-ready')
+            return True
+        if not self._manual:
+            self._set_bool_param('motion_enabled', True)
+            self._set_bool_param('manual_enabled', True)
+            self._set_state('waiting-manual-gate')
+            return True                     # 下一拍再确认
+        chosen = self._open_direction()
+        if chosen is None:
+            return False
+        target_ang, clear = chosen
+        x, y, yaw = self._robot_xyyaw()
+        if yaw is None:
+            return False
+        # 角度差（-pi..pi）
+        err = math.atan2(math.sin(target_ang - yaw), math.cos(target_ang - yaw))
+        self._boot = {'phase': 'turn', 't0': now, 'yaw0': yaw,
+                      'x0': x, 'y0': y, 'clear': clear}
+        if abs(err) < math.radians(12.0):
+            self._boot['phase'] = 'forward'
+            self._boot['t0'] = now
+        self.get_logger().info(
+            '雷达起步：最开阔方向 %.0f°（净空 %.2f m），先%s' % (
+                math.degrees(target_ang), clear,
+                '前进' if self._boot['phase'] == 'forward' else '转向'))
+        self._set_state('bootstrap-scan')
+        return True
+
+    def _robot_xyyaw(self):
+        try:
+            tr = self._tf_buffer.lookup_transform('odom', 'base_footprint',
+                                                 rclpy.time.Time())
+        except Exception:                              # noqa: BLE001
+            return None, None, None
+        q = tr.transform.rotation
+        yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                         1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+        return tr.transform.translation.x, tr.transform.translation.y, yaw
+
+    def _bootstrap_tick(self) -> None:
+        if self._boot is None:
+            return
+        self._run_bootstrap(time.monotonic())
+
+    def _run_bootstrap(self, now: float) -> None:
+        """执行起步动作（每拍推进一点）。"""
+        if self._boot is None:
+            return
+        # 底盘判据 _sensors_ready() 里包含 motion_enabled；起步期间必须保持为真，
+        # 否则手动指令会被当成"传感器不新鲜"丢弃（2026-11-04 实测 sensors_ready=0）
+        if bool(self.get_parameter('open_gate').value):
+            self._set_bool_param('motion_enabled', True)
+        cmd = Twist()
+        if self._boot['phase'] == 'turn':
+            _, _, yaw = self._robot_xyyaw()
+            if yaw is None:
+                return
+            chosen = self._open_direction()
+            if chosen is None:
+                self._finish_bootstrap('方向丢失')
+                return
+            err = math.atan2(math.sin(chosen[0] - yaw), math.cos(chosen[0] - yaw))
+            if abs(err) < math.radians(12.0):
+                self._boot['phase'] = 'forward'
+                self._boot['t0'] = now
+                self._boot['x0'], self._boot['y0'] = self._robot_xyyaw()[:2]
+                return
+            cmd.angular.z = max(-float(self.get_parameter('bootstrap_turn_rate').value),
+                                min(float(self.get_parameter('bootstrap_turn_rate').value),
+                                    err))
+            if now - self._boot['t0'] > float(
+                    self.get_parameter('bootstrap_turn_timeout_s').value):
+                self._finish_bootstrap('转向超时')
+                return
+            self._cmd_manual.publish(cmd)
+            return
+        else:
+            x, y, _ = self._robot_xyyaw()
+            if x is None:
+                return
+            moved = math.hypot(x - self._boot['x0'], y - self._boot['y0'])
+            # 前方净空不够就停（安全）
+            chosen = self._open_direction()
+            clear = chosen[1] if chosen else 0.0
+            if (moved >= float(self.get_parameter('bootstrap_forward_m').value)
+                    or clear < 0.5
+                    or now - self._boot['t0'] > float(
+                        self.get_parameter('bootstrap_fwd_timeout_s').value)):
+                self._finish_bootstrap('前进 %.2f m 完成' % moved)
+                return
+            cmd.linear.x = float(self.get_parameter('bootstrap_speed_mps').value)
+        self._cmd_manual.publish(cmd)
+
+    def _finish_bootstrap(self, why: str) -> None:
+        self._cmd_manual.publish(Twist())
+        self._set_bool_param('manual_enabled', False)   # 交还自动链路
+        self._boot = None
+        self._radius = float(self.get_parameter('radius_start_m').value)
+        self.get_logger().info('雷达起步结束：%s' % why)
+        self._set_state('bootstrap-done')
 
     # ---------- 主循环 ----------
     def _tick(self) -> None:
@@ -187,10 +364,14 @@ class ViewpointPlanner(Node):
                 self.get_logger().warn('视点 %.1f s 未完成，取消并放弃该点' %
                                        float(self.get_parameter('hop_timeout_s').value))
                 self._visited.add(self._target)
-                self._cancel_active_goal()
+                self._cancel_goal_only()
             else:
                 self._set_state('going')
                 return
+
+        # 起步动作进行中 → 决策暂停（动作由 20 Hz 定时器推进）
+        if self._boot is not None:
+            return
 
         # 诊断：每 10 秒打一次内部数字（排查"不动"时非常有用）
         if now - getattr(self, '_dbg_at', 0.0) > 10.0:
@@ -215,10 +396,19 @@ class ViewpointPlanner(Node):
         #     （原来这事由 auto_mapping_supervisor 的 kickstart 做，它靠倒车退回，
         #      用户明确说不需要倒车；这里改成纯前进+转弯。）
         boot = self._bootstrap_target(cell, drivable, free)
+        if boot is None:
+            # 地图太小时没有够远的候选 → 用雷达找开阔方向，投影出一个 Nav2 目标
+            boot = self._scan_bootstrap_cell(cell, drivable, free)
         if boot is not None:
             self._visited.add(boot)
             self._dispatch(boot, now, label='bootstrap')
             return
+
+        # 地图太小 / 没有够远的目标 → 用雷达起步（转向最开阔方向 + 前进 1 m）
+        if (int(free.sum()) <= int(self.get_parameter('bootstrap_max_cells').value)
+                and bool(self.get_parameter('bootstrap_manual_enabled').value)):
+            if self._start_bootstrap(now):
+                return
 
         # ② 半径内没有 → 逐级扩大
         if self._radius < float(self.get_parameter('radius_max_m').value):
@@ -313,11 +503,61 @@ class ViewpointPlanner(Node):
                                 int(self.get_parameter('rays').value), fill)
                for c in cands]
         radius_cells = int(self._radius / res)
+        # 太近的目标会被 Nav2 判"已到达"（xy_goal_tolerance 0.4 m），必须过滤
+        min_cells = float(self.get_parameter('min_goal_m').value) / res
+        keep = [i for i, c in enumerate(cands)
+                if dist[c[0], c[1]] >= min_cells]
+        if not keep:
+            return None
+        cands = [cands[i] for i in keep]
+        vis = [vis[i] for i in keep]
         idx = vc.pick_next_viewpoint(
             cands, vis, self._covered.ravel(), dist, radius_cells,
             visited=self._visited,
             min_gain_cells=int(self.get_parameter('min_gain_cells').value))
         return None if idx is None else cands[idx]
+
+    def _scan_bootstrap_cell(self, cell, drivable, free):
+        """地图还小时，用 /scan 找最开阔方向，投影出 1.5 m 外的 Nav2 目标。
+
+        2026-11-04：手动通道（/cmd_vel_manual）在这台车上不稳定（底盘
+        `sensors_ready` 间歇为 0，指令被丢弃），所以起步也走**已验证的自动通道**。
+        """
+        chosen = self._open_direction()
+        if chosen is None:
+            return None
+        ang, clear = chosen
+        res = self._map.info.resolution
+        want = min(clear - 0.4, 1.5)              # 留 0.4 m 余量，最多走 1.5 m
+        if want < 1.0:
+            return None
+        steps = int(want / res)
+        # 雷达角度 → 地图坐标（scan 角度 0° = 车尾，需 +pi 转成车体朝向）
+        heading = ang + math.pi
+        yaw = self._robot_heading()
+        if yaw is None:
+            return None
+        dx = math.cos(yaw + heading) * steps
+        dy = math.sin(yaw + heading) * steps
+        ty, tx = int(round(cell[0] + dy)), int(round(cell[1] + dx))
+        h, w = drivable.shape
+        if not (0 <= ty < h and 0 <= tx < w):
+            return None
+        if not free[ty, tx]:
+            return None
+        self.get_logger().info('雷达起步：开阔方向 %.0f°（净空 %.1f m）→ 目标格 (%d,%d)' % (
+            math.degrees(ang), clear, ty, tx))
+        return (ty, tx)
+
+    def _robot_heading(self):
+        try:
+            tr = self._tf_buffer.lookup_transform('map', 'base_footprint',
+                                                 rclpy.time.Time())
+        except Exception:                          # noqa: BLE001
+            return None
+        q = tr.transform.rotation
+        return math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                          1.0 - 2.0 * (q.y * q.y + q.z * q.z))
 
     def _bootstrap_target(self, cell, drivable, free):
         """地图还没长开时，走到本半径内最远的可达点（只前进/转弯，不倒车）。"""
@@ -336,12 +576,13 @@ class ViewpointPlanner(Node):
             return None
         dist = vc.bfs_distance(drivable, seed)
         limit = int(float(self.get_parameter('radius_start_m').value) / res)
+        near = int(float(self.get_parameter('min_goal_m').value) / res)
         best, best_d = None, -1
         for c in cands:
             if c in self._visited:
                 continue
             d = int(dist[c[0], c[1]])
-            if 0 < d <= limit and d > best_d:
+            if near <= d <= limit and d > best_d:
                 best, best_d = c, d
         return best
 
@@ -356,8 +597,17 @@ class ViewpointPlanner(Node):
         dist = vc.bfs_distance(drivable, seed)
         inset = max(1, int(round(float(self.get_parameter('inset_m').value)
                                  / self._map.info.resolution)))
-        tgt = vc.expansion_target(fronts, drivable, dist, inset_cells=inset)
+        # 前沿目标也必须够远：太近会被 Nav2 判"已到达" → 走一步就停、
+        # 反复 dwell（2026-11-04 实测：地图长出来后卡在这里）
+        nearest = int(float(self.get_parameter('min_goal_m').value) / self._map.info.resolution)
+        far_fronts = [f for f in fronts
+                      if dist[f[0], f[1]] < 0 or dist[f[0], f[1]] >= nearest]
+        if not far_fronts:
+            return False
+        tgt = vc.expansion_target(far_fronts, drivable, dist, inset_cells=inset)
         if tgt is None:
+            return False
+        if dist[tgt[0], tgt[1]] < nearest:
             return False
         self._dispatch(tgt, now, label='frontier')
         return True
@@ -451,12 +701,34 @@ class ViewpointPlanner(Node):
         ok = status == 4                              # STATUS_SUCCEEDED
         self.get_logger().info('视点目标结束: %s' % ('成功' if ok else '失败'))
         self._goal_handle = None
+        self._scan = None
+        self._cmd_manual = self.create_publisher(Twist, '/cmd_vel_manual', 10)
+        self._boot = None            # 起步动作状态机
+        # 雷达算方向必须忽略后方扇区（倒装 + 后部被屏蔽，读到的是车身）
+        self.create_subscription(
+            LaserScan, '/scan', self._on_scan,
+            QoSProfile(depth=5, reliability=ReliabilityPolicy.BEST_EFFORT))
         self._goal_future = None
         if ok:
             self._dwell_until = time.monotonic() + float(
                 self.get_parameter('dwell_s').value)
         else:
             self._close_gate()                        # 失败立刻关门，等下一轮重开
+        self._target = None
+
+    def _cancel_goal_only(self) -> None:
+        """只取消当前导航目标（不动门控）。
+
+        ⚠️ 底盘仲裁：`manual` 指令要求 **没有导航目标在跑**（nav_active=False）。
+        不先取消，手动起步指令会被全部丢掉（2026-11-04 实测：发了 11 帧全被丢）。
+        """
+        if self._goal_handle is not None:
+            try:
+                self._goal_handle.cancel_goal_async()
+            except Exception:                      # noqa: BLE001
+                pass
+        self._goal_handle = None
+        self._goal_future = None
         self._target = None
 
     def _cancel_active_goal(self) -> None:
@@ -466,6 +738,13 @@ class ViewpointPlanner(Node):
             except Exception:                         # noqa: BLE001
                 pass
         self._goal_handle = None
+        self._scan = None
+        self._cmd_manual = self.create_publisher(Twist, '/cmd_vel_manual', 10)
+        self._boot = None            # 起步动作状态机
+        # 雷达算方向必须忽略后方扇区（倒装 + 后部被屏蔽，读到的是车身）
+        self.create_subscription(
+            LaserScan, '/scan', self._on_scan,
+            QoSProfile(depth=5, reliability=ReliabilityPolicy.BEST_EFFORT))
         self._goal_future = None
         self._target = None
         self._close_gate()

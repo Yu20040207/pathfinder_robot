@@ -49,6 +49,8 @@ def generate_launch_description():
         # kickstart（直行+倒车退回）开关；用视点规划时可以关掉，只靠导航转弯
         DeclareLaunchArgument('kickstart', default_value='true'),
         DeclareLaunchArgument('kick_reverse', default_value='true'),
+        # 建图卡住自动修复（默认开：用户要求这类卡死不再需要人工介入）
+        DeclareLaunchArgument('stuck_guard', default_value='true'),
         # 建图 + Nav2 + 门控/碰撞监控/方向选择器（复用 real_navigation 的 use_saved_map:=false 分支）
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(str(share / 'launch' / 'real_navigation.launch.py')),
@@ -133,6 +135,11 @@ def generate_launch_description():
                               "'", LaunchConfiguration('kickstart'), "' == 'true'"]),
                           'kick_reverse_enabled': PythonExpression([
                               "'", LaunchConfiguration('kick_reverse'), "' == 'true'"])}]),
+        # 建图卡住自动修复：位移/地图都不增长时逐级自愈（清代价地图→重启探索→原地转）
+        Node(package='fwr_bringup', executable='mapping_stuck_guard',
+             name='mapping_stuck_guard', output='both',
+             condition=IfCondition(LaunchConfiguration('stuck_guard')),
+             parameters=[{'use_sim_time': use_sim_time}]),
         # 视点规划器（默认不启动；视点规划是新策略，旧的 room_explorer 仍可用）
         Node(package='fwr_bringup', executable='viewpoint_planner',
              name='viewpoint_planner', output='both',

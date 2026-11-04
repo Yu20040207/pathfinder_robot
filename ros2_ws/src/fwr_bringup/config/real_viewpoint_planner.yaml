@@ -22,3 +22,8 @@ viewpoint_planner:
     gate_timeout_s: 60.0      # 无活动多久自动关门
     map_stable_s: 20.0        # 地图连续这么久没新增已知格，才算真探完
     bootstrap_max_cells: 4000 # 已知格少于此值时先"起步"把地图撑开
+    min_goal_m: 1.2           # 最短目标距离（太近会被判"已到达"，车不走）
+    bootstrap_forward_m: 1.0  # 雷达起步前进距离
+    bootstrap_speed_mps: 0.12
+    bootstrap_turn_rate: 0.5
+    bootstrap_min_clear_m: 1.3 # 净空小于此值不前进

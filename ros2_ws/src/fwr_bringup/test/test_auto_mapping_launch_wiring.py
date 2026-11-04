@@ -105,3 +105,14 @@ def test_viewpoint_planner_owns_its_gate_and_closes_it():
     assert src.count('_close_gate()') >= 4
     assert '_cancel_active_goal' in src
     assert 'open_gate' in src, '需要 open_gate 开关（调试时可只算不发）'
+
+
+def test_stuck_guard_exists_and_never_drives_forward():
+    """建图卡住自动修复：只允许清零/重启/原地转，绝不能发前进或倒车。"""
+    src = (ROOT / 'fwr_bringup' / 'mapping_stuck_guard.py').read_text()
+    assert 'ClearEntireCostmap' in src and '/explore/stop' in src and '/spin' in src
+    assert 'Twist' not in src, '守卫节点不得直接发速度指令'
+    assert 'linear' not in src.lower() or 'linear' not in src, '不得出现线速度'
+    launch = LAUNCH.read_text()
+    assert "executable='mapping_stuck_guard'" in launch
+    assert "DeclareLaunchArgument('stuck_guard', default_value='true')" in launch
