@@ -77,7 +77,9 @@ class ViewpointPlanner(Node):
         self.declare_parameter('waypoint_reach_m', 0.9)
         # 房间成型后绕边缘一圈的冷却时间（防止反复绕圈）
         self.declare_parameter('perimeter_cooldown_s', 180.0)
-        self.declare_parameter('perimeter_coverage', 0.85)   # 半径内看见 85% → 绕边缘一圈
+        self.declare_parameter('perimeter_coverage', 0.85)
+        # 覆盖率停滞多久算"这间房看完"（方案B）
+        self.declare_parameter('plateau_s', 60.0)   # 半径内看见 85% → 绕边缘一圈
         # 雷达起步：地图还没长开时，转向最开阔方向并前进一小段，
         # 让 slam_toolbox 整合新扫描（它要求移动 >=0.5 m 才会更新地图）
         self.declare_parameter('bootstrap_forward_m', 1.0)
@@ -118,6 +120,14 @@ class ViewpointPlanner(Node):
         self._batch = []
         self._chaining = False
         self._perimeter_at = 0.0
+        # 方案A：可观测掩膜 —— "所有可达视点合起来能看见的格子"。
+        # 看不见的死角（家具后面）永久排除，否则覆盖率永远上不去、
+        # 边缘环线永远不触发、车就一直在房间里绕（2026-11-04 用户反馈）。
+        self._observable = None
+        # 方案B：停滞判定
+        self._last_cov = -1.0
+        self._cov_at = 0.0
+        self._cov_pose = None
         # 去过但失败的门（前沿）拉黑，避免反复撞同一个过不去的门洞
         self._bad_frontiers: list[tuple[int, int]] = []
         self._last_label = ''
@@ -473,6 +483,23 @@ class ViewpointPlanner(Node):
 
         # ③ 半径内没有值得去的点了 → 房间大致成型：先沿边缘走一圈确认墙壁，
         #    然后再考虑出门（用户 2026-11-04 的思路）
+        # ---- 方案B：停滞判定（覆盖率长时间不涨 → 认为这间房看完了）----
+        cov_now = self._observable_coverage(free)
+        if cov_now - self._last_cov > 0.01:
+            self._last_cov = cov_now
+            self._cov_at = now
+            self._cov_pose = cell
+        else:
+            moved = (math.hypot(cell[0] - self._cov_pose[0], cell[1] - self._cov_pose[1])
+                     * self._map.info.resolution) if self._cov_pose else 0.0
+            if (now - self._cov_at) > float(self.get_parameter('plateau_s').value) and moved > 2.0:
+                self.get_logger().info(
+                    '覆盖率 %.0f%% 停滞 %.0f s（走了 %.1f m）→ 认为本房间看完' % (
+                        100 * cov_now, now - self._cov_at, moved))
+                self._perimeter_at = 0.0          # 允许立刻绕边缘
+                self._cov_at = now                # 重置，避免每拍都触发
+                self._cov_pose = cell
+
         # 用"半径内自由格的已看见比例"判定房间是否大致成型（比"没候选"更可靠：
         # 只要有候选就会一直挑，永远轮不到边缘环线）
         cover_r = self._radius_coverage(cell, free)
@@ -588,6 +615,7 @@ class ViewpointPlanner(Node):
         vis = [vc.visible_cells(blocked, unknown, c, range_cells,
                                 int(self.get_parameter('rays').value), fill)
                for c in cands]
+        self._update_observable(vis, free.shape)
         radius_cells = int(self._radius / res)
         # 太近的目标会被 Nav2 判"已到达"（xy_goal_tolerance 0.4 m），必须过滤
         min_cells = float(self.get_parameter('min_goal_m').value) / res
@@ -699,6 +727,7 @@ class ViewpointPlanner(Node):
         fill = int(self.get_parameter('fill_cells').value)
         rays = int(self.get_parameter('rays').value)
         vis = [vc.visible_cells(blocked, unknown, c, range_cells, rays, fill) for c in cands]
+        self._update_observable(vis, free.shape)
         covered = self._covered.ravel().copy()
         radius_cells = int(self._radius / res)
         batch = []
@@ -770,6 +799,25 @@ class ViewpointPlanner(Node):
         self._goal_future.add_done_callback(self._on_goal_response)
         self._set_state('batch %d' % len(cells))
 
+    def _update_observable(self, vis, shape) -> None:
+        """把这一批候选点的可见集合求并集，得到"可观测"掩膜。"""
+        if not vis:
+            return
+        flat = np.zeros(shape[0] * shape[1], dtype=bool)
+        for v in vis:
+            flat[v] = True
+        self._observable = flat.reshape(shape)
+
+    def _observable_coverage(self, free) -> float:
+        """全局覆盖：分母只算"可观测"的自由格（死角不计）。"""
+        obs = self._observable
+        if obs is None:
+            obs = np.ones_like(free)
+        denom = int((free & obs).sum())
+        if denom == 0:
+            return 0.0
+        return float((self._covered & free & obs).sum()) / denom
+
     def _radius_coverage(self, cell, free) -> float:
         """当前半径内，已知自由格里"已看见"的比例。"""
         res = self._map.info.resolution
@@ -777,7 +825,8 @@ class ViewpointPlanner(Node):
         yy, xx = np.ogrid[:h, :w]
         r = int(self._radius / res)
         disk = (yy - cell[0]) ** 2 + (xx - cell[1]) ** 2 <= r ** 2
-        zone = free & disk
+        obs = self._observable if self._observable is not None else np.ones_like(free)
+        zone = free & disk & obs          # 死角不进分母，覆盖率才能达标
         total = int(zone.sum())
         if total == 0:
             return 0.0
