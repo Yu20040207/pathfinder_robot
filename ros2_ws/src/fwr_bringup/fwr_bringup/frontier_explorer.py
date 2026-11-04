@@ -38,6 +38,8 @@ class FrontierExplorer(Node):
         # 期间扫描里停车框早就是空的）。这里自己判"监控持续压零"，
         # 超过 stuck_cancel_s 就取消当前目标、立刻重新规划，不等它 18 秒。
         self.declare_parameter('stuck_cancel_s', 2.5)
+        # 取消后自动重试几次（用户要求"取消后立即重新规划"，而不是任务直接结束）
+        self.declare_parameter('max_stuck_retries', 2)
         self.declare_parameter('static_map', False)
         self._static_map = bool(self.get_parameter('static_map').value)
         self._trial_started = None
@@ -77,6 +79,8 @@ class FrontierExplorer(Node):
         # 2026-11-04：监控压零检测（stuck_cancel_s 用）
         self._gate_nz_at = None
         self._fwd_nz_at = None
+        self._retry_pending = False
+        self._stuck_retries = 0
         self._cancel_after_accept = False
         self._cancel_future = None
         self._status = 'idle'
@@ -250,6 +254,7 @@ class FrontierExplorer(Node):
             self._goal = None
             self._fixed_goal = (request.x, request.y, request.yaw)
             self._fixed_goals = [self._fixed_goal]
+            self._stuck_retries = 0
             self._multi_points = None   # 防止上一次多点路线残留
             self._status = 'idle'
             self._trial_started = now
@@ -303,6 +308,7 @@ class FrontierExplorer(Node):
         if ok:
             self._goal = None
             self._fixed_goals = [start, end]
+            self._stuck_retries = 0
             self._multi_points = None   # 防止上一次多点路线残留
             self._fixed_goal = start
             self._status = 'idle'
@@ -394,6 +400,7 @@ class FrontierExplorer(Node):
             return response
         self._fixed_goals = None
         self._fixed_goal = None
+        self._stuck_retries = 0
         self._multi_points = pts
         self._sm.start_fixed(legs=1)
         response.accepted = True
@@ -445,6 +452,7 @@ class FrontierExplorer(Node):
                 ' → 取消当前目标，立即重新规划'
                 % (now - self._fwd_nz_at))
             self._fwd_nz_at = now
+            self._retry_pending = True
             self._cancel_goal()
         decision = self._sm.update(map_ok, pose_ok, self._fault, self._status, now,
                                    self._goal.grid_index if self._goal else None)
@@ -577,6 +585,28 @@ class FrontierExplorer(Node):
         if not success:
             self._sm.stop()
         self._status = 'idle'
+
+    def _retry_after_stuck(self):
+        """监控压零导致取消后，立刻按原任务重新规划（最多 max_stuck_retries 次）。
+
+        2026-11-04（用户："掉头之后卡住不动了"）：只取消不重试的话任务会直接结束，
+        车停在那儿等人重新点。这里原地重新下发一次，让 Nav2 用新位姿重新规划。
+        """
+        limit = int(self.get_parameter('max_stuck_retries').value)
+        if self._stuck_retries >= limit:
+            self.get_logger().warn(
+                f'卡住重试已达上限 {limit} 次，任务结束')
+            return
+        self._stuck_retries += 1
+        self._status = 'idle'
+        if self._multi_points:
+            self._sm.start_fixed(legs=1)
+        elif self._fixed_goals:
+            self._sm.start_fixed(legs=len(self._fixed_goals))
+        else:
+            self._sm.start()
+        self.get_logger().warn(
+            f'卡住 → 已取消旧目标，立即重新规划（第 {self._stuck_retries}/{limit} 次）')
 
     def _cancel_goal(self):
         if self._handle is not None and self._cancel_future is None:
@@ -730,6 +760,9 @@ class FrontierExplorer(Node):
         self._handle = None
         self._cancel_future = None
         self._cancel_after_accept = False
+        if self._retry_pending:
+            self._retry_pending = False
+            self._retry_after_stuck()
 
 
 def main():
