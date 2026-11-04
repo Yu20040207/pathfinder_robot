@@ -44,20 +44,22 @@ def test_navigation_keeps_its_own_bt_by_default():
     assert "LaunchConfiguration('mapping_bt')" in am
 
 
-def test_mapping_bt_uses_conditional_replanning():
+def test_mapping_bt_replans_slower_than_navigation():
+    """建图 BT 必须比导航 BT 重规划更慢（减少改道），且必须真的会规划。
+
+    2026-11-04 的教训：IsPathValid 对空路径不可靠（两种写法都导致车完全不动、
+    /plan 0 次），所以用"降低重规划频率"来实现，不再依赖 IsPathValid。
+    """
     root = ET.parse(BT_MAP).getroot()
-    ids = {e.get('ID') for e in root.iter('BehaviorTree')}
-    assert 'MainTree' in ids
+    assert {e.get('ID') for e in root.iter('BehaviorTree')} == {'MainTree'}
     xml_text = BT_MAP.read_text()
-    # 核心：IsPathValid 守护重规划 + 仍有 FollowPath
-    assert '<IsPathValid' in xml_text, '建图 BT 必须用 IsPathValid 做条件重规划'
-    assert 'ComputePathToPose' in xml_text
-    assert 'FollowPath' in xml_text
-    assert 'AlwaysSuccess' in xml_text, '路径有效时要能直接通过（不改道）'
-    # 导航 BT 必须保持原样（不含 IsPathValid 元素；注释里提到过不算）
-    nav_bt = BT_NAV.read_text()
-    assert '<IsPathValid' not in nav_bt, '导航 BT 不能被改动'
-    assert '<ComputePathToPose' in nav_bt and '<FollowPath ' in nav_bt
+    assert '<ComputePathToPose' in xml_text and '<FollowPath ' in xml_text
+    hz = float(xml_text.split('hz="')[1].split('"')[0])
+    nav_hz = float(BT_NAV.read_text().split('hz="')[1].split('"')[0])
+    assert hz < nav_hz, f'建图 BT 重规划({hz} Hz) 必须慢于导航({nav_hz} Hz)'
+    # 不能再用 IsPathValid 做"是否需要规划"的判据（对空路径失真）
+    assert '<IsPathValid' not in xml_text, (
+        'Hamble 的 IsPathValid 对空路径返回成功，用它守卫会导致永不规划')
 
 
 def test_mapping_bt_nodes_all_exist():

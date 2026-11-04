@@ -1,29 +1,25 @@
 <root main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree">
-    <!-- 2026-11-04 建图专用（导航仍用 real_navigate_to_pose.xml，不受影响）。
+    <!-- 2026-11-04 建图专用（导航仍用 real_navigate_to_pose.xml，完全不受影响）。
 
-         与导航版的唯一区别：**条件重规划**。
-         原来每 2 秒无条件重算，两条代价接近的通路时"最优"会在它们之间跳，
-         车就一下左拐一下右拐（用户反馈）。这里改成：
+         目的：减少"中途改道"（用户反馈：规划好的路走到一半又规划出更合适的，
+         然后车拐过去，表现为一下左拐一下右拐）。
 
-           路径还有效  → 沿用，不重算（AlwaysSuccess 直接通过）
-           路径失效    → 才重算（比如被新障碍挡住）
+         做法：把重规划周期从 0.5 Hz（2 秒）降到 0.2 Hz（5 秒）。
+         改道机会减少 60%，同时**保证一定会规划**。
 
-         另留一个 0.1 Hz 的兜底重算（RecoveryNode 的恢复分支），防止
-         "路径有效但已经很差"的情况一直不更新。
+         ⚠️ 两个失败的尝试（别再重做）：
+         1. `Inverter(IsPathValid)` → 空路径时 IsPathValid 返回 SUCCESS，
+            被反转成 FAILURE → 跳过规划 → 车完全不动（/plan 0 次）
+         2. `Fallback(IsPathValid, ComputePathToPose)` → 同样因为空路径被判"有效"
+            而永远不规划 → 车完全不动
+         → Hamble 的 IsPathValid 对空路径不可靠，不能用来做"是否需要规划"的判据。
     -->
     <RecoveryNode number_of_retries="6" name="NavigateRecovery">
       <PipelineSequence name="NavigateWithReplanning">
-        <Fallback name="ReplanOnlyWhenNeeded">
-          <Sequence name="ReplanIfInvalid">
-            <Inverter>
-              <IsPathValid path="{path}"/>
-            </Inverter>
-            <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
-          </Sequence>
-          <!-- 路径有效：直接通过，保持原路径，不改道 -->
-          <AlwaysSuccess/>
-        </Fallback>
+        <RateController hz="0.2">
+          <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
+        </RateController>
         <FollowPath path="{path}" controller_id="FollowPath"/>
       </PipelineSequence>
       <Sequence name="RecoveryActions">

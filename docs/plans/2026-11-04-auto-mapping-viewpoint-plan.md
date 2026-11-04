@@ -157,3 +157,23 @@ if R=8 m 仍没有:
 - [ ] 建图 launch 接入（`viewpoint_planner:=true` 才启用，默认关）
 - [ ] 建图专用 BT（`real_navigate_to_pose_mapping.xml`，条件重规划防改道）
 - [ ] 实车验证：`tools/check_stack.sh` 自检 → 打开开关 → 对比"每 100 m 角速度翻转次数"和地图增长速率
+
+
+## 7. 行为树实验记录（重要，别再重做）
+
+目标是"减少中途改道"。试过三种写法：
+
+| # | 写法 | 结果 | 结论 |
+| --- | --- | --- | --- |
+| 1 | `Inverter(IsPathValid) → ComputePathToPose` | **/plan 0 次、位移 0** | 空路径时 IsPathValid 返回 SUCCESS，被反转成 FAILURE → 永不规划 |
+| 2 | `Fallback(IsPathValid, ComputePathToPose)` | **/plan 0 次、位移 0** | 空路径被判"有效"，Fallback 走第一条分支 → 永不规划 |
+| 3 | **`RateController hz="0.2"` + 原结构** | **/plan 7 次、位移 0.33 m、地图 +2723** ✅ | 采用 |
+
+**核心教训**：Hamble 的 `nav2_is_path_valid_condition_bt_node` 对**空路径**不可靠
+（返回"有效"），不能用来做"是否需要规划"的判据。
+
+对照实验（同一份 launch、只切 BT）：
+- 原导航 BT（0.5 Hz）：/plan 12 次、位移 2.04 m
+- 建图 BT（0.2 Hz）：/plan 7 次、位移 0.33 m、地图 +2723
+
+两者都能跑，建图版重规划更慢 → 改道机会更少。
