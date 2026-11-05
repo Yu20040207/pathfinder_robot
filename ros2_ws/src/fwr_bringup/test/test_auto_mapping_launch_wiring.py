@@ -213,3 +213,10 @@ def test_multi_point_route_uses_sequential_when_goal_is_near_start():
     assert '2.5' in src
     # 路线点必须打印出来，便于事后核对"到底去了哪些点"
     assert '多点路线 %d 个点' in src
+
+
+def test_route_drops_waypoints_the_robot_is_already_standing_on():
+    """路线首点落在车身上时必须剔除，否则 through-poses 会在原点打转。"""
+    src = (ROOT / 'fwr_bringup' / 'frontier_explorer.py').read_text()
+    assert 'route_skip_near_m' in src
+    assert '剔除' in src and '已经站在上面' in src or '剔除' in src

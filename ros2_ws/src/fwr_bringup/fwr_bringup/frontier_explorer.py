@@ -37,6 +37,8 @@ class FrontierExplorer(Node):
         # 终点离起点太近时不能用 through-poses：Nav2 的 goal checker 只认最后一个点，
         # 车路过终点附近就会判"已到达"，中间点根本没去（2026-11-05 实测 1.29 m 中招）。
         self.declare_parameter('fixed_route_tail_gap_m', 2.5)
+        # 车已经站在这个距离以内的路线点直接跳过（零长度首段会让车原地打转）
+        self.declare_parameter('route_skip_near_m', 0.6)
         # 2026-11-04（用户："掉头撞到门框后停了很久"）：碰撞监控触发 stop 后，
         # stop_pub_timeout=18s 会让它**继续发零**很久（实测一段连续 15.3 秒，
         # 期间扫描里停车框早就是空的）。这里自己判"监控持续压零"，
@@ -439,6 +441,18 @@ class FrontierExplorer(Node):
         # 如果最后一个点就在车身上（闭环路线很常见），它 20 ms 内就判"已到达"，
         # 整条路线被跳过。这种情况下改成逐段执行（每段都是真实目标），
         # 保证顺序走完；终点离得远时仍用 through-poses（途经点不停车）。
+        # 2026-11-05：路线第一个点常常就是车当前所在位置（操作者按"起点=这里"点的），
+        # NavigateThroughPoses 要求"穿过"一个零长度首段 → 控制器围着该点转圈
+        # （现场表现："到起点后一直徘徊"）。这里把车已经站在上面的点剔掉。
+        skip_r = float(self.get_parameter('route_skip_near_m').value)
+        kept = [p_ for p_ in pts if math.hypot(p_[0] - rx, p_[1] - ry) > skip_r]
+        if len(kept) >= 2 and len(kept) != len(pts):
+            self.get_logger().warn(
+                '剔除 %d 个"车已站在上面"的路线点（<%.1f m）：%s' % (
+                    len(pts) - len(kept), skip_r,
+                    ' '.join('(%.2f,%.2f)' % (x, y) for x, y, _ in pts
+                             if math.hypot(x - rx, y - ry) <= skip_r)))
+            pts = kept
         tail_gap = math.hypot(pts[-1][0] - rx, pts[-1][1] - ry)
         tail_limit = float(self.get_parameter('fixed_route_tail_gap_m').value)
         self.get_logger().info(
