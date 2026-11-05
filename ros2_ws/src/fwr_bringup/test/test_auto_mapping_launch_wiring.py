@@ -299,3 +299,12 @@ def test_resume_service_keeps_route_progress():
     assert '_mission_suspended = True' in stop_body
     core = (ROOT / 'fwr_bringup' / 'exploration_core.py').read_text()
     assert 'def resume_fixed' in core, '恢复必须保留段索引'
+
+
+def test_panel_auto_previews_after_selecting_points():
+    """选点后必须自动预览，否则"开始导航"一直是灰的（现场："选了目标却不走"）。"""
+    panel = (ROOT.parent / 'fwr_rviz_nav' / 'src' / 'two_point_nav_panel.cpp').read_text()
+    seg = panel[panel.index('"/clicked_point"'):]
+    seg = seg[:seg.index('void ', 10)]
+    assert 'request_preview()' in seg, '选点后应自动触发预览'
+    assert 'preview_ready_ = false' in seg

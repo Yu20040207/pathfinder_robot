@@ -180,6 +180,10 @@ protected:
         preview_ready_ = false;
         start_button_->setEnabled(false);
         preview_button_->setEnabled(points_.has_goal());
+        // 2026-11-05：选点后**自动预览**。原来选完点"开始导航"一直是灰的，
+        // 必须先点【重新预览】才能开始，现场看起来像"选了目标却不走"。
+        // 每次点击都会带新的 selection_revision，旧预览结果会被丢弃，所以直接调是安全的。
+        if (points_.has_goal()) {request_preview();}
         publish_empty_path();
         publish_markers();
         refresh_labels();
