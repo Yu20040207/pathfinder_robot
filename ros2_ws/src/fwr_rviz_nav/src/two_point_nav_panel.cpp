@@ -92,10 +92,10 @@ protected:
     //   · 导航模式只显示导航按钮；建图模式只显示建图按钮
     //   · 两种模式都显示「清空状态/复位故障」
     //   · 新增「播种定位」：把选中的点作为 AMCL 初始位姿（朝向取当前车头）
-    seed_button_ = new QPushButton("播种定位（用选中点）", this);
+    seed_button_ = new QPushButton("重新定位（一键播种）", this);
     seed_button_->setToolTip(
-      "先在图上点一个点（车实际所在位置），再按此按钮：\n"
-      "用该位置 + 当前车头朝向播种 AMCL 定位。");
+      "把车搬到别处后按这个：系统会用激光和地图重新匹配位置并播种 AMCL，\n"
+      "不需要再点 2D Pose Estimate。约需几秒。");
     start_button_->setEnabled(false);
     preview_button_->setEnabled(false);
     for (auto * widget : {start_label_, goal_label_, status_label_}) {
@@ -145,8 +145,6 @@ protected:
     connect(mode_box_, QOverload<int>::of(&QComboBox::currentIndexChanged),
       this, [this](int) {apply_mode();});
 
-    initialpose_pub_ = node_->create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>(
-      "/initialpose", 10);
     auto qos = rclcpp::QoS(1).transient_local();
     path_pub_ = node_->create_publisher<nav_msgs::msg::Path>("/two_point_preview_path", qos);
     marker_pub_ = node_->create_publisher<visualization_msgs::msg::MarkerArray>("/two_point_markers", qos);
@@ -574,51 +572,30 @@ private:
     if (goal_label_ != nullptr) {goal_label_->setVisible(!mapping);}
   }
 
-  /// 播种定位：把"选中的点"当位置、当前车头当朝向，播种 AMCL。
+  /// 一键重新定位：调 auto_initial_pose 的 /localization/reseed 服务，
+  /// 由它用激光与地图重新匹配并把结果播种给 AMCL（车被搬动后使用）。
   void seed_localization()
   {
-    geometry_msgs::msg::PoseWithCovarianceStamped msg;
-    msg.header.frame_id = "map";
-    msg.header.stamp = node_->now();
-    double x = 0.0, y = 0.0, yaw = 0.0;
-    bool have_pose = false;
-    if (tf_buffer_ != nullptr) {
-      try {
-        const auto tf = tf_buffer_->lookupTransform(
-            "map", "base_footprint", tf2::TimePointZero, tf2::durationFromSec(0.3));
-        x = tf.transform.translation.x;
-        y = tf.transform.translation.y;
-        const auto & q = tf.transform.rotation;
-        yaw = std::atan2(2.0 * (q.w * q.z + q.x * q.y),
-            1.0 - 2.0 * (q.y * q.y + q.z * q.z));
-        have_pose = true;
-      } catch (const std::exception &) {
-        have_pose = false;
-      }
+    if (!reseed_client_) {
+      reseed_client_ = node_->create_client<std_srvs::srv::Trigger>("/localization/reseed");
     }
-    if (points_.goal()) {
-      x = points_.goal()->x;
-      y = points_.goal()->y;
-      if (!have_pose) {yaw = 0.0;}
-    } else if (!have_pose) {
+    if (!reseed_client_->service_is_ready()) {
       if (status_label_ != nullptr) {
-        status_label_->setText("播种定位：请先在地图上点一个点");
+        status_label_->setText("重新定位：服务未就绪（auto_initial_pose 没在跑）");
       }
       return;
     }
-    msg.pose.pose.position.x = x;
-    msg.pose.pose.position.y = y;
-    msg.pose.pose.orientation.z = std::sin(yaw / 2.0);
-    msg.pose.pose.orientation.w = std::cos(yaw / 2.0);
-    msg.pose.covariance[0] = 0.0625;      // 0.25 m
-    msg.pose.covariance[7] = 0.0625;
-    msg.pose.covariance[35] = 0.0685;     // 约 15°
-    if (initialpose_pub_) {initialpose_pub_->publish(msg);}
-    if (status_label_ != nullptr) {
-      status_label_->setText(QString("已播种定位：(%1, %2) 朝向 %3°")
-        .arg(x, 0, 'f', 2).arg(y, 0, 'f', 2)
-        .arg(yaw * 180.0 / 3.141592653589793, 0, 'f', 0));
-    }
+    if (status_label_ != nullptr) {status_label_->setText("重新定位：正在匹配地图（几秒）…");}
+    auto request = std::make_shared<std_srvs::srv::Trigger::Request>();
+    reseed_client_->async_send_request(request,
+      [this](rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture future) {
+        const auto response = future.get();
+        if (status_label_ != nullptr) {
+          status_label_->setText(response->success ?
+            "重新定位：已开始，等 RViz 里车的位置稳定" :
+            QString("重新定位失败：%1").arg(QString::fromStdString(response->message)));
+        }
+      });
   }
 
   void refresh_labels()
@@ -1156,7 +1133,7 @@ private:
   QWidget * nav_group_ = nullptr;
   QWidget * map_group_ = nullptr;
   QPushButton * seed_button_ = nullptr;
-  rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr initialpose_pub_;
+  rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr reseed_client_;
   QComboBox * speed_box_ = nullptr;
   QPushButton * recover_button_ = nullptr;
   int base_fault_ = 0;

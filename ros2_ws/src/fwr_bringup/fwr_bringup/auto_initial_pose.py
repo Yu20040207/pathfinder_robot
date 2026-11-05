@@ -48,6 +48,8 @@ class AutoInitialPose(Node):
         self._scan = None
         self._client = self.create_client(SetInitialPose, '/set_initial_pose')
         self._future = None
+        from std_srvs.srv import Trigger
+        self.create_service(Trigger, '/localization/reseed', self._on_reseed)
         self.create_subscription(PoseWithCovarianceStamped,
                                  str(self.get_parameter('initialpose_topic').value),
                                  self._on_initialpose, 10)
@@ -126,6 +128,22 @@ class AutoInitialPose(Node):
                 if m.data[yy * W + xx] != 0:       # 0=空闲；障碍/未知都不接受
                     return False, 'not-free-or-unknown'
         return True, 'ok'
+
+    def _on_reseed(self, request, response):
+        """手动触发一次重新定位（车被搬动后按面板按钮调这个）。
+
+        流程与启动时一致：先用上次位姿做局部细化，不匹配再全局搜索；
+        匹配通过检查（贴墙率、空闲区）后播种 AMCL。
+        """
+        self._seeded = False
+        self._gave_up = False
+        self._manual_pose_seen = False
+        self._future = None
+        self._tf_ok_at = time.monotonic()
+        self.get_logger().warn('收到"重新定位"请求 → 开始重新匹配（几秒）')
+        response.success = True
+        response.message = 'reseeding started'
+        return response
 
     def _on_map(self, msg):
         self._map = msg

@@ -178,3 +178,13 @@ def test_auto_initial_pose_yields_to_manual_pose():
     assert '_manual_pose_seen' in src
     # 播种成功时要重置看门狗时间戳，避免刚播完就误判"丢失定位"
     assert '_tf_ok_at = time.monotonic()   # 防止看门狗立刻误判' in src
+
+
+def test_reseed_service_can_be_triggered_from_the_panel():
+    """面板的「重新定位」按钮 → /localization/reseed → auto_initial_pose 重新匹配并播种。"""
+    seed = (ROOT / 'fwr_bringup' / 'auto_initial_pose.py').read_text()
+    assert '/localization/reseed' in seed, '必须提供一键重新定位服务'
+    assert '_on_reseed' in seed
+    panel = (ROOT.parent / 'fwr_rviz_nav' / 'src' / 'two_point_nav_panel.cpp').read_text()
+    assert '/localization/reseed' in panel, '面板按钮必须调用该服务'
+    assert '重新定位' in panel
