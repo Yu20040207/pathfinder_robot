@@ -67,3 +67,33 @@ def test_find_best_pose_is_fast_enough_to_run_live():
     assert dt < 5.0, f'全局搜索太慢：{dt:.1f} s（原来要几小时）'
     assert score < 0.25, f'搜索质量太差：{score:.3f}'
     assert math.hypot(x - truth[0], y - truth[1]) < 0.6, (x, y, truth)
+
+
+def test_map_edit_fix_preserves_unknown_and_applies_edits():
+    """Map Edit 面板保存会丢未知区；修正脚本必须只应用真实编辑。"""
+    import sys
+    import numpy as np
+
+    from pathlib import Path
+    here = Path(__file__).resolve()
+    repo_root = here.parents[4]              # .../Four-wheel-robot
+    sys.path.insert(0, str(repo_root / 'tools'))
+    try:
+        from fix_map_unknown import apply_edits
+    except ImportError:
+        import pytest
+        pytest.skip('tools 目录不可导入')
+
+    base = np.full((6, 6), 205, dtype=np.uint8)   # 全未知
+    base[2:4, 2:4] = 254                          # 一小块自由
+    base[2, 3] = 0                                # 一堵墙
+    # 面板保存的版本：未知全部变 254，墙上画了新墙，原墙被擦掉
+    edited = np.full((6, 6), 254, dtype=np.uint8)
+    edited[2, 3] = 254                            # 擦掉原墙
+    edited[4, 4] = 0                              # 新画一堵墙
+    out, drew, erased = apply_edits(base, edited)
+    assert out[2, 3] == 254, '被擦的墙要变白'
+    assert out[4, 4] == 0, '新画的墙要变黑'
+    assert (out == 205).sum() == base.shape[0] * base.shape[1] - 5 - 1 + 1, (
+        '除编辑点外未知区必须原样保留')
+    assert drew == 1 and erased == 1
