@@ -21,7 +21,11 @@ def score_pose(distance, resolution, origin_x, origin_y, points, x, y, yaw):
     xf = cos_yaw * points[:, 0] - sin_yaw * points[:, 1] + x
     yf = sin_yaw * points[:, 0] + cos_yaw * points[:, 1] + y
     ix = ((xf - origin_x) / resolution).astype(int)
-    iy = (height - 1 - (yf - origin_y) / resolution).astype(int)
+    # ⚠️ 2026-11-05 修：OccupancyGrid 的第 0 行就是 origin_y（**不需要翻转**）。
+    # 这里原先是 `height - 1 - (...)`（按图片行序处理）→ 地图被上下镜像 →
+    # 自动播种把车放到"镜像位置"（实测每次启动落在相距 7~13 m 的不同点，
+    # 而正确约定下的最佳匹配与用户手动摆的位置只差 5 cm）。
+    iy = ((yf - origin_y) / resolution).astype(int)
     inside = (ix >= 0) & (ix < width) & (iy >= 0) & (iy < height)
     if inside.sum() < len(points) * 0.5:
         return 9.9

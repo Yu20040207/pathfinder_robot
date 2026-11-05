@@ -30,6 +30,9 @@ class AutoInitialPose(Node):
         # 2026-10-31：0.05 太严（实测 0.094 只差一点就失败，导致每次都要人工点
         # 2D Pose Estimate、Nav2 一直不激活）。放宽到 0.10，播错了 AMCL 也会自己收。
         self.declare_parameter('max_score_m', 0.15)
+        # 用户建议：播种前检查激光与地图墙面是否重合
+        self.declare_parameter('min_wall_overlap', 0.6)   # ≥60% 扫描点应贴在墙上
+        self.declare_parameter('max_unknown_frac', 0.2)   # 落在未知区的点应 <20%
         self.declare_parameter('prior_score_m', 0.12)
         self.declare_parameter('checkpoint_file',
                                os.path.expanduser('~/.config/fwr/last_pose.yaml'))
@@ -66,6 +69,38 @@ class AutoInitialPose(Node):
         if not self._seeded:
             self.get_logger().info(
                 '用户已手动设置位姿 → 自动播种放弃（不再覆盖）')
+
+    def _scan_overlap(self, x, y, yaw) -> tuple[float, float]:
+        """扫描点落在墙上的比例，以及"落在未知/图外"的比例。
+
+        用户 2026-11-05 的建议：播种前要检查**激光雷达和地图墙面是否重合**。
+        只用"平均距离"会被退化区域骗（整片墙 → 距离 0 → 看似完美）。
+        """
+        m = self._map
+        if m is None or self._scan is None:
+            return 0.0, 1.0
+        info = m.info
+        W, H, r = info.width, info.height, info.resolution
+        ox, oy = info.origin.position.x, info.origin.position.y
+        grid = np.asarray(m.data, dtype=np.int16).reshape(H, W)
+        occ = grid >= 65
+        from scipy.ndimage import distance_transform_edt
+        dist = distance_transform_edt(~occ) * r
+        pts = self._points()
+        if len(pts) < 50:
+            return 0.0, 1.0
+        c, sn = math.cos(yaw), math.sin(yaw)
+        xf = c * pts[:, 0] - sn * pts[:, 1] + x
+        yf = sn * pts[:, 0] + c * pts[:, 1] + y
+        ix = ((xf - ox) / r).astype(int)
+        iy = ((yf - oy) / r).astype(int)   # OccupancyGrid 行 0 = origin_y，不翻转
+        inside = (ix >= 0) & (ix < W) & (iy >= 0) & (iy < H)
+        if inside.sum() < len(pts) * 0.5:
+            return 0.0, 1.0
+        d = dist[iy[inside], ix[inside]]
+        on_wall = float((d <= 0.10).mean())          # 10 cm 内算"贴在墙上"
+        unknown = float((grid[iy[inside], ix[inside]] < 0).mean())
+        return on_wall, unknown
 
     def _pose_is_sane(self, x, y) -> tuple[bool, str]:
         """拒绝退化匹配：匹配位置必须在地图的**空闲区**且离障碍有净空。
@@ -157,18 +192,30 @@ class AutoInitialPose(Node):
                 f'(best guess {base_x:.2f},{base_y:.2f},{math.degrees(base_yaw):.0f} deg)')
             self._seeded = True
             return
+        # ⚠️ 必须用**雷达位姿**（x,y,yaw）而不是车体位姿：_points() 给的是
+        # 雷达坐标系的点，用 base 位姿会多算 0.21 m 偏移 + 180°，贴墙率会掉到 1%
+        on_wall, unknown_frac = self._scan_overlap(x, y, yaw)
+        min_on_wall = float(self.get_parameter('min_wall_overlap').value)
+        max_unknown = float(self.get_parameter('max_unknown_frac').value)
         sane, why = self._pose_is_sane(base_x, base_y)
+        if sane and on_wall < min_on_wall:
+            sane, why = False, 'scan-on-wall %.0f%% < %.0f%%' % (
+                100 * on_wall, 100 * min_on_wall)
+        if sane and unknown_frac > max_unknown:
+            sane, why = False, 'scan-in-unknown %.0f%%' % (100 * unknown_frac)
         if not sane:
             # 2026-11-05：补边的墙带里会得到 "match 0.000 m" 的退化匹配，
             # 把车定位到墙角。宁可不动，也不能播一个错的位姿。
             self.get_logger().error(
-                f'auto initial pose: match {score:.3f} m 落在非空闲区（{why}），'
+                f'auto initial pose: 匹配 {score:.3f} m 未通过检查（{why}；'
+                f'贴墙 {100*on_wall:.0f}%，未知 {100*unknown_frac:.0f}%），'
                 f'拒绝播种；请用 RViz 的 2D Pose Estimate 手动定位')
             self._seeded = True
             return
         self.get_logger().info(
             f'auto initial pose: match {score:.3f} m -> base '
-            f'({base_x:.2f},{base_y:.2f},{math.degrees(base_yaw):.0f} deg)')
+            f'({base_x:.2f},{base_y:.2f},{math.degrees(base_yaw):.0f} deg) '
+            f'[贴墙 {100*on_wall:.0f}%，未知 {100*unknown_frac:.0f}%]')
         self._send(base_x, base_y, base_yaw)
 
     def _checkpoint_laser_pose(self):

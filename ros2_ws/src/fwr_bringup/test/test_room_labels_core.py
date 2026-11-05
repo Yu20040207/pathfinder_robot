@@ -55,7 +55,9 @@ def test_refine_pose_recovers_a_shifted_prior():
         for r in np.arange(0.05, 2.5, 0.02):
             x = truth[0] + r * math.cos(truth[2] + ang)
             y = truth[1] + r * math.sin(truth[2] + ang)
-            ix = int((x - ox) / res); iy = 39 - int((y - oy) / res)
+            # 2026-11-05：OccupancyGrid 行 0 = origin_y，索引**不翻转**
+            # （原测试这里写成 39 - ...，与 auto_seed_core 的同一个 bug 对应）
+            ix = int((x - ox) / res); iy = int((y - oy) / res)
             if not (0 <= ix < 40 and 0 <= iy < 40) or occ[iy, ix]:
                 pts.append((r * math.cos(ang), r * math.sin(ang)))
                 break
