@@ -1,12 +1,20 @@
 <root main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree">
-    <!-- 2026-11-03 多点导航：与 real_navigate_to_pose.xml 结构完全一致，
-         只把 ComputePathToPose 换成 ComputePathThroughPoses。
-         多点路线一次规划穿过所有点，途经点只减速不停车，只有最后一个点才结束。 -->
+    <!-- 2026-11-03 多点导航：与 real_navigate_to_pose.xml 结构一致，
+         把 ComputePathToPose 换成 ComputePathThroughPoses。
+
+         2026-11-05 修复（现场："到第一个点后走一下又回来"）：
+         原来缺少 RemovePassedGoals —— 车经过某个途经点后，每次重规划仍然要求
+         "穿过"那个已经过去的点，规划器于是把车往回带，来回振荡。
+         官方标准 BT 里这一步是必须的，加上后已通过的点会从目标里剔除。 -->
     <RecoveryNode number_of_retries="6" name="NavigateRecovery">
       <PipelineSequence name="NavigateWithReplanning">
         <RateController hz="0.5">
-          <ComputePathThroughPoses goals="{goals}" path="{path}" planner_id="GridBased"/>
+          <Sequence name="PrunePassedGoals">
+            <RemovePassedGoals input_goals="{goals}" output_goals="{goals}"
+                               radius="0.7"/>
+            <ComputePathThroughPoses goals="{goals}" path="{path}" planner_id="GridBased"/>
+          </Sequence>
         </RateController>
         <FollowPath path="{path}" controller_id="FollowPath"/>
       </PipelineSequence>

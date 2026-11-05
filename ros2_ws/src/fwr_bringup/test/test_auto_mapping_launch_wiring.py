@@ -220,3 +220,22 @@ def test_route_drops_waypoints_the_robot_is_already_standing_on():
     src = (ROOT / 'fwr_bringup' / 'frontier_explorer.py').read_text()
     assert 'route_skip_near_m' in src
     assert '剔除' in src and '已经站在上面' in src or '剔除' in src
+
+
+def test_through_poses_bt_removes_passed_goals():
+    """多点行为树必须包含 RemovePassedGoals。
+
+    2026-11-05 现场：车经过第一个途经点后"走一下又回来"—— 因为每次重规划仍然要求
+    穿过那个已过去的点，规划器把车往回带。官方的 through-poses BT 里这一节点是必带的。
+    """
+    import xml.etree.ElementTree as ET
+    tree = ET.parse(ROOT / 'behavior_trees' / 'real_navigate_through_poses.xml')
+    tags = [e.tag for e in tree.getroot().iter()]
+    assert 'RemovePassedGoals' in tags, '缺少 RemovePassedGoals → 会绕回已通过的点'
+    # 顺序必须"先剔除已通过的点，再规划"（用 XML 元素顺序，注释不算）
+    seq = next(e for e in tree.getroot().iter() if e.tag == 'Sequence'
+               and any(c.tag == 'RemovePassedGoals' for c in e))
+    order = [c.tag for c in seq]
+    assert order[0] == 'RemovePassedGoals' and order[1] == 'ComputePathThroughPoses', order
+    node = next(e for e in tree.getroot().iter() if e.tag == 'RemovePassedGoals')
+    assert node.get('radius') == '0.7'
