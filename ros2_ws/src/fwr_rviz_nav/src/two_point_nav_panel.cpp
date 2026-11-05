@@ -8,11 +8,15 @@
 
 #include <QComboBox>
 #include <QLabel>
+#include <QWidget>
 #include <QPushButton>
 #include <QTimer>
 #include <QVBoxLayout>
 
 #include <geometry_msgs/msg/point_stamped.hpp>
+#include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
+#include <tf2_ros/buffer.h>
+#include <tf2_ros/transform_listener.h>
 #include <geometry_msgs/msg/twist.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <nav2_msgs/action/compute_path_through_poses.hpp>
@@ -84,6 +88,14 @@ protected:
     map_start_button_ = new QPushButton("开始建图(自动行走)", this);
     map_stop_button_ = new QPushButton("■ 停止建图(急停)", this);
     save_map_button_ = new QPushButton("保存地图(SLAM)", this);
+    // 2026-11-05（用户要求）：
+    //   · 导航模式只显示导航按钮；建图模式只显示建图按钮
+    //   · 两种模式都显示「清空状态/复位故障」
+    //   · 新增「播种定位」：把选中的点作为 AMCL 初始位姿（朝向取当前车头）
+    seed_button_ = new QPushButton("播种定位（用选中点）", this);
+    seed_button_->setToolTip(
+      "先在图上点一个点（车实际所在位置），再按此按钮：\n"
+      "用该位置 + 当前车头朝向播种 AMCL 定位。");
     start_button_->setEnabled(false);
     preview_button_->setEnabled(false);
     for (auto * widget : {start_label_, goal_label_, status_label_}) {
@@ -93,18 +105,48 @@ protected:
     speed_box_ = new QComboBox(this);
     speed_box_->addItems({"速度 ×0.5", "速度 ×0.75", "速度 ×1.0"});
     speed_box_->setCurrentIndex(2);
-    layout->addWidget(speed_box_);
-    layout->addWidget(preview_button_);
-    layout->addWidget(start_button_);
-    if (guarded_) {layout->addWidget(stop_button_);}
-    if (guarded_) {layout->addWidget(resume_button_);}
-    if (guarded_) {layout->addWidget(recover_button_);}
-    layout->addWidget(reset_button_);
-    layout->addWidget(map_start_button_);
-    layout->addWidget(map_stop_button_);
-    layout->addWidget(save_map_button_);
+    // 模式选择：导航 / 建图（启动时自动判断）
+    mode_box_ = new QComboBox(this);
+    mode_box_->addItems({"导航模式", "建图模式"});
+    layout->addWidget(mode_box_);
+
+    nav_group_ = new QWidget(this);
+    auto * nav_layout = new QVBoxLayout(nav_group_);
+    nav_layout->setContentsMargins(0, 0, 0, 0);
+    nav_layout->addWidget(speed_box_);
+    nav_layout->addWidget(preview_button_);
+    nav_layout->addWidget(start_button_);
+    if (guarded_) {nav_layout->addWidget(stop_button_);}
+    if (guarded_) {nav_layout->addWidget(resume_button_);}
+    nav_layout->addWidget(seed_button_);
+    nav_layout->addWidget(reset_button_);
+    layout->addWidget(nav_group_);
+
+    map_group_ = new QWidget(this);
+    auto * map_layout = new QVBoxLayout(map_group_);
+    map_layout->setContentsMargins(0, 0, 0, 0);
+    map_layout->addWidget(map_start_button_);
+    map_layout->addWidget(map_stop_button_);
+    map_layout->addWidget(save_map_button_);
+    layout->addWidget(map_group_);
+
+    if (guarded_) {layout->addWidget(recover_button_);}   // 两种模式都要
     layout->addStretch();
 
+    // 启动时自动判断：有 slam_toolbox 说明在建图
+    {
+      bool mapping = false;
+      for (const auto & name : node_->get_node_names()) {
+        if (name.find("slam_toolbox") != std::string::npos) {mapping = true; break;}
+      }
+      mode_box_->setCurrentIndex(mapping ? 1 : 0);
+    }
+    apply_mode();
+    connect(mode_box_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+      this, [this](int) {apply_mode();});
+
+    initialpose_pub_ = node_->create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>(
+      "/initialpose", 10);
     auto qos = rclcpp::QoS(1).transient_local();
     path_pub_ = node_->create_publisher<nav_msgs::msg::Path>("/two_point_preview_path", qos);
     marker_pub_ = node_->create_publisher<visualization_msgs::msg::MarkerArray>("/two_point_markers", qos);
@@ -215,6 +257,7 @@ protected:
     }
 
     connect(preview_button_, &QPushButton::clicked, this, [this]() {request_preview();});
+    connect(seed_button_, &QPushButton::clicked, this, [this]() {seed_localization();});
     connect(start_button_, &QPushButton::clicked, this, [this]() {start_navigation();});
     connect(resume_button_, &QPushButton::clicked, this, [this]() {resume_navigation();});
     connect(map_stop_button_, &QPushButton::clicked, this, [this]() {
@@ -521,6 +564,62 @@ private:
   }
 
   void selected_revision_guard() {}
+
+  void apply_mode()
+  {
+    const bool mapping = (mode_box_ != nullptr && mode_box_->currentIndex() == 1);
+    if (nav_group_ != nullptr) {nav_group_->setVisible(!mapping);}
+    if (map_group_ != nullptr) {map_group_->setVisible(mapping);}
+    if (start_label_ != nullptr) {start_label_->setVisible(!mapping);}
+    if (goal_label_ != nullptr) {goal_label_->setVisible(!mapping);}
+  }
+
+  /// 播种定位：把"选中的点"当位置、当前车头当朝向，播种 AMCL。
+  void seed_localization()
+  {
+    geometry_msgs::msg::PoseWithCovarianceStamped msg;
+    msg.header.frame_id = "map";
+    msg.header.stamp = node_->now();
+    double x = 0.0, y = 0.0, yaw = 0.0;
+    bool have_pose = false;
+    if (tf_buffer_ != nullptr) {
+      try {
+        const auto tf = tf_buffer_->lookupTransform(
+            "map", "base_footprint", tf2::TimePointZero, tf2::durationFromSec(0.3));
+        x = tf.transform.translation.x;
+        y = tf.transform.translation.y;
+        const auto & q = tf.transform.rotation;
+        yaw = std::atan2(2.0 * (q.w * q.z + q.x * q.y),
+            1.0 - 2.0 * (q.y * q.y + q.z * q.z));
+        have_pose = true;
+      } catch (const std::exception &) {
+        have_pose = false;
+      }
+    }
+    if (points_.goal()) {
+      x = points_.goal()->x;
+      y = points_.goal()->y;
+      if (!have_pose) {yaw = 0.0;}
+    } else if (!have_pose) {
+      if (status_label_ != nullptr) {
+        status_label_->setText("播种定位：请先在地图上点一个点");
+      }
+      return;
+    }
+    msg.pose.pose.position.x = x;
+    msg.pose.pose.position.y = y;
+    msg.pose.pose.orientation.z = std::sin(yaw / 2.0);
+    msg.pose.pose.orientation.w = std::cos(yaw / 2.0);
+    msg.pose.covariance[0] = 0.0625;      // 0.25 m
+    msg.pose.covariance[7] = 0.0625;
+    msg.pose.covariance[35] = 0.0685;     // 约 15°
+    if (initialpose_pub_) {initialpose_pub_->publish(msg);}
+    if (status_label_ != nullptr) {
+      status_label_->setText(QString("已播种定位：(%1, %2) 朝向 %3°")
+        .arg(x, 0, 'f', 2).arg(y, 0, 'f', 2)
+        .arg(yaw * 180.0 / 3.141592653589793, 0, 'f', 0));
+    }
+  }
 
   void refresh_labels()
   {
@@ -1053,6 +1152,11 @@ private:
     through_plan_client_;
   rclcpp::Client<RealSingleGoal>::SharedPtr real_single_goal_client_;
   rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr arm_client_;
+  QComboBox * mode_box_ = nullptr;
+  QWidget * nav_group_ = nullptr;
+  QWidget * map_group_ = nullptr;
+  QPushButton * seed_button_ = nullptr;
+  rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr initialpose_pub_;
   QComboBox * speed_box_ = nullptr;
   QPushButton * recover_button_ = nullptr;
   int base_fault_ = 0;
