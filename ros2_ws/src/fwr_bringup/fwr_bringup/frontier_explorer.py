@@ -104,6 +104,7 @@ class FrontierExplorer(Node):
         self._reverse_active = False
         self._paused_for_reverse = False
         self._reverse_episodes = 0
+        self._mission_suspended = False
         self._cancel_after_accept = False
         self._cancel_future = None
         self._status = 'idle'
@@ -139,6 +140,7 @@ class FrontierExplorer(Node):
         self.create_service(StartMultiPointGoal, '/explore/start_multi_point_goal',
                             self._start_multi_point_goal)
         self.create_service(Trigger, '/explore/stop', self._stop)
+        self.create_service(Trigger, '/explore/resume', self._resume)
         self.create_timer(.1, self._tick)
 
     def _stamp_fresh(self, msg, max_age):
@@ -565,10 +567,50 @@ class FrontierExplorer(Node):
         response.reason = f'ok: {len(pts)} points'
         return response
 
+    def _resume(self, _, response):
+        """继续被"停止导航"打断的任务：从**本该走的下一段**接着走。
+
+        与面板重发不同：进度由本节点记录（_fixed_goals + fixed_leg_index /
+        _multi_points），所以不会退回去重走刚完成的点。
+        """
+        if self._sm.enabled:
+            response.success = False
+            response.message = '任务还在进行中，无需继续'
+            return response
+        if not self._fixed_goals and not self._multi_points:
+            response.success = False
+            response.message = '没有可继续的路线（请重新选点）'
+            return response
+        if self._fault:
+            response.success = False
+            response.message = '底盘有故障，先恢复再继续'
+            return response
+        if not self._sm.resume_fixed():
+            response.success = False
+            response.message = '状态机无法恢复'
+            return response
+        self._mission_suspended = False
+        self._retry_pending = False
+        self._status = 'idle'
+        self._trial_started = time.monotonic()
+        if self._fixed_goals:
+            idx = min(self._sm.fixed_leg_index, len(self._fixed_goals) - 1)
+            response.message = '继续第 %d/%d 段 (%.2f, %.2f)' % (
+                idx + 1, len(self._fixed_goals),
+                self._fixed_goals[idx][0], self._fixed_goals[idx][1])
+        else:
+            response.message = '继续多点路线（剩余 %d 点）' % len(self._multi_points)
+        self.get_logger().warn('继续任务: %s' % response.message)
+        response.success = True
+        return response
+
     def _stop(self, _, response):
         if self._sm.enabled:
             self._trip('收到停止请求（面板"停止导航"）')
-        self._multi_points = None
+        # 2026-11-05：**保留** _multi_points / _fixed_goals 与当前段索引，
+        # 这样"继续"能接着走本该走的那一段；原来清空后只能按"最近点"重算，
+        # 刚走完的点会被再走一遍（现场问题）。
+        self._mission_suspended = True
         self._sm.stop()
         self._end_recovery(False)
         response.success = True

@@ -53,6 +53,15 @@ class ExplorationStateMachine:
         self.enabled = True
         self._stopping = False
 
+    def resume_fixed(self) -> bool:
+        """从"停止"状态恢复，**保留当前段索引**（继续的是本该走的那一段）。"""
+        if not self.fixed_goal:
+            return False
+        self.enabled = True
+        self._stopping = False
+        self._canceling = False
+        return True
+
     def skip_leg(self) -> bool:
         """跳过当前段（死胡同等）：把派发计数推进到下一段。返回是否还有下一段。
 

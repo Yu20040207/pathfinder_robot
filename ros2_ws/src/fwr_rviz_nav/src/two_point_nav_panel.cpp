@@ -209,6 +209,8 @@ protected:
         "/explore/start_fixed_goal");
       arm_client_ = node_->create_client<std_srvs::srv::Trigger>("/base/arm_auto");
       stop_client_ = node_->create_client<std_srvs::srv::Trigger>("/explore/stop");
+      // 2026-11-05：继续任务优先用节点的进度（本该走的下一段），而不是按最近点重算。
+      resume_client_ = node_->create_client<std_srvs::srv::Trigger>("/explore/resume");
       clear_fault_client_ = node_->create_client<std_srvs::srv::Trigger>("/base/clear_fault");
       speed_client_ = node_->create_client<rcl_interfaces::srv::SetParameters>(
         "/auto_command_gate/set_parameters");
@@ -963,9 +965,33 @@ private:
     });
   }
 
-  void send_real_navigation_request(unsigned long revision)
+  void send_real_navigation_request(unsigned long revision, bool allow_resume_service = true)
   {
     if (revision != selection_revision_) {return;}
+    if (allow_resume_service && resume_mode_ && resume_client_ &&
+      resume_client_->service_is_ready())
+    {
+      auto request = std::make_shared<std_srvs::srv::Trigger::Request>();
+      resume_client_->async_send_request(request, [this, revision](
+        rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture future) {
+        if (revision != selection_revision_) {return;}
+        try {
+          const auto response = future.get();
+          if (response->success) {
+            real_task_active_ = true;
+            status_label_->setText(QString("已继续：%1")
+              .arg(QString::fromStdString(response->message)));
+            return;
+          }
+          status_label_->setText(QString("继续失败：%1，正在按路线重发…")
+            .arg(QString::fromStdString(response->message)));
+          send_real_navigation_request(revision, false);   // 回退：按路线重发
+        } catch (const std::exception & error) {
+          fail_real_start(QString("继续服务失败：%1").arg(error.what()), revision);
+        }
+      });
+      return;
+    }
     if (resume_mode_ && resume_multi_ && points_.size() >= 3) {
       if (!multi_nav_client_ || !multi_nav_client_->service_is_ready()) {
         fail_real_start("实车多点导航服务尚未就绪，已关闭运动门", revision);
@@ -1208,6 +1234,7 @@ private:
   rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr clear_fault_client_;
   rclcpp::Client<rcl_interfaces::srv::SetParameters>::SharedPtr speed_client_;
   rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr stop_client_;
+  rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr resume_client_;
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr manual_vel_pub_;
   std::shared_ptr<rclcpp::AsyncParametersClient> base_param_client_;
   rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr mapping_save_client_;

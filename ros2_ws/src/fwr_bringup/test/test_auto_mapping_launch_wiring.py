@@ -280,3 +280,22 @@ def test_global_costmap_keeps_obstacle_layer_for_dynamic_detours():
     assert 'static_layer' in glob['plugins'] and 'inflation_layer' in glob['plugins']
     src = (ROOT / 'fwr_bringup' / 'frontier_explorer.py').read_text()
     assert 'costmap_clear_period_s' in src, '需要周期性清空来抑制陈旧标记'
+
+
+def test_resume_service_keeps_route_progress():
+    """继续任务必须按节点记住的进度走"本该走的下一段"，不能按最近点重算。
+
+    2026-11-05 现场：刚走完一个航点就停止/继续，车又跑回那个点 —— 因为面板原来按
+    "离车最近的路线点"重发。现在 frontier_explorer 保存 _fixed_goals/_multi_points
+    和段索引，/explore/resume 直接恢复。
+    """
+    src = (ROOT / 'fwr_bringup' / 'frontier_explorer.py').read_text()
+    assert '/explore/resume' in src
+    assert 'def _resume(' in src
+    # 停止时不得再清空路线（否则无法按进度继续）
+    stop_body = src[src.index('def _stop(self, _, response):'):]
+    stop_body = stop_body[:stop_body.index('def ', 10)]
+    assert '_multi_points = None' not in stop_body, '停止时清空路线会导致只能按最近点重发'
+    assert '_mission_suspended = True' in stop_body
+    core = (ROOT / 'fwr_bringup' / 'exploration_core.py').read_text()
+    assert 'def resume_fixed' in core, '恢复必须保留段索引'
