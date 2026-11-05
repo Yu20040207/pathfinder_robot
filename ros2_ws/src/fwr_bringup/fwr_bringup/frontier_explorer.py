@@ -34,6 +34,9 @@ class FrontierExplorer(Node):
         self.declare_parameter('require_bridge_arm', False)
         self.declare_parameter('max_trial_duration_s', 120.0)
         self.declare_parameter('max_fixed_goal_distance_m', .5)
+        # 终点离起点太近时不能用 through-poses：Nav2 的 goal checker 只认最后一个点，
+        # 车路过终点附近就会判"已到达"，中间点根本没去（2026-11-05 实测 1.29 m 中招）。
+        self.declare_parameter('fixed_route_tail_gap_m', 2.5)
         # 2026-11-04（用户："掉头撞到门框后停了很久"）：碰撞监控触发 stop 后，
         # stop_pub_timeout=18s 会让它**继续发零**很久（实测一段连续 15.3 秒，
         # 期间扫描里停车框早就是空的）。这里自己判"监控持续压零"，
@@ -437,7 +440,12 @@ class FrontierExplorer(Node):
         # 整条路线被跳过。这种情况下改成逐段执行（每段都是真实目标），
         # 保证顺序走完；终点离得远时仍用 through-poses（途经点不停车）。
         tail_gap = math.hypot(pts[-1][0] - rx, pts[-1][1] - ry)
-        if tail_gap < 1.0:
+        tail_limit = float(self.get_parameter('fixed_route_tail_gap_m').value)
+        self.get_logger().info(
+            '多点路线 %d 个点: %s  终点距车 %.2f m（阈值 %.1f）' % (
+                len(pts), ' → '.join('(%.2f,%.2f)' % (x, y) for x, y, _ in pts),
+                tail_gap, tail_limit))
+        if tail_gap < tail_limit:
             self._multi_points = None
             self._fixed_goals = pts
             self._fixed_goal = pts[0]

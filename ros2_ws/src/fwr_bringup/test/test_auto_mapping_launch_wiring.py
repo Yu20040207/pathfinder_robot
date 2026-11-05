@@ -204,3 +204,12 @@ def test_explorer_logs_every_silent_mission_stop():
         assert reason in src, f'缺少中止原因日志: {reason}'
     # 同一原因只打一次，避免 10 Hz 回调刷屏
     assert "_trip_last" in src
+
+
+def test_multi_point_route_uses_sequential_when_goal_is_near_start():
+    """终点离起点近时必须逐段执行，否则 Nav2 路过终点就判到达、中间点被跳过。"""
+    src = (ROOT / 'fwr_bringup' / 'frontier_explorer.py').read_text()
+    assert 'fixed_route_tail_gap_m' in src, '阈值必须是参数，不能硬编码'
+    assert '2.5' in src
+    # 路线点必须打印出来，便于事后核对"到底去了哪些点"
+    assert '多点路线 %d 个点' in src
