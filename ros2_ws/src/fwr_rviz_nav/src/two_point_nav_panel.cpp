@@ -585,15 +585,14 @@ private:
       }
       return;
     }
-    if (status_label_ != nullptr) {status_label_->setText("重新定位：正在匹配地图（几秒）…");}
+    if (status_label_ != nullptr) {status_label_->setText("重新定位：正在匹配地图（约 1 秒）…");}
     auto request = std::make_shared<std_srvs::srv::Trigger::Request>();
     reseed_client_->async_send_request(request,
       [this](rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture future) {
         const auto response = future.get();
         if (status_label_ != nullptr) {
-          status_label_->setText(response->success ?
-            "重新定位：已开始，等 RViz 里车的位置稳定" :
-            QString("重新定位失败：%1").arg(QString::fromStdString(response->message)));
+          // 服务现在会等匹配完成再返回，直接把结果（含坐标）显示出来
+          status_label_->setText(QString::fromStdString(response->message));
         }
       });
   }

@@ -130,19 +130,45 @@ class AutoInitialPose(Node):
         return True, 'ok'
 
     def _on_reseed(self, request, response):
-        """手动触发一次重新定位（车被搬动后按面板按钮调这个）。
+        """手动触发一次重新定位，并**同步返回结果**（面板要显示"定位成功"）。
 
-        流程与启动时一致：先用上次位姿做局部细化，不匹配再全局搜索；
-        匹配通过检查（贴墙率、空闲区）后播种 AMCL。
+        匹配本身是纯计算（全局搜索实测 ~1 s），所以直接在服务回调里做完；
+        播种用 call_async 发出去，不等 AMCL 回执（结果位姿已经算好了）。
         """
-        self._seeded = False
+        if self._map is None or self._scan is None:
+            response.success = False
+            response.message = '还没有地图或激光数据'
+            return response
+        try:
+            score, x, y, yaw = self._match()
+        except Exception as exc:                       # noqa: BLE001
+            response.success = False
+            response.message = '匹配失败: %s' % exc
+            return response
+        base_x, base_y, base_yaw = base_pose_from_laser(
+            x, y, yaw, float(self.get_parameter('laser_offset_m').value))
+        on_wall, unknown_frac = self._scan_overlap(x, y, yaw)
+        sane, why = self._pose_is_sane(base_x, base_y)
+        if sane and on_wall < float(self.get_parameter('min_wall_overlap').value):
+            sane, why = False, '贴墙率 %.0f%% 不足' % (100 * on_wall)
+        if sane and unknown_frac > float(self.get_parameter('max_unknown_frac').value):
+            sane, why = False, '未知区占比 %.0f%% 过高' % (100 * unknown_frac)
+        if sane and score > float(self.get_parameter('max_score_m').value):
+            sane, why = False, '残差 %.3f m 过大' % score
+        if not sane:
+            response.success = False
+            response.message = '定位失败（%s），请手动核对后点 2D Pose Estimate' % why
+            return response
+        self._send(base_x, base_y, base_yaw)
+        self._seeded = True
         self._gave_up = False
-        self._manual_pose_seen = False
-        self._future = None
         self._tf_ok_at = time.monotonic()
-        self.get_logger().warn('收到"重新定位"请求 → 开始重新匹配（几秒）')
+        self.get_logger().warn(
+            '重新定位成功: (%.2f, %.2f, %.0f deg) 残差 %.3f m 贴墙 %.0f%%' % (
+                base_x, base_y, math.degrees(base_yaw), score, 100 * on_wall))
         response.success = True
-        response.message = 'reseeding started'
+        response.message = '定位成功: (%.2f, %.2f, %.0f°) 残差 %.3f m' % (
+            base_x, base_y, math.degrees(base_yaw), score)
         return response
 
     def _on_map(self, msg):
