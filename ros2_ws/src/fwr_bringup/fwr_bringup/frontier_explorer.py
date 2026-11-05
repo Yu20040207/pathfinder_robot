@@ -496,7 +496,11 @@ class FrontierExplorer(Node):
     def _tick(self):
         now = time.monotonic()
         period = float(self.get_parameter('costmap_clear_period_s').value)
-        if period > 0 and now - self._last_costmap_clear > period:
+        # 只在**空闲**时清：导航中清空会在重规划那一帧把动态障碍一起清掉，
+        # 规划器可能因此"看见空地"直接穿过去（2026-11-05 权衡）。
+        idle_now = (self._handle is None
+                    and self._status in ('idle', 'succeeded', 'stopped', 'canceled'))
+        if period > 0 and idle_now and now - self._last_costmap_clear > period:
             self._last_costmap_clear = now
             asked = 0
             for client in getattr(self, '_clear_clients', ()):
