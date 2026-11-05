@@ -38,17 +38,34 @@ def test_real_frames_speed_and_recovery_policy():
 
 
 def test_costmaps_use_real_lidar_and_no_voxel():
+    data = yaml.safe_load((ROOT / 'config' / 'real_nav2.yaml').read_text())
     for name, frame in [('local_costmap', 'odom'), ('global_costmap', 'map')]:
-        data = yaml.safe_load((ROOT / 'config' / 'real_nav2.yaml').read_text())
         costmap = data[name][name]['ros__parameters']
         assert costmap['use_sim_time'] is False
         assert costmap['robot_base_frame'] == 'base_footprint'
         assert costmap['global_frame'] == frame
-        assert 'obstacle_layer' in costmap['plugins']
+        # 局部代价地图保留障碍层：实时动态障碍在这里处理
         assert 'inflation_layer' in costmap['plugins']
         assert 'voxel_layer' not in costmap['plugins']
-        assert costmap['obstacle_layer']['scan']['topic'] == '/scan_mapping'
         assert costmap['footprint']
+    local = data['local_costmap']['local_costmap']['ros__parameters']
+    assert 'obstacle_layer' in local['plugins']
+    assert local['obstacle_layer']['scan']['topic'] == '/scan_mapping'
+
+
+def test_global_costmap_has_no_obstacle_layer():
+    """2026-11-05（用户批准）：全局代价地图**不能**再挂障碍层。
+
+    障碍层用 /scan_mapping 实时标记，而雷达视野只有 260°（后方 ±50° 屏蔽），
+    车身后方的标记永远无法被后续扫描清除 → 越积越多 → 目标格被幽灵障碍膨胀成
+    99 分 → "单点规划失败、只能清空代价地图"。实测去掉后致命格幽灵数 = 0。
+    动态障碍由局部代价地图 + collision_monitor 负责。
+    """
+    data = yaml.safe_load((ROOT / 'config' / 'real_nav2.yaml').read_text())
+    glob = data['global_costmap']['global_costmap']['ros__parameters']
+    assert 'obstacle_layer' not in glob['plugins'], (
+        '全局代价地图挂障碍层会被陈旧标记污染（见上）')
+    assert glob['plugins'][:2] == ['static_layer'] or 'static_layer' in glob['plugins']
 
 
 def test_real_launch_keeps_motion_gated_and_one_slam_owner():
