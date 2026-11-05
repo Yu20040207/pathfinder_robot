@@ -174,6 +174,18 @@ class FrontierExplorer(Node):
         if abs(msg.linear.x) > 1e-3 or abs(msg.angular.z) > 1e-3:
             self._fwd_nz_at = time.monotonic()
 
+    def _trip(self, reason: str) -> None:
+        """记录"任务为什么停下"（2026-11-05 用户要求：静默中止全部打日志）。
+
+        同一个原因只打印一次，避免 10 Hz 回调刷屏；原因变化会再打印。
+        """
+        if getattr(self, '_trip_last', None) == reason:
+            return
+        self._trip_last = reason
+        self.get_logger().warn('[任务中止] %s（enabled=%s status=%s dispatched=%s/%s）' % (
+            reason, self._sm.enabled, self._status,
+            self._sm._fixed_dispatched, self._sm._fixed_legs))
+
     def _on_odom(self, msg):
         # EKF 输出偶尔滞后 0.3 s 以上；0.25 s 会把正常里程计整帧丢掉，
         # 进而让 pose_ok 变假、探索器静默停止任务。
@@ -207,20 +219,26 @@ class FrontierExplorer(Node):
             self._imu_at = time.monotonic()
 
     def _on_manual(self, msg):
+        was = self._manual
         self._manual = msg.data
         if self._manual:
+            if not was and self._sm.enabled:
+                self._trip('manual_enabled 被打开（手动通道接管）')
             self._sm.stop()
             self._end_recovery(False)
 
     def _on_bridge_arm(self, msg):
         self._bridge_armed = msg.data
         if not msg.data and self._sm.enabled and bool(self.get_parameter('require_bridge_arm').value):
+            self._trip('底盘自动授权丢失（/base/auto_armed=False）')
             self._sm.stop()
             self._end_recovery(False)
 
     def _on_fault(self, msg):
         self._fault = msg.data
         if self._fault:
+            if self._sm.enabled:
+                self._trip('底盘故障上报 fault=%s' % self._fault)
             self._sm.stop()
 
     def _start(self, _, response):
@@ -440,6 +458,8 @@ class FrontierExplorer(Node):
         return response
 
     def _stop(self, _, response):
+        if self._sm.enabled:
+            self._trip('收到停止请求（面板"停止导航"）')
         self._multi_points = None
         self._sm.stop()
         self._end_recovery(False)
@@ -452,6 +472,7 @@ class FrontierExplorer(Node):
         if trial_duration_expired(self._trial_started, now,
                                   float(self.get_parameter('max_trial_duration_s').value),
                                   self._sm.fixed_goal):
+            self._trip('试运行超时（max_trial_duration_s）')
             self._sm.stop()
             self._end_recovery(False)
         if self._awaiting_permit or self._reversing:
@@ -489,6 +510,17 @@ class FrontierExplorer(Node):
             self._cancel_goal()
         decision = self._sm.update(map_ok, pose_ok, self._fault, self._status, now,
                                    self._goal.grid_index if self._goal else None)
+        if decision.action == 'stop' and self._sm.enabled:
+            why = []
+            if not map_ok:
+                why.append('地图不新鲜')
+            if not pose_ok:
+                why.append('位姿不新鲜')
+            if self._fault:
+                why.append('故障=%s' % self._fault)
+            self._trip('状态机停止: %s（goal_status=%s%s）' % (
+                decision.state, self._status,
+                (', ' + '、'.join(why)) if why else ''))
         state = String()
         state.data = decision.state
         self._state_pub.publish(state)
@@ -502,6 +534,7 @@ class FrontierExplorer(Node):
                 self._status = 'canceled'
         elif decision.action == 'recover':
             if not bool(self.get_parameter('supervised_recovery_enabled').value):
+                self._trip('需要恢复但 supervised_recovery_enabled=False')
                 self._sm.stop()
             else:
                 mapped_track = self._track_in_map()

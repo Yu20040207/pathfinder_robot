@@ -188,3 +188,19 @@ def test_reseed_service_can_be_triggered_from_the_panel():
     panel = (ROOT.parent / 'fwr_rviz_nav' / 'src' / 'two_point_nav_panel.cpp').read_text()
     assert '/localization/reseed' in panel, '面板按钮必须调用该服务'
     assert '重新定位' in panel
+
+
+def test_explorer_logs_every_silent_mission_stop():
+    """任务中止必须留下日志（2026-11-05：现场"走到一半就不走了"查不出原因）。
+
+    之前 _on_manual / _on_bridge_arm / _on_fault / trial 超时都是静默 stop，
+    日志里只能看到 Goal was canceled，不知道是谁先动的手。
+    """
+    src = (ROOT / 'fwr_bringup' / 'frontier_explorer.py').read_text()
+    assert 'def _trip(' in src, '需要统一的中止日志函数'
+    for reason in ('manual_enabled 被打开', '底盘自动授权丢失',
+                   '底盘故障上报', '收到停止请求', '试运行超时',
+                   '状态机停止'):
+        assert reason in src, f'缺少中止原因日志: {reason}'
+    # 同一原因只打一次，避免 10 Hz 回调刷屏
+    assert "_trip_last" in src
