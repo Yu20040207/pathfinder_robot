@@ -88,14 +88,20 @@ def reverse_steering(x: float, y: float, yaw: float,
     return max(-max_w, min(max_w, kp * err))
 
 
-def should_start(*, blocked_for_s: float, side_min_m: float, rear_blocked: bool,
-                 trail_len_m: float, since_last_s: float,
+def should_start(*, blocked_for_s: float, side_left_m: float, side_right_m: float,
+                 rear_blocked: bool, trail_len_m: float, since_last_s: float,
                  blocked_s: float = 1.0, side_tight_m: float = 0.5,
                  min_trail_m: float = 0.5, cooldown_s: float = 5.0) -> tuple[bool, str]:
-    """是否该开始后退让位。返回 (是否触发, 原因)。"""
+    """是否该开始后退让位。返回 (是否触发, 原因)。
+
+    2026-11-05 修正判定方向：要求**左右两侧都窄**（用 max 比），
+    不是"有一侧窄就退"。原实现把左右扇区混在一起取 min，
+    右侧很空(1.0 m)、左侧贴墙(0.3 m) 时结果 0.3，被判成"两侧都窄"而触发后退 ——
+    现场就是"右边明明有地方右转，车却开始后退"。
+    """
     if rear_blocked:
         return False, 'rear-blocked'
-    if side_min_m >= side_tight_m:
+    if max(side_left_m, side_right_m) >= side_tight_m:
         return False, 'side-clear'
     if blocked_for_s < blocked_s:
         return False, 'not-blocked-long-enough'
@@ -106,14 +112,17 @@ def should_start(*, blocked_for_s: float, side_min_m: float, rear_blocked: bool,
     return True, 'start'
 
 
-def should_stop(*, side_min_m: float, rear_blocked: bool, reversed_m: float,
-                elapsed_s: float, turn_clear_m: float = 0.9,
+def should_stop(*, side_left_m: float, side_right_m: float, rear_blocked: bool,
+                reversed_m: float, elapsed_s: float, turn_clear_m: float = 0.9,
                 max_reverse_m: float = 1.2, max_s: float = 10.0) -> tuple[bool, str]:
-    """是否该结束后退。返回 (是否结束, 原因)。"""
+    """是否该结束后退。返回 (是否结束, 原因)。
+
+    结束条件：**任意一侧**已经够宽（max >= turn_clear_m）—— 有一边能转就够了。
+    """
+    if max(side_left_m, side_right_m) >= turn_clear_m:
+        return True, 'enough-room'
     if rear_blocked:
         return True, 'rear-blocked'
-    if side_min_m >= turn_clear_m:
-        return True, 'enough-room'          # ← 主要结束条件：左右都够转弯了
     if reversed_m >= max_reverse_m:
         return True, 'max-distance'
     if elapsed_s >= max_s:

@@ -93,17 +93,25 @@ class TrailReverser(Node):
         self._filtered_cmd = msg
 
     # ---------- 工具 ----------
-    def _side_min(self) -> float:
-        """左右前扇区的最小净空（雷达倒装：150~180 左前，-180~-150 右前）。"""
+    def _side_clearance(self) -> tuple[float, float]:
+        """左右前扇区各自的最小净空（雷达倒装：150~180 左前，-180~-150 右前）。
+
+        2026-11-05：原来左右混在一起取 min，导致"右边很空、左边贴墙"也会被判成
+        两侧都窄 → 明明能右转却开始后退。现在左右分开返回，判定交给核心用 max。
+        """
         if self._scan is None:
-            return float('inf')
-        vals = []
+            return float('inf'), float('inf')
+        left, right = [], []
         for i, r in enumerate(self._scan.ranges):
+            if not (math.isfinite(r) and r > 0.05):
+                continue
             a = math.degrees(self._scan.angle_min + i * self._scan.angle_increment)
-            if (150.0 <= a <= 180.0) or (-180.0 <= a <= -150.0):
-                if math.isfinite(r) and r > 0.05:
-                    vals.append(r)
-        return min(vals) if vals else float('inf')
+            if 150.0 <= a <= 180.0:
+                left.append(r)
+            elif -180.0 <= a <= -150.0:
+                right.append(r)
+        return (min(left) if left else float('inf'),
+                min(right) if right else float('inf'))
 
     def _set_manual(self, enabled: bool) -> None:
         if not self._params.service_is_ready():
@@ -141,10 +149,11 @@ class TrailReverser(Node):
         else:
             self._blocked_since = None
             return
-        side = self._side_min()
+        left, right = self._side_clearance()
         ok, why = tc.should_start(
             blocked_for_s=now - self._blocked_since,
-            side_min_m=side,
+            side_left_m=left,
+            side_right_m=right,
             rear_blocked=self._rear_blocked,
             trail_len_m=self._trail.length(),
             since_last_s=now - self._last_end,
@@ -159,25 +168,25 @@ class TrailReverser(Node):
         self._reversed_m = 0.0
         self._set_manual(True)
         self.get_logger().warn(
-            '前方被挡且左右都不足 %.1f m（实测 %.2f m）→ 开始沿原路后退' % (
-                float(self.get_parameter('side_tight_m').value), side))
+            '前方被挡且左右都不足 %.1f m（实测 左 %.2f / 右 %.2f m）→ 开始沿原路后退' % (
+                float(self.get_parameter('side_tight_m').value), left, right))
 
     def _step_reverse(self, now: float) -> None:
         x, y, yaw = self._pose
         self._reversed_m = math.hypot(x - self._start_pose[0], y - self._start_pose[1])
-        side = self._side_min()
+        left, right = self._side_clearance()
         done, why = tc.should_stop(
-            side_min_m=side, rear_blocked=self._rear_blocked,
+            side_left_m=left, side_right_m=right, rear_blocked=self._rear_blocked,
             reversed_m=self._reversed_m, elapsed_s=now - self._started_at,
             turn_clear_m=float(self.get_parameter('turn_clear_m').value),
             max_reverse_m=float(self.get_parameter('max_reverse_m').value),
             max_s=float(self.get_parameter('max_s').value))
         if done:
-            self._finish(why, side)
+            self._finish(why, min(left, right))
             return
         tgt = self._trail.target_behind(float(self.get_parameter('target_back_m').value))
         if tgt is None:
-            self._finish('trail-empty', side)
+            self._finish('trail-empty', min(left, right))
             return
         cmd = Twist()
         cmd.linear.x = -abs(float(self.get_parameter('reverse_speed_mps').value))

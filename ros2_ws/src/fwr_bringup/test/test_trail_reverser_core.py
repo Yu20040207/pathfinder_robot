@@ -42,34 +42,51 @@ def test_reverse_steering_points_the_tail_at_target():
 
 
 def test_trigger_requires_blocked_and_tight_sides():
-    ok, why = tc.should_start(blocked_for_s=2.0, side_min_m=0.3, rear_blocked=False,
+    ok, why = tc.should_start(blocked_for_s=2.0, side_left_m=0.3, side_right_m=0.3, rear_blocked=False,
                               trail_len_m=2.0, since_last_s=10.0)
     assert ok and why == 'start'
     # 侧面够宽 → 不需要后退让位
-    assert tc.should_start(blocked_for_s=2.0, side_min_m=0.8, rear_blocked=False,
+    assert tc.should_start(blocked_for_s=2.0, side_left_m=0.8, side_right_m=0.8, rear_blocked=False,
                            trail_len_m=2.0, since_last_s=10.0)[0] is False
     # 车尾被挡 → 绝不后退
-    assert tc.should_start(blocked_for_s=9.0, side_min_m=0.1, rear_blocked=True,
+    assert tc.should_start(blocked_for_s=9.0, side_left_m=0.1, side_right_m=0.1, rear_blocked=True,
                            trail_len_m=3.0, since_last_s=99.0) == (False, 'rear-blocked')
     # 轨迹太短 / 冷却中
-    assert tc.should_start(blocked_for_s=9.0, side_min_m=0.1, rear_blocked=False,
+    assert tc.should_start(blocked_for_s=9.0, side_left_m=0.1, side_right_m=0.1, rear_blocked=False,
                            trail_len_m=0.2, since_last_s=99.0)[0] is False
-    assert tc.should_start(blocked_for_s=9.0, side_min_m=0.1, rear_blocked=False,
+    assert tc.should_start(blocked_for_s=9.0, side_left_m=0.1, side_right_m=0.1, rear_blocked=False,
                            trail_len_m=3.0, since_last_s=1.0)[0] is False
 
 
 def test_stop_when_both_sides_have_room():
     # 主要条件：左右都够 → 停
-    assert tc.should_stop(side_min_m=0.95, rear_blocked=False, reversed_m=0.3,
+    assert tc.should_stop(side_left_m=0.95, side_right_m=0.95, rear_blocked=False, reversed_m=0.3,
                           elapsed_s=3.0) == (True, 'enough-room')
     # 还在退
-    assert tc.should_stop(side_min_m=0.3, rear_blocked=False, reversed_m=0.3,
+    assert tc.should_stop(side_left_m=0.3, side_right_m=0.3, rear_blocked=False, reversed_m=0.3,
                           elapsed_s=3.0) == (False, 'reversing')
     # 车尾被挡 → 立刻停
-    assert tc.should_stop(side_min_m=0.3, rear_blocked=True, reversed_m=0.1,
+    assert tc.should_stop(side_left_m=0.3, side_right_m=0.3, rear_blocked=True, reversed_m=0.1,
                           elapsed_s=1.0) == (True, 'rear-blocked')
     # 安全上限
-    assert tc.should_stop(side_min_m=0.3, rear_blocked=False, reversed_m=1.3,
+    assert tc.should_stop(side_left_m=0.3, side_right_m=0.3, rear_blocked=False, reversed_m=1.3,
                           elapsed_s=3.0) == (True, 'max-distance')
-    assert tc.should_stop(side_min_m=0.3, rear_blocked=False, reversed_m=0.2,
+    assert tc.should_stop(side_left_m=0.3, side_right_m=0.3, rear_blocked=False, reversed_m=0.2,
                           elapsed_s=11.0) == (True, 'timeout')
+
+
+def test_one_open_side_is_enough_to_turn_no_reverse():
+    """一侧很空、另一侧贴墙 → 不该后退（现场 bug：右边能右转却开始后退）。
+
+    原实现把左右扇区混在一起取 min：左 0.3 / 右 1.0 → 0.3 → 误判"两侧都窄"。
+    正确语义：只有 max(左,右) 都小于阈值才需要后退。
+    """
+    ok, why = tc.should_start(blocked_for_s=5.0, side_left_m=0.3, side_right_m=1.0,
+                              rear_blocked=False, trail_len_m=3.0, since_last_s=99.0)
+    assert (ok, why) == (False, 'side-clear'), '右边有 1 m 空间时不该后退'
+
+
+def test_stop_reversing_as_soon_as_one_side_is_wide():
+    """后退过程中任意一侧变宽 ≥ turn_clear_m 就结束（有一边能转就够了）。"""
+    assert tc.should_stop(side_left_m=0.2, side_right_m=0.95, rear_blocked=False,
+                          reversed_m=0.2, elapsed_s=1.0) == (True, 'enough-room')
