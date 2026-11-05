@@ -23,7 +23,7 @@ static void loaded_plant_run(float left_goal, float right_goal) {
         }
         tick(&c, now, (int)lroundf(count_f[0]), (int)lroundf(count_f[1]));
         assert(c.fault==BASE_OK && c.active);
-        assert(fabsf(c.pwm[0])<=.90f && fabsf(c.pwm[1])<=.90f);
+        assert(fabsf(c.pwm[0])<=.95f && fabsf(c.pwm[1])<=.95f);
     }
     assert(left_goal*c.measured[0]>40 && right_goal*c.measured[1]>40);
     base_stop(&c);
@@ -144,12 +144,14 @@ int main(void) {
     tick(&c, 20000, 0, 0);
     assert(c.pwm[0] > .5f && c.pwm[0] < .55f);
     assert(c.pwm[1] > .5f && c.pwm[1] < .55f);
-    for (int i=2; i<=10; ++i) {
+    for (int i=2; i<=20; ++i) {
         base_command(&c, 60, 60, i*20000LL);
         tick(&c, i*20000LL, 0, 0);
     }
-    assert(c.pwm[0] > .70f && c.pwm[0] <= .95f);
-    assert(c.pwm[1] > .70f && c.pwm[1] <= .95f);
+    // 2026-11-04: rubber-wheel retest raises the software cap from 0.90 to
+    // 0.95.  The startup pulse must actually reach it, not just stay <= 0.95.
+    assert(c.pwm[0] > .94f && c.pwm[0] <= .95f);
+    assert(c.pwm[1] > .94f && c.pwm[1] <= .95f);
     base_init(&c, 0, 0, 0);
     base_command(&c, 60, 60, 0);
     tick(&c, 20000, 0, 0);

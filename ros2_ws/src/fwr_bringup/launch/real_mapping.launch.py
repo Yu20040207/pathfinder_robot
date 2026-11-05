@@ -55,6 +55,11 @@ def generate_launch_description():
              name='slam_toolbox', output='screen',
              condition=IfCondition(LaunchConfiguration('start_slam')),
              parameters=[LaunchConfiguration('slam_params')]),
+        # RViz「保存地图」按钮的服务：一次保存 .posegraph/.data + .pgm/.yaml。
+        # 目录默认取 FWR_MAP_DIR（start_manual_mapping.sh 会设为源码 maps/），
+        # 未设置时保存到 ~/robot_maps。
+        Node(package='fwr_bringup', executable='slam_map_save',
+             name='slam_map_save', output='screen'),
         # 后向四路 A22 超声（DYP-E08 / RS485）：发布 4 路 Range
         Node(package='fwr_bringup', executable='ultrasonic_rear',
              name='ultrasonic_rear', output='screen',

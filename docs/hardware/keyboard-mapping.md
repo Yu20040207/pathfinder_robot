@@ -1,5 +1,25 @@
 # 实机键盘建图（人工看护）
 
+## 一键手动建图
+
+在交互式终端执行：
+
+```bash
+cd /home/manbaout/Company_Project/Four-wheel-robot
+./scripts/start_manual_mapping.sh
+```
+
+脚本会依次：
+
+1. 停掉旧 ROS 栈；
+2. 用 `tools/start_mapping.sh --slam` 启动 **SLAM Toolbox** 建图、`real_mapping.rviz` 和地图健康监视；
+3. 等 `/scan`、`/map` 就绪后，在当前终端启动已验证的 `scripts/start_keyboard_mapping.sh`；
+4. 检查 `/base_bridge`、雷达、IMU、`/slam_toolbox` 和 `/base/fault=0` 后，才打开 `motion_enabled/manual_enabled`。
+
+**键盘焦点必须留在这个终端**：W/S 前进后退，A/D 原地转向，空格停，Q 退出。退出后建图栈仍在后台，脚本会打印保存 `.pgm/.yaml` 和 `.posegraph` 的命令。
+
+建图 RViz 的“导航/建图控制”面板新增了 **“保存地图(SLAM)”** 按钮：点击会先关闭运动门，再调用 `/mapping/save_slam`，一次保存 `.posegraph/.data` + `.pgm/.yaml`；状态栏显示保存路径。通过 `start_manual_mapping.sh` 启动时默认保存到源码 `ros2_ws/src/fwr_bringup/maps/`；直接启动 launch 时默认保存到 `~/robot_maps/`。
+
 键盘节点发布 `/cmd_vel_manual`，与 Nav2 的 `/cmd_vel` 分开。机器人运动需要底盘桥接同时开启 `motion_enabled` 和 `manual_enabled`。两项默认都是 `false`；导航动作正在执行时，人工遥控指令会被拒绝。键盘节点退出、按键停止重复、雷达或 IMU 超时、ESP32 通信故障时，底盘停止发运动指令。ESP32 本身还有 300 ms 通信超时。
 
 先确认小车周围空旷、配重和 IMU 固定，操作者可立即切断 12 V；保留 12 V 接通。仅在已完成悬空和地面短测后执行以下步骤。若独立 IMU 节点还在运行，用 `start_imu:=false` 防止重复占用串口。停止旧的建图/EKF/底盘桥接进程后，在第一个终端启动：

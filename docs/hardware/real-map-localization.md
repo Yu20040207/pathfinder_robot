@@ -1,5 +1,31 @@
 # 已保存地图定位（实机）
 
+## 一键启动（推荐）
+
+`scripts/run_navigation.sh` 会依次：关闭旧栈运动门并停建图/导航进程 → 等待串口释放 → 读取**上一次使用的地图**（状态文件 `~/.config/fwr/last_navigation_map`）→ 启动 `real_navigation.launch.py use_saved_map:=true` + `real_localization.rviz`。
+
+```bash
+cd /home/manbaout/Company_Project/Four-wheel-robot
+./scripts/run_navigation.sh
+```
+
+常用参数：
+
+```bash
+./scripts/run_navigation.sh --map /abs/path/to/real_map.yaml   # 指定并记住地图
+./scripts/run_navigation.sh --print-map                        # 只看会加载哪张图
+./scripts/run_navigation.sh --no-stop                          # 已手动停好旧栈
+./scripts/run_navigation.sh --no-rviz
+```
+
+- 用 `--map` 指定后，脚本会把绝对路径写入 `~/.config/fwr/last_navigation_map`；下次不带 `--map` 会自动用它。
+- 如果状态文件为空或路径已不存在，回退到最新的 `maps/real_map_auto_*.yaml`。
+- 直接 `ros2 launch fwr_bringup run_navigation.launch.py` 也读取同一个状态文件，默认打开上次地图。
+
+它只负责启动，不会替操作员点“开始导航”，也不会打开运动门。启动后看到 `map_server`/`amcl`/`bt_navigator` active、`/base/fault=0`，再在 RViz 选点。
+
+---
+
 `real_localization.launch.py` 加载 `real_front_side_map_2026-10-23.yaml`，用 AMCL 对 `/scan_mapping` 定位。编码器与 IMU 融合发布 `odom→base_footprint`，AMCL 独占发布 `map→odom`。底盘桥接默认 `motion_enabled=false`；此入口不启动 Nav2 行驶控制。
 
 先退出运行中的 `real_mapping.launch.py` 或 `real_navigation.launch.py`，再启动定位。不要同时运行 SLAM Toolbox 与 AMCL，否则它们会同时发布 `map→odom`。

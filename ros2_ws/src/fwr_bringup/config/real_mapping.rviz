@@ -20,7 +20,7 @@ Visualization Manager:
         Reliability Policy: Reliable
       Color: 60; 200; 255
       Line Style: Lines
-      Line Width: 0.06
+      Line Width: 0.12
     - Class: rviz_default_plugins/Path
       Name: 局部规划路径
       Enabled: true
@@ -32,7 +32,7 @@ Visualization Manager:
         Reliability Policy: Reliable
       Color: 255; 90; 90
       Line Style: Lines
-      Line Width: 0.05
+      Line Width: 0.10
     - Class: rviz_default_plugins/Path
       Name: 沿墙规划路径
       Enabled: true
@@ -44,7 +44,7 @@ Visualization Manager:
         Reliability Policy: Reliable
       Color: 255; 200; 0
       Line Style: Lines
-      Line Width: 0.06
+      Line Width: 0.10
     - Class: rviz_default_plugins/Grid
       Name: Grid
       Enabled: true

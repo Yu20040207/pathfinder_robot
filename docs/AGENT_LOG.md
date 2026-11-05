@@ -4847,3 +4847,528 @@ source /opt/ros/humble/setup.bash && source ros2_ws/install/setup.bash
 PYTHONPATH="ros2_ws/src/fwr_bringup:$PYTHONPATH" .venv/bin/python -m pytest ros2_ws/src/fwr_bringup/test -q
 → 255 passed, 1 warning in 1.41s
 ```
+
+## 2026-11-04 15:33 · 自动建图存档 + 一条命令启动导航
+
+### 会话目标
+
+先把当前自动建图结果存档，再做一个一条命令完成“停旧栈 + 加载存档地图 + 启动导航 + RViz”的入口。
+
+### 仓库改动（文件 / 新增 / 修改 / 删除）
+
+| 文件 | 类型 | 说明 |
+| --- | --- | --- |
+| `ros2_ws/src/fwr_bringup/launch/run_navigation.launch.py` | 新增 | 包装 `real_navigation.launch.py use_saved_map:=true` + `real_localization.rviz`；支持 `map`/`start_rviz`/`localizer` 参数 |
+| `scripts/run_navigation.sh` | 新增 | 一键入口：关闭旧栈运动门 → 清场 → 选最新 `real_map_auto_*.yaml` → 启动导航 + RViz |
+| `docs/hardware/real-map-localization.md` | 修改 | 补“一键启动”用法和参数 |
+
+未改导航参数、安全链、`real_nav2.yaml` 或面板代码。
+
+### 存档
+
+- 地图：`ros2_ws/src/fwr_bringup/maps/real_map_auto_2026-11-04_1525.{pgm,yaml,posegraph,data}`
+- 栅格：488 × 174，0.05 m/px，origin `(-10.4, -4.7)`
+- `serialize_map` 返回 `result=0`；PGM 83K、posegraph 7.1M、data 381K
+
+### 已验证（实测）
+
+- `bash -n scripts/run_navigation.sh`、`py_compile run_navigation.launch.py`、`ros2 launch ... --show-args` 均通过。
+- 一键脚本完整路径（停旧栈 + 启动）实测通过：
+  - 停止旧进程 38 个；
+  - `map_server`、`amcl`、`controller_server` active；
+  - `/scan` **9.98 Hz**；
+  - `/amcl_pose` ≈ `(1.332, -3.494)`；
+  - `motion_enabled=false`、`/base/fault=0`、`/cmd_vel_auto_safe=(0,0)`；
+  - 新 RViz PID `568482`，配置 `real_localization.rviz`。
+- 首次脚本因 `ros2 node list` 的 `/base_bridge` 发现缓存误判（进程实际已死）而退出；已改为 `pgrep -x base_bridge` 检查，完整路径复测通过。
+
+### 未验证 / 遗留
+
+- 没有点“开始导航”，没有发送导航目标；实际选点/行走仍需现场操作。
+- 若 AMCL 初始位姿与实车不符，需要用 RViz **2D Pose Estimate** 重设；`auto_initial_pose` 只是自动播种。
+- 存档地图来自当前建图栈，地图质量/黑点未单独验收。
+
+### 当前运行状态
+
+- 导航栈运行中：`map_server`/`amcl`/`controller_server` active，RViz PID 568482；
+- 运动门关闭，故障 0，`/cmd_vel_auto_safe` 为零；
+- 存档地图已落盘。
+
+### 下一步
+
+现场人员在 RViz“单点/两点导航”面板选点并点“开始导航”；面板自行开门。不要再改任何已冻结参数。以后重启用：
+
+```bash
+cd /home/manbaout/Company_Project/Four-wheel-robot
+./scripts/run_navigation.sh
+```
+
+## 2026-11-04 15:36 · 导航记住“上一次使用的地图”
+
+### 会话目标
+
+用户要求：可以指定地图启动导航，且下次启动默认沿用上一次的地图。
+
+### 仓库改动
+
+- `scripts/run_navigation.sh`：
+  - 新增 `--map` 持久化：写入 `~/.config/fwr/last_navigation_map`（绝对路径）。
+  - 不带 `--map` 时读取该状态文件；文件缺失/地图已删除才回退最新 `maps/real_map_auto_*.yaml`。
+  - 新增 `--print-map`：只打印解析结果，不启动、不停栈。
+- `ros2_ws/src/fwr_bringup/launch/run_navigation.launch.py`：
+  - `map` 默认值改为读取同一个状态文件；直接 `ros2 launch` 也会用上次地图。
+- `docs/hardware/real-map-localization.md`：补充用法和状态文件说明。
+
+### 已验证
+
+- `bash -n`、`py_compile` 通过。
+- `./scripts/run_navigation.sh --map <存档>` → 打印地图并写状态文件。
+- `./scripts/run_navigation.sh --print-map` → 返回同一路径。
+- 状态文件内容：
+  `/home/manbaout/Company_Project/Four-wheel-robot/ros2_ws/src/fwr_bringup/maps/real_map_auto_2026-11-04_1525.yaml`
+- rebuild 后 `ros2 launch ... --show-args` 的 `map` 默认值就是该路径。
+- 测试期间当前导航栈未受影响：`/amcl` 仍 `active [3]`。
+
+### 未验证
+
+- 修改后没有再次执行完整“指定新地图 + 停栈重启”路径（上次完整启动已验证，本次只验证地图解析/默认值）。
+- 外部目录地图如果 YAML 里的 `image` 是相对路径，`map_server` 仍按 YAML 所在目录解析，需保持 PGM 与 YAML 同目录。
+
+### 当前运行状态
+
+- 存档地图导航栈继续运行；`amcl` active、运动门关闭、故障 0；未点击“开始导航”。
+
+### 用法
+
+```bash
+# 指定并记住地图
+./scripts/run_navigation.sh --map /abs/path/to/real_map.yaml
+
+# 下次直接沿用
+./scripts/run_navigation.sh
+
+# 只确认会加载哪张
+./scripts/run_navigation.sh --print-map
+```
+
+## 2026-11-04 15:38 · 导航被另一会话切到 edited 地图；last-map 状态同步
+
+### 现象
+
+- 15:32 的一条命令完整启动（job `bash-afc67fc516b641a2`）被 **SIGKILL**。不是脚本报错；
+  同时另一会话启动了新的导航栈，进程 `571211`，地图为
+  `maps/real_map_2026-10-28_edited.yaml`。
+- 当前 `~/.config/fwr/last_navigation_map` 已指向该 edited 地图；`./scripts/run_navigation.sh --print-map`
+  返回同一路径，所以“下次默认上一次地图”仍成立。
+
+### 当前状态
+
+- 导航栈 `run_navigation.launch.py map:=...real_map_2026-10-28_edited.yaml` 运行中；
+- `amcl` active，`motion_enabled=false`，`/base/fault=0`；
+- `/amcl_pose` ≈ `(0.336, -12.544)`；`/map` 602×494、0.05 m/px；
+- 未点击“开始导航”，未发送运动命令。
+
+### 处理
+
+- 不重启、不抢占当前导航栈；保留另一会话的地图选择；
+- 若要用 15:25 存档的自动建图，执行：
+  `./scripts/run_navigation.sh --map .../real_map_auto_2026-11-04_1525.yaml`；
+- 一键脚本会把新地图写回状态文件，下一次默认使用它。
+
+### 备注
+
+- 两个会话同时切换栈时，`start_mapping.sh stop` 会互相杀进程；切换前先确认另一会话是否在操作。
+
+## 2026-11-04 15:50 · 单点目标 (-0.78,-2.12) 规划失败：目标与机器人不连通
+
+### 现象
+
+RViz 单点模式终点 `(-0.78,-2.12)`，面板提示“单点规划失败：请检查终点、全局代价地图及 map→odom 定位”。
+
+### 排查（只读，未动车）
+
+- 地图 `/map` 与 `/map_sealed` 均 602×494、0.05 m/px，origin `(-12.5,-15.7)`；机器人 AMCL 位姿 ≈ `(0.228,-2.701)`。
+- 目标点本身：`/map=0`、`/map_sealed=0`、全局代价 `0`，**不是落在障碍里**。
+- 直接调用 `ComputePathToPose(use_start=false)` 复现：动作被接受，但 `STATUS_ABORTED`，planner 日志为
+  `GridBased: failed to create plan, no valid path found.`
+- 在 `/global_costmap/costmap` 上做 4 邻域 BFS（只走 `cost<99`）：
+  - 机器人格 cost 89，目标格 cost 0；
+  - 目标**不可达**，最近可达点距目标约 **1.05 m**；
+  - 机器人到目标的直线在 0.1~0.5 段连续穿过 `cost=99/100` 的带（墙/膨胀障碍）。
+
+### 结论
+
+不是 AMCL 整体失效，也不是目标点被单独标成障碍；是**目标与机器人当前所在的可通行区不连通**，中间有墙/门被膨胀或黑色障碍封住。当前全局规划器返回 no valid path 是正确的。
+
+### 处理建议
+
+- 先在机器人同一侧的大片空闲区选一个点，确认预览/开始导航正常；
+- 要去另一侧房间，先选一个**门内/门口的中间点**，通过后再选房间中心（多点路线也可）；
+- 如果现场确实有门，但地图上被封死，先检查地图黑点/门宽与膨胀后的连通性；**不要直接改已冻结的 inflation/footprint**。
+- 面板的“单点规划失败”是通用提示，不能区分“目标障碍”与“无路径”；后续可在预览前做一次连通性检查并给出更明确的错误。
+
+### 当前状态
+
+本条目只做只读诊断；未启动/停止节点、未点击开始导航、未发送运动命令。当前导航栈仍为 `real_map_2026-10-28_edited.yaml`，运动门关闭、故障 0。
+
+### 16:00 追加：新目标 (3.13,-0.17) 同样无路径
+
+- 当前 AMCL 位姿 `(-1.024, 4.673)`（比 15:48 的 `(0.228,-2.701)` 变了约 7.4 m；若车被移动过，先重新 2D Pose Estimate）。
+- 目标 `(3.13,-0.17)`：`/map=0`、代价 `0`；机器人格代价 `0`，两点都空闲。
+- 全局代价图 4 邻域 BFS：机器人可达区仅 4433 格，目标**不可达**；最近可达点距目标 **1.46 m**；直线 0.6–0.9 段连续 `cost=99`（墙/膨胀）。
+- 直接 `ComputePathToPose(use_start=false)`：accepted，随后 `STATUS_ABORTED`，planner 日志 `no valid path found`。
+- 结论同上：不是目标落在障碍，而是当前位置与目标不在同一连通区。若实际有门，说明门在地图/膨胀后不可通行；先确认定位和门口，必要时修图/重扫。
+
+## 2026-11-04 16:07 · 2D 重定位无效：地图与当前扫描不一致，静态图有“墙洞”而实际有墙
+
+### 现象
+
+用户用 RViz 2D Pose Estimate 重新定位后，单点规划仍失败；且“之前遇到过相同情况”。
+
+### 实测
+
+- 2D 后 AMCL 位姿 `(-1.175,4.658)`，与 2D 前 `(-1.024,4.673)` 基本一致；`map→odom`、`odom→base` TF 正常，`/initialpose` 有 AMCL 订阅。
+- 三层连通性：
+  - `/map`：机器人→目标 **连通，路径 9.15 m**；
+  - `/map_sealed`：**连通，路径 9.15 m**；
+  - `/global_costmap/costmap`：**断开**，最近可达点距目标 1.46 m。
+- 静态地图路径上第一个被代价图堵住的点：`(1.98,4.68)`，`/map=0`、`/map_sealed=0`、全局代价 `99`；
+  离最近 `/map_sealed` 占据格 **0.28 m**（`inflation_radius=0.48` 范围内）。
+- 但 `/scan_mapping` 在该点附近 **0.7 m 内有 45 个雷达点，最近仅 0.12 m**（点列从约 `(1.95,4.08)` 到 `(1.83,4.43)`），说明**实际有墙/障碍，静态地图那里是空的**。
+
+### 结论
+
+不是 2D 没生效，也不是纯膨胀把门挤死；是**当前静态地图（edited 地图）与实际扫描不一致**：地图上有一个“洞/通道”，实际雷达看到墙。全局代价图的 `obstacle_layer` 正确地把实际墙标了出来，于是静态图路径在代价图里断开，规划器返回 no path。
+
+2D Pose Estimate 只能改定位，改不了地图内容，所以怎么点都没用。
+
+### 处理建议
+
+- 先到现场看 `(1.98,4.68)` 附近：如果确实是墙/固定障碍，当前 edited 地图不能再用，必须重扫或修图把墙补回去；不要为了“能规划”去删障碍层/改膨胀。
+- 如果那里是临时物体（箱子/人），移走后等代价图清除即可；若雷达点仍在，检查是否地图整体偏移。
+- 如果确实需要从这张 edited 地图导航，只能选择与机器人同侧、不穿过这个“地图洞”的目标；或换一张与现场一致的地图。
+- 未改任何参数、未发运动命令；当前仍是 `real_map_2026-10-28_edited.yaml`，运动门关闭、故障 0。
+
+### 备注
+
+这是项目 2026-11-01 同类问题的变体：当时是 `/map_sealed` 与 `/map` 错位；这次两层静态图一致，但**静态图与实时扫描不一致**。排查时三层图都要看，还要把 `/scan_mapping` 叠上去。
+
+## 2026-11-04 16:09 · 修正：重启后旧目标也能规划，主因是 AMCL/代价图重置而非地图变对
+
+### 重启后复测
+
+重启导航栈（PID `585478`，仍是同一张 `real_map_2026-10-28_edited.yaml`）后：
+
+- 旧目标 `(3.13,-0.17)` 直接 `ComputePathToPose`：**`STATUS_SUCCEEDED`，105 个路径点**；
+- 新目标 `(1.49,-2.77)` 在 RViz 预览：**149 个路径点**；
+- AMCL 位姿：
+  - 重启前 `(-1.175, 4.658)`
+  - 重启后 `(-1.245, 4.604)`（约 8 cm 偏移）
+- 旧堵点 `(1.98,4.68)` 的全局代价：**99 → 92**（`/map`、`/map_sealed` 仍为 0，空闲）；
+- `/scan_mapping` 在同一位置仍能测到墙，最近点约 **0.19 m**（之前 0.12 m）。
+
+### 解释
+
+- 2D Pose Estimate **没有真正改变 AMCL 位姿**（前后几乎一样），所以点 2D 没用；
+- 重启时 `auto_initial_pose` 重新播种，AMCL 位姿变了约 8 cm，同时全局代价图/障碍层重建；
+- 这个通道本身很窄：静态图空闲、实际墙距空闲格只有 0.12~0.19 m；代价在 99/92 之间跳，**几厘米的定位变化就能把“通/不通”翻转**；
+- 所以不是重启把地图修好了，而是**重置了定位和代价图状态，恰好让这条窄缝在代价图上变成可通行**。静态图与实时扫描不一致的问题仍然存在。
+
+### 风险
+
+- 现在能规划不等于路径安全：墙仍在，代价 92 仍然很高，路径可能贴墙；启动前必须把 `/scan_mapping` 叠到 `/map` 上确认路径不穿墙/不贴墙。
+- 这是**边缘可通行**状态，重启后可能再次失效；不要依赖反复重启。
+- 正确修法仍是：重扫/修图，让静态图里的通道和实际墙一致；或选择更宽的门/不穿这条窄缝的目标。不要改冻结的膨胀参数。
+
+### 当前状态
+
+- 导航栈运行中，AMCL 位姿 `(-1.245,4.604)`，运动门关闭、故障 0；
+- 未发运动命令，未改参数。
+
+## 2026-11-04 16:22 · 0.95 橡胶轮复测：只改代码/编译，尚未烧录
+
+### 背景
+
+2026-10-29 的 `MAX_DUTY=0.95` 结论来自**塑料轮**；当前已换橡胶轮，旧结论不能直接套用。用户确认做一次 0.95 单变量复测。
+
+### 仓库改动
+
+- `firmware/esp32s3_base_control/main/control.c`：`MAX_DUTY .90f → .95f`，注释标明塑料轮/橡胶轮区别和 10-bit 上限。
+- `firmware/esp32s3_base_control/tests/test_control.c`：PWM 上限断言改为 0.95，并新增“起步脉冲必须真正到 >0.94 且 ≤0.95”的回归断言。
+
+### 已验证
+
+- 主机 C 测试：
+  - `test_control` → `control and protocol tests passed`，exit 0；
+  - `test_protocol` → exit 0。
+- ESP-IDF 构建：`idf.py -C firmware/esp32s3_base_control build` → `build_exit=0`；
+  产物 `firmware/esp32s3_base_control/build/fwr_base_control.bin`（233K，16:22）。
+
+### 未验证 / 未做
+
+- **尚未烧录**；设备仍运行旧 `MAX_DUTY=0.90` 固件。
+- 尚未做悬空测试和橡胶轮过坎测试。
+- 烧录需先停导航栈释放串口，并确认驱动板 12 V 已断、车轮悬空。
+
+### 当前状态
+
+- 导航栈仍在运行，运动门关闭；未发运动命令。
+- 等用户确认 12 V 断开/车轮悬空后，再停栈、刷写并做悬空验证；过坎测试另安排有人看护。
+
+## 2026-11-04 16:24 · 0.95 固件烧录 + 悬空 3 秒测试通过
+
+### 操作
+
+- 用户确认 12 V 断开、车轮悬空；停止导航栈（35 个进程），释放串口。
+- 烧录：
+  `idf.py -C firmware/esp32s3_base_control -p /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_90:70:69:F7:F0:B0-if00 flash`
+  → `flash_exit=0`，`Hash of data verified`。
+- 12 V 断开时 `bench.py --action inspect`：
+  `active_samples=0`、`stop_confirmed=True`、`fault=0`、counts 0。
+- 用户接回 12 V、车轮保持悬空；运行：
+  `bench.py --action run --left 60 --right 60 --seconds 3`
+  CSV：`/tmp/base-095-suspended-162329.csv`
+
+### 结果
+
+- `fault=0`，`stop_confirmed=True`；
+- 最后运动段均值左 117.27 / 右 120.57 mm/s（悬空空载，高于 60 指令属正常闭环超调）；
+- 最大 PWM 仅 **0.60**，没有触及 0.95；悬空空载不能验证 0.95 上限，只验证了新固件能启动、闭环、停机无故障。
+- 0.95 的 PWM 上限已由主机测试 `test_control` 的 `>0.94 且 ≤0.95` 断言覆盖；实际负载下的 0.95 需要过坎测试。
+
+### 当前状态
+
+- 导航栈已停止；串口当前空闲，固件为 0.95 版本；
+- 12 V 已接、车轮悬空；
+- 尚未做橡胶轮过坎测试；下一步需把车放到坎前、有人看护、可立即断电，做一次短时前进测试。
+
+## 2026-11-04 16:25 · 0.95 固件橡胶轮过坎测试：未触发堵转，但 0.95 上限未被激励
+
+### 操作
+
+- 用户把车放到坎前、车轮着地、有人看护、可立即断电。
+- 运行：
+  `bench.py --action run --left 60 --right 60 --seconds 2`
+  CSV：`/tmp/base-095-bump-162406.csv`
+
+### 结果
+
+- `fault=0`，`stop_confirmed=True`；
+- 最后运动段均值左 71.99 / 右 69.78 mm/s；
+- 左右计数从约 `-3043/3345` 到 `-4273/4605`，换算约前进 **0.17 m**（0.2075 m/1468 counts）；
+- 最大 PWM 仅 **0.621**，没有到 0.95；这次是低速 60 mm/s，坎没有把轮子堵住，因此**没有验证 0.95 的实际负载扭矩**。
+- 0.95 的软件上限仍只由主机测试的 `>0.94 且 ≤0.95` 断言保证。
+
+### 当前状态
+
+- 导航栈停止，串口空闲；固件为 0.95 版本；12 V 已接、车已回到地面。
+- 没有再次触发过坎堵转，也没有清故障需求。
+
+### 下一步
+
+- 如果要复现用户之前“过坎堵转”的工况，应按导航巡航速度做一次 **200 mm/s、短时（≤2 s）** 的过坎测试；这次 60 mm/s 太轻。
+- 若 200 mm/s 仍不堵，说明该坎在橡胶轮+0.95 下可以通过，不需要再提高占空比；若堵，抓 CSV 看 PWM 是否到 0.95，再判断是扭矩还是抓地力/机械卡阻。
+
+## 2026-11-04 16:32 · 新增一键手动建图脚本
+
+### 仓库改动
+
+- 新增 `scripts/start_manual_mapping.sh`：
+  - 复用 `tools/start_mapping.sh --slam`：停旧栈、启动 SLAM Toolbox 建图、`real_mapping.rviz`、地图健康监视；
+  - 再调用已验证的 `scripts/start_keyboard_mapping.sh`：检查节点/故障后打开手动运动门，当前终端运行 `keyboard_teleop`；
+  - 键盘退出后打印 `.pgm/.yaml` 与 `.posegraph` 保存命令，建图栈保持运行。
+- 更新 `docs/hardware/keyboard-mapping.md`，补一键用法和安全提示。
+
+### 已验证
+
+- `bash -n scripts/start_manual_mapping.sh` 通过；
+- `./scripts/start_manual_mapping.sh --help` 正常；
+- 依赖脚本/节点存在：`tools/start_mapping.sh`、`scripts/start_keyboard_mapping.sh`、`keyboard_teleop`；
+- `git diff --check` 通过。
+
+### 未验证 / 注意
+
+- **没有实际执行完整脚本**：它必须在交互式终端运行，且会打开 `motion_enabled/manual_enabled`；不能从当前非交互工具会话里替用户开运动门。
+- 首次现场运行需确认：旧栈已停、雷达/IMU/ESP32 都在、`/base/fault=0`、场地空旷、12 V 可立即断开。
+
+### 当前状态
+
+- 导航/建图栈均停止，串口空闲；固件为 0.95 版本；
+- 未发运动命令，未打开运动门。
+
+### 用法
+
+```bash
+cd /home/manbaout/Company_Project/Four-wheel-robot
+./scripts/start_manual_mapping.sh
+```
+
+## 2026-11-04 16:37 · 建图 RViz 新增“保存地图(SLAM)”按钮
+
+### 原因
+
+手动建图保存要记两条长命令；现场希望在 RViz 里一键完成，且不能只存一半（只存栅格或只存位姿图）。
+
+### 仓库改动
+
+- 新增 `fwr_bringup/slam_map_save.py`：
+  - 服务 `/mapping/save_slam`（std_srvs/Trigger）；
+  - 一次调用先 `/slam_toolbox/serialize_map` 保存 `.posegraph/.data`，再 `nav2_map_server/map_saver_cli` 保存 `.pgm/.yaml`；
+  - 用文件存在性校验，任一失败返回 false 和错误信息；
+  - 保存目录参数 `map_dir` 默认读环境变量 `FWR_MAP_DIR`，否则 `~/robot_maps`。
+- `real_mapping.launch.py` 增加 `slam_map_save` 节点。
+- `fwr_rviz_nav/two_point_nav_panel.cpp`：建图面板新增 **“保存地图(SLAM)”** 按钮，先发零速并关运动门，再调用 `/mapping/save_slam`，状态栏显示保存路径/错误。
+- `scripts/start_manual_mapping.sh`：导出 `FWR_MAP_DIR=<源码 maps/>`，按钮默认保存到源码地图目录。
+- `docs/hardware/keyboard-mapping.md` 补按钮说明。
+
+### 已验证
+
+- `py_compile` 新节点/launch 通过。
+- `colcon build --packages-select fwr_bringup fwr_rviz_nav --symlink-install` 通过。
+- `fwr_rviz_nav` C++ 测试：**15 tests, 0 errors, 0 failures**。
+- 单独启动 `slam_map_save`：服务 `/mapping/save_slam` 出现；无 SLAM 时调用返回
+  `success=False, message='slam_toolbox 未运行，无法保存位姿图'`，失败路径可用。
+
+### 未验证
+
+- **没有在真实建图栈里点击按钮完成端到端保存**：当前导航/建图栈已停止，且需要现场悬空/有人看护；按钮、服务节点、命令链已编译和冒烟，尚未实测写出四个文件。
+- 未验证 RViz 面板按钮的实际点击布局；需要重启 RViz 后确认按钮可见。
+
+### 当前状态
+
+- 导航/建图栈停止，串口空闲；固件 0.95；
+- 未发运动命令，未打开运动门。
+
+### 下次手动建图验证
+
+```bash
+./scripts/start_manual_mapping.sh
+```
+
+在 RViz “导航/建图控制”面板点 **“保存地图(SLAM)”**，确认状态栏出现路径，并到
+`ros2_ws/src/fwr_bringup/maps/` 检查同名 `.posegraph/.data/.pgm/.yaml` 四个文件。
+
+## 2026-11-04 17:25 · 地图质量检查：real_map_manual_20261104_172107
+
+### 文件与尺寸
+
+- 文件：`ros2_ws/src/fwr_bringup/maps/real_map_manual_20261104_172107.{pgm,yaml,posegraph,data}`
+- 栅格：**928 × 605**，0.05 m/px，origin `(-32.3,-20.4)` → 世界范围
+  x[-32.3,14.1]、y[-20.4,9.85]，约 **46.4 × 30.2 m**
+- 像素分类：已知空闲 **45.8%**、未知 **51.2%**、占据 **3.0%**
+- `.posegraph` 20 MB、`.data` 8.3 MB，serialize 日志显示 `Finished serializing Mapper/Dataset`
+
+### 质量
+
+- 主墙线基本是单线，未看到之前那种整片双墙重影；
+- 左侧上方有放射状拖影、部分房间有散点/门框毛刺，属于局部伪影；
+- 已知自由区最大连通块约 25.3 万格，覆盖主要走廊/房间，未见大面积断裂；
+- 但未知区占一半，当前 `track_unknown_space:false` 会把未知当可通行，导航时不能把灰色区当安全区。
+
+### 导航可用性
+
+- 地图本身可以加载给 Nav2，但有两处前置问题：
+  1. `real_nav2.yaml` 的全局代价地图写死为 880×800、origin(-24,-32)，窗口 x[-24,20]、y[-32,8]；
+     当前地图左侧约 **8.3 m**、顶部约 **1.9 m** 在窗口外，左/上区域无法全局规划；
+  2. 未知区大，且 `track_unknown_space:false`；局部代价地图只能保证近场安全。
+- 结论：**中心/右侧已覆盖区域有导航使用价值**；要全图导航，需要先扩全局代价地图窗口或裁地图，并做一次无动力加载/规划测试。
+- 尚未启动导航栈实测这张图（避免与当前现场状态冲突）。
+
+### 扩建
+
+- 有 `.posegraph`，具备存档/合并基础；
+- 但直接 `map_file_name/map_start_pose` 续建在 2026-10-28 实测失败（残差 0.25–0.29 m，重影），当前 `real_mapping.launch.py` 也未暴露这两个参数；
+- 自动 `merge_maps_kinematic` 也失败过（两图坐标差约 90°）；
+- 结论：**不能把“在旧图上直接继续开”当成熟功能**。可靠做法仍是完整重扫；若必须增量，需要新区域 + 重叠段 + 人工对应点 `tools/stitch_maps.py --transform` 拼接并验证。
+
+### 这次为什么打滑后能马上纠正
+
+- 本次仍是 `async_slam_toolbox_node`，配置 `use_scan_matching: true`、`do_loop_closing: true`
+  （`config/real_slam.yaml`）；
+- 轮子打滑时编码器 odom 会瞬跳，但激光扫描匹配会把 `map→odom` 拉回，回环闭合再修累计漂移；
+- 橡胶轮 + 固件 `MAX_DUTY=0.95` 减少打滑/堵转，IMU/EKF 与手动直行 `heading_hold` 减少航向漂移，
+  `scan_mapping_filter` 去掉车体后向假点；
+- 没有新增独立的“打滑补偿算法”模块，核心仍是 SLAM Toolbox 的 scan matching + loop closing。
+
+## 2026-11-05 09:05 · 全图导航窗口调整与无动力验证
+
+### 改动
+
+`ros2_ws/src/fwr_bringup/config/real_nav2.yaml` 全局代价地图：
+
+| 参数 | 原值 | 新值 |
+|---|---:|---:|
+| `width` | 880 | **968** |
+| `height` | 800 | **645** |
+| `origin_x` | -24.0 | **-33.3** |
+| `origin_y` | -32.0 | **-21.4** |
+
+目标是覆盖 `real_map_manual_20261104_172107` 的
+x[-32.30,14.10]、y[-20.40,9.85]（约 1 m 余量）。
+只改这四个值；AMCL、局部代价地图、膨胀、速度参数均未动。
+
+### 验证
+
+- `colcon build --packages-select fwr_bringup --symlink-install` 通过；
+- `test_real_nav2_config.py`：**6 passed**；
+- 用该地图启动无动力导航栈：
+  - `map_server` / `amcl` / `bt_navigator` / `planner_server` / `controller_server` 全部 active；
+  - AMCL 自动播种位姿约 `(6.23,-9.77)`；
+  - `/global_costmap/costmap` **实际为 928×605 @ origin(-32.3,-20.4)**；
+  - 只读 `ComputePathToPose` 到最左侧/顶部三个目标全部成功：
+    - `(-28,8)`：977 点，51.41 m；
+    - `(-25,5)`：923 点，48.86 m；
+    - `(-30,2)`：1011 点，53.67 m。
+
+### 重要发现
+
+配置的 968×645 并没有成为实际代价图尺寸；`StaticLayer` 启动时仍然
+`Resizing costmap to 928 X 605`，即**按地图尺寸自动 resize**。所以：
+
+- 实际全局代价图本次是整张地图范围，三个远端目标规划成功；
+- 之前仅按 880×800 固定窗口推断“左侧被裁”是不准确的；
+- 968×645 这组值目前保留为更大上界，但真正覆盖全图的是 StaticLayer 的地图尺寸。
+
+### 风险 / 未验证
+
+- 地图未知区占 **51.2%**，且 `track_unknown_space:false`；规划成功不代表路径没有穿过灰色未知区，正式开动前必须在 RViz 里叠加 `/map` 与 `/plan` 检查路径。
+- 只做了**只读规划**，没有点“开始导航”、没有让车移动；实际定位/跟踪/避障仍需有人看护现场验证。
+- 验证结束后已停掉 35 个进程，无 base_bridge 残留；当前无导航/建图栈。
+
+### 下一步
+
+现场启动：
+
+```bash
+./scripts/run_navigation.sh \
+  --map /home/manbaout/Company_Project/Four-wheel-robot/ros2_ws/src/fwr_bringup/maps/real_map_manual_20261104_172107.yaml
+```
+
+先看 AMCL 位姿和路径是否穿未知区，再从短目标开始试；无动力阶段不要点“开始导航”。
+
+## 2026-11-05 09:27 · RViz 路径线宽加粗并重建
+
+### 改动
+
+- `config/real_localization.rviz`：
+  - “全局路径（避障重规划）”`Line Width: 0.03 → 0.12`；
+  - “两点规划预览”`Line Width: 0.05 → 0.10`。
+- `config/real_mapping.rviz`：
+  - “导航路径 /plan” `0.06 → 0.12`；
+  - “局部规划路径” `0.05 → 0.10`；
+  - “沿墙规划路径” `0.06 → 0.10`。
+
+### 验证
+
+- `colcon build --packages-select fwr_bringup --symlink-install` 通过；
+- 安装目录里的配置已确认是新值；
+- 启动单一无动力导航栈（地图 `real_map_manual_20261104_172107`）：
+  - 只有一套 `run_navigation.launch.py`，RViz PID `18830`；
+  - `map_server`/`amcl`/`bt_navigator`/`planner_server` 全部 active；
+  - AMCL 位姿约 `(5.79,-10.07)`；
+  - `motion_enabled=false`，未点“开始导航”、未发运动命令。
+
+### 备注
+
+- 之前发现两套旧导航栈残留（71 个进程），已全部停止；当前只有一套。
+- 用户可以在 RViz 用 Publish Point 选一个点看加粗后的预览线；不要点“开始导航”。

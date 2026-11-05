@@ -83,6 +83,7 @@ protected:
     // 2026-10-31：建图时现场需要一个「马上停」的按钮（沿墙建图是自动跑的）
     map_start_button_ = new QPushButton("开始建图(自动行走)", this);
     map_stop_button_ = new QPushButton("■ 停止建图(急停)", this);
+    save_map_button_ = new QPushButton("保存地图(SLAM)", this);
     start_button_->setEnabled(false);
     preview_button_->setEnabled(false);
     for (auto * widget : {start_label_, goal_label_, status_label_}) {
@@ -101,6 +102,7 @@ protected:
     layout->addWidget(reset_button_);
     layout->addWidget(map_start_button_);
     layout->addWidget(map_stop_button_);
+    layout->addWidget(save_map_button_);
     layout->addStretch();
 
     auto qos = rclcpp::QoS(1).transient_local();
@@ -114,6 +116,9 @@ protected:
     base_param_client_ =
       std::make_shared<rclcpp::AsyncParametersClient>(node_, "/base_bridge");
     mapping_save_client_ = node_->create_client<std_srvs::srv::Trigger>("/mapping/save");
+    // SLAM Toolbox 一键保存：同时写 posegraph 和栅格图。Cartographer 的
+    // /mapping/save 不适用于当前手动建图链路。
+    slam_save_client_ = node_->create_client<std_srvs::srv::Trigger>("/mapping/save_slam");
     // 2026-11-03：全局"建图运行中"开关。停止建图时必须让探索器/监督器一起停，
     // 否则它们会自己把运动门重新打开 → 车又动起来（曾因此扯断 USB 线）。
     // 用 transient_local，后启动的节点也能收到当前状态。
@@ -232,6 +237,32 @@ protected:
           if (response) {
             status_label_->setText(
               QString::fromStdString("地图已保存：" + response->message));
+          }
+        });
+      (void)future;
+    });
+    connect(save_map_button_, &QPushButton::clicked, this, [this]() {
+      // 先把手动/自动运动都停住，再保存；避免存到运动中的瞬时地图。
+      if (manual_vel_pub_) {
+        manual_vel_pub_->publish(geometry_msgs::msg::Twist());
+      }
+      set_base_gates(false);
+      if (!slam_save_client_ || !slam_save_client_->service_is_ready()) {
+        status_label_->setText(
+          "保存失败：/mapping/save_slam 不可用；请确认当前是 real_mapping.launch.py");
+        return;
+      }
+      status_label_->setText("已停车，正在保存 SLAM 地图（posegraph + 栅格）…");
+      auto future = slam_save_client_->async_send_request(
+        std::make_shared<std_srvs::srv::Trigger::Request>(),
+        [this](rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture f) {
+          const auto response = f.get();
+          if (response && response->success) {
+            status_label_->setText(
+              QString::fromStdString("地图已保存：" + response->message));
+          } else {
+            status_label_->setText(QString::fromStdString(
+              "保存失败：" + (response ? response->message : "无响应")));
           }
         });
       (void)future;
@@ -1032,9 +1063,11 @@ private:
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr manual_vel_pub_;
   std::shared_ptr<rclcpp::AsyncParametersClient> base_param_client_;
   rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr mapping_save_client_;
+  rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr slam_save_client_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr mapping_run_pub_;
   QPushButton * map_start_button_ = nullptr;
   QPushButton * map_stop_button_ = nullptr;
+  QPushButton * save_map_button_ = nullptr;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr ready_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr state_sub_;
   PointSelection points_;

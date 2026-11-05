@@ -67,7 +67,7 @@ Visualization Manager:
       Enabled: true
       Color: 40; 230; 100
       Line Style: Lines
-      Line Width: 0.05
+      Line Width: 0.10
       Topic:
         Depth: 5
         Durability Policy: Transient Local
@@ -80,7 +80,7 @@ Visualization Manager:
       Enabled: true
       Color: 255; 140; 0
       Line Style: Lines
-      Line Width: 0.03
+      Line Width: 0.12
       Topic:
         Depth: 5
         Durability Policy: Volatile
