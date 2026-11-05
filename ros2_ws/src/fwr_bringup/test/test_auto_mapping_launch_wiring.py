@@ -249,3 +249,19 @@ def test_panel_space_toggles_navigation():
     assert 'toggle_navigation_by_space' in panel
     assert 'Qt::Key_Space' in panel
     assert 'Qt::ApplicationShortcut' in panel, '焦点在 3D 视图时也要生效'
+
+
+def test_panel_resume_keeps_multi_point_routes():
+    """多点任务"继续"必须重发多点，不能退化成"只发终点"。
+
+    2026-11-05 现场：按继续后只派 Fixed goal leg 1/1（终点），而终点恰在 0.4 m 容差内
+    → Nav2 瞬间判到达 → 一按继续任务就结束。修复：按任务类型重发，多点从离车最近的点开始。
+    """
+    panel = (ROOT.parent / 'fwr_rviz_nav' / 'src' / 'two_point_nav_panel.cpp').read_text()
+    assert 'resume_multi_' in panel
+    assert 'resume_multi_ && points_.size() >= 3' in panel
+    # 继续多点时必须走多点服务，而不是单点服务
+    seg = panel[panel.index('resume_multi_ && points_.size() >= 3'):
+                panel.index('resume_mode_ && resume_two_point_')]
+    assert 'multi_nav_client_' in seg
+    assert 'real_single_goal_client_' not in seg, '多点继续不能走单点服务'

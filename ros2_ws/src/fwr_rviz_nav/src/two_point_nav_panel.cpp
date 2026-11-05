@@ -938,6 +938,9 @@ private:
       resume_goal_y_ = points_.goal()->y;
       has_resume_goal_ = true;
       resume_two_point_ = !single;   // 两点任务被中断 → 继续时仍走两点流程
+      // 2026-11-05：多点任务（≥3 点）继续时必须重发多点。原来掉进"单点"分支只发终点，
+      // 终点往往就在 0.4 m 容差内 → Nav2 瞬间判到达 → 一按继续任务就结束。
+      resume_multi_ = (!single && points_.size() >= 3);
     }
     status_label_->setText(single ?
       "已开始：从当前位置前往终点；停止可按下方按钮" :
@@ -958,6 +961,41 @@ private:
   void send_real_navigation_request(unsigned long revision)
   {
     if (revision != selection_revision_) {return;}
+    if (resume_mode_ && resume_multi_ && points_.size() >= 3) {
+      if (!multi_nav_client_ || !multi_nav_client_->service_is_ready()) {
+        fail_real_start("实车多点导航服务尚未就绪，已关闭运动门", revision);
+        return;
+      }
+      const auto current = wait_map_pose();
+      const auto & pts = points_.points();
+      std::size_t first = 0;
+      if (current) {
+        double best = 1e18;
+        for (std::size_t i = 0; i < pts.size(); ++i) {
+          const double d = std::hypot(pts[i].x - current->x, pts[i].y - current->y);
+          if (d < best) {best = d; first = i;}
+        }
+      }
+      if (pts.size() >= 2 && pts.size() - first < 2) {first = pts.size() - 2;}
+      auto request = std::make_shared<MultiRealGoal::Request>();
+      for (std::size_t i = first; i < pts.size(); ++i) {
+        request->xs.push_back(pts[i].x);
+        request->ys.push_back(pts[i].y);
+      }
+      status_label_->setText(QString("继续导航：从第 %1 个点接着走（共 %2 点）…")
+        .arg(first + 1).arg(pts.size()));
+      multi_nav_client_->async_send_request(request, [this, revision](
+        rclcpp::Client<MultiRealGoal>::SharedFuture future) {
+        if (revision != selection_revision_) {return;}
+        try {
+          const auto response = future.get();
+          handle_real_goal_response(response->accepted, response->reason, revision, false);
+        } catch (const std::exception & error) {
+          fail_real_start(QString("继续多点导航失败：%1").arg(error.what()), revision);
+        }
+      });
+      return;
+    }
     if (resume_mode_ && resume_two_point_ && points_.two_point() && points_.start()) {
       // 继续一个被中断的两点任务：重发「起点→终点」，
       // explorer 会从**当前位置**规划到起点，两条腿都不丢。
@@ -1184,6 +1222,7 @@ private:
   // 2026-11-02：中止的若是**两点任务**，继续时必须重发两点服务（先去起点再到终点）。
   // 原实现只要 resume 就走单点客户端，直接奔终点，把"先去起点"这一腿丢了。
   bool resume_two_point_ = false;
+  bool resume_multi_ = false;
   bool has_resume_goal_ = false;
   double resume_goal_x_ = 0.0;
   double resume_goal_y_ = 0.0;
