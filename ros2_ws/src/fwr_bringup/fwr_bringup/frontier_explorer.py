@@ -50,6 +50,9 @@ class FrontierExplorer(Node):
         # 在 260° 视野下永远清不掉），最终所有目标都规划失败、只能重启栈。
         # 连续失败到阈值就主动清空一次代价地图，让规划恢复。
         self.declare_parameter('clear_costmap_after_failures', 2)
+        # 2026-11-05：全局障碍层保留（否则新障碍不会被绕行），但旧的障碍标记在 260° 视野下
+        # 清不掉 → 周期性清空一次；清空后下一帧扫描会立刻重新标记当前真实障碍。
+        self.declare_parameter('costmap_clear_period_s', 10.0)
         self.declare_parameter('static_map', False)
         self._static_map = bool(self.get_parameter('static_map').value)
         self._trial_started = None
@@ -93,6 +96,7 @@ class FrontierExplorer(Node):
         self._stuck_retries = 0
         self._consecutive_failures = 0
         self._clear_clients = []
+        self._last_costmap_clear = 0.0
         self._cancel_after_accept = False
         self._cancel_future = None
         self._status = 'idle'
@@ -491,6 +495,18 @@ class FrontierExplorer(Node):
 
     def _tick(self):
         now = time.monotonic()
+        period = float(self.get_parameter('costmap_clear_period_s').value)
+        if period > 0 and now - self._last_costmap_clear > period:
+            self._last_costmap_clear = now
+            asked = 0
+            for client in getattr(self, '_clear_clients', ()):
+                if client.service_is_ready():
+                    client.call_async(ClearEntireCostmap.Request())
+                    asked += 1
+            if asked:
+                self.get_logger().debug(
+                    '周期性清空代价地图（%.0f s，%d 个服务）以清除陈旧障碍标记' % (
+                        period, asked))
         if trial_duration_expired(self._trial_started, now,
                                   float(self.get_parameter('max_trial_duration_s').value),
                                   self._sm.fixed_goal):

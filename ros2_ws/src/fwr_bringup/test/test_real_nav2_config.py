@@ -53,19 +53,18 @@ def test_costmaps_use_real_lidar_and_no_voxel():
     assert local['obstacle_layer']['scan']['topic'] == '/scan_mapping'
 
 
-def test_global_costmap_has_no_obstacle_layer():
-    """2026-11-05（用户批准）：全局代价地图**不能**再挂障碍层。
+def test_global_costmap_keeps_obstacle_layer_with_periodic_clearing():
+    """全局代价地图必须保留障碍层（否则新障碍不会被绕行）。
 
-    障碍层用 /scan_mapping 实时标记，而雷达视野只有 260°（后方 ±50° 屏蔽），
-    车身后方的标记永远无法被后续扫描清除 → 越积越多 → 目标格被幽灵障碍膨胀成
-    99 分 → "单点规划失败、只能清空代价地图"。实测去掉后致命格幽灵数 = 0。
-    动态障碍由局部代价地图 + collision_monitor 负责。
+    2026-11-05：为了消除"幽灵障碍"曾去掉它，结果路上突然出现的障碍物不会被规划器看到，
+    车只会被 front_stop 停住干等。改成：保留障碍层 + 周期性清空（见 frontier_explorer
+    的 costmap_clear_period_s）来抑制陈旧标记。
     """
     data = yaml.safe_load((ROOT / 'config' / 'real_nav2.yaml').read_text())
     glob = data['global_costmap']['global_costmap']['ros__parameters']
-    assert 'obstacle_layer' not in glob['plugins'], (
-        '全局代价地图挂障碍层会被陈旧标记污染（见上）')
-    assert glob['plugins'][:2] == ['static_layer'] or 'static_layer' in glob['plugins']
+    assert 'obstacle_layer' in glob['plugins']
+    assert 'inflation_layer' in glob['plugins']
+    assert glob['obstacle_layer']['scan']['topic'] == '/scan_mapping'
 
 
 def test_real_launch_keeps_motion_gated_and_one_slam_owner():

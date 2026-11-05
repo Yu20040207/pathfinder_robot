@@ -265,3 +265,18 @@ def test_panel_resume_keeps_multi_point_routes():
                 panel.index('resume_mode_ && resume_two_point_')]
     assert 'multi_nav_client_' in seg
     assert 'real_single_goal_client_' not in seg, '多点继续不能走单点服务'
+
+
+def test_global_costmap_keeps_obstacle_layer_for_dynamic_detours():
+    """全局代价地图必须保留障碍层，否则路上新出现的障碍不会被绕行。
+
+    2026-11-05 现场："路径上突然出现障碍物，车不会绕行" —— 因为全局层只有静态墙，
+    规划器看不到新障碍，只会被 front_stop 停住。去除它曾解决"幽灵标记"，但那是
+    通过周期性清空（costmap_clear_period_s）解决的，不能靠删掉障碍层。
+    """
+    data = yaml.safe_load((ROOT / 'config' / 'real_nav2.yaml').read_text())
+    glob = data['global_costmap']['global_costmap']['ros__parameters']
+    assert 'obstacle_layer' in glob['plugins'], '去掉障碍层 → 动态障碍不会被绕行'
+    assert 'static_layer' in glob['plugins'] and 'inflation_layer' in glob['plugins']
+    src = (ROOT / 'fwr_bringup' / 'frontier_explorer.py').read_text()
+    assert 'costmap_clear_period_s' in src, '需要周期性清空来抑制陈旧标记'
