@@ -8,6 +8,7 @@ import yaml
 import tf2_ros
 import rclpy
 from rclpy.node import Node
+from geometry_msgs.msg import PoseWithCovarianceStamped
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from nav_msgs.msg import OccupancyGrid
 from sensor_msgs.msg import LaserScan
@@ -19,6 +20,10 @@ from .auto_seed_core import base_pose_from_laser, find_best_pose, refine_pose
 class AutoInitialPose(Node):
     def __init__(self):
         super().__init__('auto_initial_pose')
+        # 2026-11-05：用户在 RViz 里用 2D Pose Estimate 手动定位后，自动播种必须让位，
+        # 否则它算完（几秒后）会把用户改的位置覆盖回去 —— 现象是"车回到另一个位置一次"。
+        self.declare_parameter('respect_manual_pose', True)
+        self.declare_parameter('initialpose_topic', '/initialpose')
         self.declare_parameter('scan_topic', '/scan_mapping')
         self.declare_parameter('max_range_m', 8.0)
         # 本图有重复走廊：错误盆地也能到 0.06–0.08。真实位姿通常 0.015–0.035，
@@ -40,17 +45,27 @@ class AutoInitialPose(Node):
         self._scan = None
         self._client = self.create_client(SetInitialPose, '/set_initial_pose')
         self._future = None
+        self.create_subscription(PoseWithCovarianceStamped,
+                                 str(self.get_parameter('initialpose_topic').value),
+                                 self._on_initialpose, 10)
         self.create_subscription(OccupancyGrid, '/map', self._on_map, map_qos)
         self.create_subscription(LaserScan, str(self.get_parameter('scan_topic').value),
                                  self._on_scan, scan_qos)
         self.create_timer(0.5, self._tick)
         self._started = time.monotonic()
         self._seeded = False
+        self._manual_pose_seen = False
         self._gave_up = False
         self._tf_buffer = tf2_ros.Buffer()
         self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
         self._tf_ok_at = time.monotonic()
         self.get_logger().info('auto initial pose: waiting for map and scan')
+
+    def _on_initialpose(self, _msg):
+        self._manual_pose_seen = True
+        if not self._seeded:
+            self.get_logger().info(
+                '用户已手动设置位姿 → 自动播种放弃（不再覆盖）')
 
     def _on_map(self, msg):
         self._map = msg
@@ -71,6 +86,10 @@ class AutoInitialPose(Node):
             return
         if self._gave_up:
             return
+        if (bool(self.get_parameter('respect_manual_pose').value)
+                and self._manual_pose_seen):
+            self._gave_up = True
+            return
         if self._future is not None:
             if not self._future.done():
                 # 服务端没激活时 call_async 的 future 可能永远不完成，超时后重试。
@@ -87,6 +106,7 @@ class AutoInitialPose(Node):
                 else:
                     self.get_logger().info('auto initial pose: AMCL seeded')
                     self._seeded = True
+                    self._tf_ok_at = time.monotonic()   # 防止看门狗立刻误判
                 self._future = None
             return
         if self._map is None or self._scan is None:

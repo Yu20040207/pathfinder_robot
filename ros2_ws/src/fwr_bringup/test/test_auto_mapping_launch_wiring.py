@@ -168,3 +168,13 @@ def test_trail_reverser_is_wired_and_off_by_default():
     assert "'/base/rear_blocked'" in src, '必须用车尾超声拦截'
     assert 'target_behind' in src, '必须沿原路后退（不是盲目直退）'
     assert 'reverse_speed_mps' in src
+
+
+def test_auto_initial_pose_yields_to_manual_pose():
+    """用户手动设位姿后，自动播种必须让位（否则几秒后会把车挪回去）。"""
+    src = (ROOT / 'fwr_bringup' / 'auto_initial_pose.py').read_text()
+    assert 'respect_manual_pose' in src
+    assert '/initialpose' in src
+    assert '_manual_pose_seen' in src
+    # 播种成功时要重置看门狗时间戳，避免刚播完就误判"丢失定位"
+    assert '_tf_ok_at = time.monotonic()   # 防止看门狗立刻误判' in src
