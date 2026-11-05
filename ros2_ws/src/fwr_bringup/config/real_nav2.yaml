@@ -295,9 +295,15 @@ global_costmap:
       # 「路径穿墙」的正确解法是**把地图建完整**（or map_seal 把墙缝封住），
       # 而不是让规划器害怕未知。
       track_unknown_space: false
+      # 2026-11-05（用户批准）：全局代价地图**去掉障碍层**。
+      # 实测：障碍层用 /scan_mapping 实时标记，而雷达视野只有 260°（后方 ±50° 屏蔽），
+      # 车身后方的标记永远无法被后续扫描清除 → 越积越多 →
+      # 代价地图致命格中 82% 是幽灵（真墙 269 / 幽灵 1231）→ 全图无法规划、
+      # 表现为"走到一半到处规划失败、只能清空代价地图或重启"。
+      # 改为标准做法：全局=静态地图+膨胀（规划用），动态障碍由**局部代价地图**
+      # （保留障碍层）+ collision_monitor（front_stop 0.32~0.38 m）负责。
       plugins:
       - static_layer
-      - obstacle_layer
       - inflation_layer
       obstacle_layer:
         plugin: nav2_costmap_2d::ObstacleLayer
