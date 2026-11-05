@@ -263,7 +263,7 @@ class FrontierExplorer(Node):
         self._reverse_episodes += 1
         limit = int(self.get_parameter('max_reverse_episodes_per_leg').value)
         self.get_logger().warn(
-            '后退让位结束 → 恢复任务（本点第 %d/%d 次让位）' % (
+            '后退让位结束 → 恢复任务（本点第 %d 次让位，上限 %d）' % (
                 self._reverse_episodes, limit))
         if self._reverse_episodes > limit:
             self._skip_current_target(
@@ -275,12 +275,16 @@ class FrontierExplorer(Node):
         """跳过当前目标点，继续后面的点；没有后续就结束任务。"""
         if self._multi_points:
             pose_xy = self._odom_in_map(self._odom) if self._odom is not None else None
-            if pose_xy is not None and len(self._multi_points) > 1:
-                rx = pose_xy.pose.pose.position.x
-                ry = pose_xy.pose.pose.position.y
-                near = min(range(len(self._multi_points)),
-                           key=lambda i: math.hypot(self._multi_points[i][0] - rx,
-                                                    self._multi_points[i][1] - ry))
+            if len(self._multi_points) > 1:
+                if pose_xy is not None:
+                    rx = pose_xy.pose.pose.position.x
+                    ry = pose_xy.pose.pose.position.y
+                    near = min(range(len(self._multi_points)),
+                               key=lambda i: math.hypot(self._multi_points[i][0] - rx,
+                                                        self._multi_points[i][1] - ry))
+                else:
+                    # 拿不到位姿时丢掉**最前面**那个点（就是正在去的那个），不要整任务结束
+                    near = 0
                 dropped = self._multi_points.pop(near)
                 self.get_logger().warn(
                     '%s → 跳过途经点 (%.2f,%.2f)，剩余 %d 点' % (
