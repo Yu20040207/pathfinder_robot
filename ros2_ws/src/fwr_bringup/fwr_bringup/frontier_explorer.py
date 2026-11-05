@@ -53,6 +53,10 @@ class FrontierExplorer(Node):
         # 2026-11-05：全局障碍层保留（否则新障碍不会被绕行），但旧的障碍标记在 260° 视野下
         # 清不掉 → 周期性清空一次；清空后下一帧扫描会立刻重新标记当前真实障碍。
         self.declare_parameter('costmap_clear_period_s', 10.0)
+        # 2026-11-05（用户要求）：后退让位期间**暂停**任务而不是中止；
+        # 同一个目标点让位超过这个次数 → 跳过它，去下一个点（防死胡同死循环）。
+        self.declare_parameter('reverse_pause_enabled', True)
+        self.declare_parameter('max_reverse_episodes_per_leg', 2)
         self.declare_parameter('static_map', False)
         self._static_map = bool(self.get_parameter('static_map').value)
         self._trial_started = None
@@ -97,6 +101,9 @@ class FrontierExplorer(Node):
         self._consecutive_failures = 0
         self._clear_clients = []
         self._last_costmap_clear = 0.0
+        self._reverse_active = False
+        self._paused_for_reverse = False
+        self._reverse_episodes = 0
         self._cancel_after_accept = False
         self._cancel_future = None
         self._status = 'idle'
@@ -115,6 +122,7 @@ class FrontierExplorer(Node):
                     '/local_costmap/local_costmap/clear_entirely_local_costmap'):
             self._clear_clients.append(self.create_client(ClearEntireCostmap, srv))
         self._stop_box_pts = 0
+        self.create_subscription(Bool, '/reverse/active', self._on_reverse_active, 10)
         self.create_subscription(LaserScan, '/scan', self._on_scan_stopbox,
                                  qos_profile_sensor_data)
         # 监控层是否在压零（用于识别 stop_pub_timeout 残留）
@@ -226,6 +234,80 @@ class FrontierExplorer(Node):
     def _on_imu(self, msg):
         if self._stamp_fresh(msg, .25):
             self._imu_at = time.monotonic()
+
+    def _on_reverse_active(self, msg: Bool) -> None:
+        """后退让位开始→暂停任务；结束→恢复；同一点超限→跳过该点。
+
+        原来让位一旦打开手动通道，explorer 就**中止整个任务**（现场：一按开始就被中止）。
+        现在改为暂停：任务状态机冻结、不取消不改状态；让位结束后继续原目标。
+        连续让位说明这个点进不去（死胡同），超过 max_reverse_episodes_per_leg 次就跳过它。
+        """
+        if not bool(self.get_parameter('reverse_pause_enabled').value):
+            return
+        now_active = bool(msg.data)
+        if now_active and not self._reverse_active:
+            self._reverse_active = True
+            if self._sm.enabled and not self._paused_for_reverse:
+                self._paused_for_reverse = True
+                self.get_logger().warn(
+                    '后退让位开始 → 任务暂停（不中止）；当前目标保持')
+            return
+        if now_active or not self._reverse_active:
+            return
+        self._reverse_active = False
+        if not self._paused_for_reverse:
+            return
+        self._paused_for_reverse = False
+        self._reverse_episodes += 1
+        limit = int(self.get_parameter('max_reverse_episodes_per_leg').value)
+        self.get_logger().warn(
+            '后退让位结束 → 恢复任务（本点第 %d/%d 次让位）' % (
+                self._reverse_episodes, limit))
+        if self._reverse_episodes > limit:
+            self._skip_current_target(
+                '同一个点连续让位 %d 次（死胡同）' % self._reverse_episodes)
+        elif self._status in ('canceled', 'aborted', 'failed', 'idle', 'succeeded'):
+            self._status = 'idle'          # 让状态机重新派发当前这一段
+
+    def _skip_current_target(self, reason: str) -> None:
+        """跳过当前目标点，继续后面的点；没有后续就结束任务。"""
+        if self._multi_points:
+            pose_xy = self._odom_in_map(self._odom) if self._odom is not None else None
+            if pose_xy is not None and len(self._multi_points) > 1:
+                rx = pose_xy.pose.pose.position.x
+                ry = pose_xy.pose.pose.position.y
+                near = min(range(len(self._multi_points)),
+                           key=lambda i: math.hypot(self._multi_points[i][0] - rx,
+                                                    self._multi_points[i][1] - ry))
+                dropped = self._multi_points.pop(near)
+                self.get_logger().warn(
+                    '%s → 跳过途经点 (%.2f,%.2f)，剩余 %d 点' % (
+                        reason, dropped[0], dropped[1], len(self._multi_points)))
+                if len(self._multi_points) < 2:
+                    self.get_logger().warn('剩余不足 2 点 → 结束任务')
+                    self._multi_points = None
+                    self._sm.stop()
+                    return
+                self._status = 'idle'
+                return
+            self.get_logger().warn('%s → 无可跳过的点，结束任务' % reason)
+            self._multi_points = None
+            self._sm.stop()
+            return
+        if self._fixed_goals:
+            if self._sm.fixed_leg_index + 1 >= len(self._fixed_goals):
+                self.get_logger().warn('%s → 已是最后一段，结束任务' % reason)
+                self._sm.stop()
+                return
+            self._sm.skip_leg()
+            self.get_logger().warn(
+                '%s → 跳过第 %d 段，继续第 %d/%d 段' % (
+                    reason, self._sm.fixed_leg_index,
+                    self._sm.fixed_leg_index + 1, len(self._fixed_goals)))
+            self._status = 'idle'
+            return
+        self.get_logger().warn('%s → 没有可跳过的目标，结束任务' % reason)
+        self._sm.stop()
 
     def _on_manual(self, msg):
         was = self._manual
@@ -498,6 +580,9 @@ class FrontierExplorer(Node):
         period = float(self.get_parameter('costmap_clear_period_s').value)
         # 只在**空闲**时清：导航中清空会在重规划那一帧把动态障碍一起清掉，
         # 规划器可能因此"看见空地"直接穿过去（2026-11-05 权衡）。
+        if self._paused_for_reverse:
+            # 让位后退期间不推进任务（不派发、不取消、不判失败）
+            return
         idle_now = (self._handle is None
                     and self._status in ('idle', 'succeeded', 'stopped', 'canceled'))
         if period > 0 and idle_now and now - self._last_costmap_clear > period:

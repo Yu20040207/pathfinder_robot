@@ -53,6 +53,18 @@ class ExplorationStateMachine:
         self.enabled = True
         self._stopping = False
 
+    def skip_leg(self) -> bool:
+        """跳过当前段（死胡同等）：把派发计数推进到下一段。返回是否还有下一段。
+
+        只有顺序执行（fixed_legs > 1）才有意义；多段全跳过则返回 False 由调用方收尾。
+        """
+        if not self.fixed_goal:
+            return False
+        # fixed_leg_index = max(0, dispatched-1)：还没派发过时 dispatched=0 也指向第 1 段，
+        # 所以先把 dispatched 抬到至少 1，再 +1 才能真正跳到下一段。
+        self._fixed_dispatched = max(self._fixed_dispatched, 1) + 1
+        return self.fixed_leg_index < self._fixed_legs
+
     def stop(self):
         self.enabled = False
         self._stopping = True

@@ -90,3 +90,18 @@ def test_stop_reversing_as_soon_as_one_side_is_wide():
     """后退过程中任意一侧变宽 ≥ turn_clear_m 就结束（有一边能转就够了）。"""
     assert tc.should_stop(side_left_m=0.2, side_right_m=0.95, rear_blocked=False,
                           reversed_m=0.2, elapsed_s=1.0) == (True, 'enough-room')
+
+
+def test_reverse_pause_skips_waypoint_after_limit():
+    """让位暂停/恢复/跳点的语义（用户要求：同一目标点最多让位 2 次，之后跳过）。"""
+    from fwr_bringup.exploration_core import ExplorationStateMachine
+
+    sm = ExplorationStateMachine()
+    sm.start_fixed(legs=3)
+    assert sm.fixed_leg_index == 0
+    assert sm.skip_leg() is True
+    assert sm.fixed_leg_index == 1, '跳过一次应指向第 2 段'
+    assert sm.skip_leg() is True
+    assert sm.fixed_leg_index == 2
+    assert sm.skip_leg() is False, '最后一段跳过后没有后续'
+    assert sm.fixed_leg_index >= 3, '越过最后一段后不再指向有效段'

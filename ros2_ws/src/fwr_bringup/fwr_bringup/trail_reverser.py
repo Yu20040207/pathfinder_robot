@@ -61,6 +61,9 @@ class TrailReverser(Node):
         self._last_end = 0.0
 
         self._cmd = self.create_publisher(Twist, '/cmd_vel_manual', 10)
+        # 2026-11-05：广播"正在让位后退"。frontier_explorer 据此**暂停**任务（而不是中止），
+        # 退完再恢复；同一个点让位次数超限则跳过该点（用户要求）。
+        self._active_pub = self.create_publisher(Bool, '/reverse/active', 10)
         self._params = self.create_client(SetParameters, '/base_bridge/set_parameters')
         self.create_subscription(Odometry, '/odom', self._on_odom, 20)
         self.create_subscription(LaserScan, '/scan', self._on_scan, qos_profile_sensor_data)
@@ -167,6 +170,7 @@ class TrailReverser(Node):
         self._start_pose = self._pose
         self._reversed_m = 0.0
         self._set_manual(True)
+        self._active_pub.publish(Bool(data=True))
         self.get_logger().warn(
             '前方被挡且左右都不足 %.1f m（实测 左 %.2f / 右 %.2f m）→ 开始沿原路后退' % (
                 float(self.get_parameter('side_tight_m').value), left, right))
@@ -193,9 +197,13 @@ class TrailReverser(Node):
         cmd.angular.z = tc.reverse_steering(x, y, yaw, tgt[0], tgt[1])
         self._cmd.publish(cmd)
 
+    def _publish_inactive(self) -> None:
+        self._active_pub.publish(Bool(data=False))
+
     def _finish(self, why: str, side: float) -> None:
         self._stop_cmd()
         self._set_manual(False)
+        self._publish_inactive()
         self._reversing = False
         self._last_end = time.monotonic()
         self._blocked_since = None
