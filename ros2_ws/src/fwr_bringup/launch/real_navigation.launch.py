@@ -51,6 +51,9 @@ def generate_launch_description():
         DeclareLaunchArgument('load_state', default_value=''),
         # 自动建图时不需要 frontier_explorer（它抢发 /explore/state=stopped 会解除授权）
         DeclareLaunchArgument('start_explorer', default_value='true'),
+        # 2026-11-05：后退让位（前方被挡 + 左右都 <0.5 m 时沿原路后退到够转弯）。
+        # 默认 false，实车验证通过后再改默认值。
+        DeclareLaunchArgument('trail_reverser', default_value='false'),
         # amcl（地图图片）或 slam（slam_toolbox localization + posegraph）
         DeclareLaunchArgument('localizer', default_value='amcl'),
         DeclareLaunchArgument('map', default_value=str(share / 'maps' / 'real_map_merged.yaml')),
@@ -81,6 +84,10 @@ def generate_launch_description():
                               'map': LaunchConfiguration('map'),
                               'localizer': LaunchConfiguration('localizer')}.items()),
         # Navigation lifecycle stays inactive until map/TF/scan/drive gates are verified.
+        Node(package='fwr_bringup', executable='trail_reverser',
+             name='trail_reverser', output='screen',
+             condition=IfCondition(LaunchConfiguration('trail_reverser')),
+             parameters=[{'use_sim_time': use_sim_time}]),
         Node(package='fwr_bringup', executable='frontier_explorer',
              name='frontier_explorer', output='screen',
              condition=IfCondition(LaunchConfiguration('start_explorer')),

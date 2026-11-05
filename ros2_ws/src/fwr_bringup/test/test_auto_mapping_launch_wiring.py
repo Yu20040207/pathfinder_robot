@@ -156,3 +156,15 @@ def test_stuck_guard_recovers_base_faults_without_motion():
     # 复位前必须把所有运动门关掉（固件要求）
     assert "motion_enabled', False" in src and "manual_enabled', False" in src
     assert 'Twist' not in src, '守卫节点仍然不得直接发速度指令'
+
+
+def test_trail_reverser_is_wired_and_off_by_default():
+    """后退让位：默认关闭、沿轨迹退、车尾拦截优先。"""
+    launch = NAV_LAUNCH.read_text()
+    assert "DeclareLaunchArgument('trail_reverser', default_value='false')" in launch
+    assert "executable='trail_reverser'" in launch
+    src = (ROOT / 'fwr_bringup' / 'trail_reverser.py').read_text()
+    assert '/cmd_vel_manual' in src, '倒车要走手动通道，车尾联锁才生效'
+    assert "'/base/rear_blocked'" in src, '必须用车尾超声拦截'
+    assert 'target_behind' in src, '必须沿原路后退（不是盲目直退）'
+    assert 'reverse_speed_mps' in src
