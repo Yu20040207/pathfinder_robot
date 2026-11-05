@@ -693,7 +693,12 @@ private:
       if (result.code != rclcpp_action::ResultCode::SUCCEEDED || !result.result ||
         result.result->path.poses.empty())
       {
-        status_label_->setText("单点规划失败：请检查终点、全局代价地图及 map→odom 定位");
+        // 2026-11-05：把"为什么失败"说清楚。常见两种：
+        //   · 终点贴在墙/家具旁，落在膨胀区里（代价 93~100）→ 换个点
+        //   · 终点附近恰好有激光临时标记 → 过一两秒标记清除后就能规划
+        status_label_->setText(
+          "单点规划失败：终点可能落在墙/家具的膨胀区（离墙 <0.5 m），"
+          "或附近有临时障碍标记。请换个离墙 0.6 m 以上的点，或稍等再点「重新预览」");
         return;
       }
       path_pub_->publish(result.result->path);
