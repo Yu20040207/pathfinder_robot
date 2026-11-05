@@ -25,3 +25,45 @@ def test_score_pose_uses_occupancygrid_row_order():
     # 扫描点距离墙 0-0.1 m，平均残差约 0.1 m
     assert good < 0.15, f'正确位姿应该贴着墙，实际 {good:.3f}'
     assert mirrored > good + 0.5, f'镜像位姿必须明显更差，实际 {mirrored:.3f}'
+
+
+def test_find_best_pose_is_fast_enough_to_run_live():
+    """全局搜索必须能在实机上跑完（原来逐位姿循环要几小时 → 一键重新定位永不返回）。
+
+    这里造一张 20x20 m 的地图，要求 5 秒内出结果，并且结果接近真值。
+    """
+    import time
+    import numpy as np
+    from fwr_bringup.auto_seed_core import find_best_pose
+
+    res = 0.05
+    H = W = int(20.0 / res)
+    occ = np.zeros((H, W), dtype=bool)
+    occ[0, :] = occ[-1, :] = occ[:, 0] = occ[:, -1] = True
+    occ[int(8.0 / res):int(8.2 / res), int(4.0 / res):int(12.0 / res)] = True
+    ox, oy = -5.0, -5.0
+    # 加几个不对称特征，否则长方形房间镜像/平移都能匹配，测不出位置
+    for (bx, by, bw, bh) in [(1.0, 1.0, 0.6, 0.6), (6.5, 2.0, 0.4, 0.8),
+                             (3.0, 6.5, 1.0, 0.4), (9.0, 9.0, 0.5, 0.5)]:
+        occ[int((by - oy) / res):int((by + bh - oy) / res),
+            int((bx - ox) / res):int((bx + bw - ox) / res)] = True
+    # 真值位姿与它的扫描（沿 72 个方向投射到最近障碍）
+    truth = (3.0, 3.0, 0.4)
+    pts = []
+    for ang in np.radians(np.arange(-180, 180, 5)):
+        for r in np.arange(0.2, 6.0, 0.05):
+            x = truth[0] + r * math.cos(truth[2] + ang)
+            y = truth[1] + r * math.sin(truth[2] + ang)
+            ix = int((x - ox) / res)
+            iy = int((y - oy) / res)
+            if not (0 <= ix < W and 0 <= iy < H) or occ[iy, ix]:
+                pts.append((r * math.cos(ang), r * math.sin(ang)))
+                break
+    pts = np.array(pts)
+    bounds = (ox, ox + W * res, oy, oy + H * res)
+    t0 = time.time()
+    score, x, y, yaw = find_best_pose(occ, res, ox, oy, bounds, pts)
+    dt = time.time() - t0
+    assert dt < 5.0, f'全局搜索太慢：{dt:.1f} s（原来要几小时）'
+    assert score < 0.25, f'搜索质量太差：{score:.3f}'
+    assert math.hypot(x - truth[0], y - truth[1]) < 0.6, (x, y, truth)
