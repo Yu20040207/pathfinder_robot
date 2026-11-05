@@ -239,3 +239,13 @@ def test_through_poses_bt_removes_passed_goals():
     assert order[0] == 'RemovePassedGoals' and order[1] == 'ComputePathThroughPoses', order
     node = next(e for e in tree.getroot().iter() if e.tag == 'RemovePassedGoals')
     assert node.get('radius') == '0.7'
+
+
+def test_panel_space_toggles_navigation():
+    """面板必须支持空格停止/继续（按钮文字也要标出空格）。"""
+    panel = (ROOT.parent / 'fwr_rviz_nav' / 'src' / 'two_point_nav_panel.cpp').read_text()
+    assert '停止导航（空格）' in panel
+    assert '继续导航（空格）' in panel
+    assert 'toggle_navigation_by_space' in panel
+    assert 'Qt::Key_Space' in panel
+    assert 'Qt::ApplicationShortcut' in panel, '焦点在 3D 视图时也要生效'

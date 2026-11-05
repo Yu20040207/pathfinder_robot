@@ -10,6 +10,8 @@
 #include <QLabel>
 #include <QWidget>
 #include <QPushButton>
+#include <QShortcut>
+#include <QKeySequence>
 #include <QTimer>
 #include <QVBoxLayout>
 
@@ -80,8 +82,8 @@ protected:
     status_label_ = new QLabel("等待地图点击", this);
     preview_button_ = new QPushButton("重新预览", this);
     start_button_ = new QPushButton("开始导航", this);
-    stop_button_ = new QPushButton("停止导航", this);
-    resume_button_ = new QPushButton("继续导航", this);
+    stop_button_ = new QPushButton("停止导航（空格）", this);
+    resume_button_ = new QPushButton("继续导航（空格）", this);
     reset_button_ = new QPushButton("清除选择", this);
     recover_button_ = new QPushButton("清空状态 / 复位故障", this);
     // 2026-10-31：建图时现场需要一个「马上停」的按钮（沿墙建图是自动跑的）
@@ -316,6 +318,14 @@ protected:
     connect(stop_button_, &QPushButton::clicked, this, [this]() {
       if (guarded_) {stop_real_navigation("已请求停止导航，底盘运动门已关闭");}
     });
+    // 空格 = 停止/继续（2026-11-05 用户要求：车里导航时用键盘空格直接停/继续）
+    // ApplicationShortcut：焦点在 3D 视图里也能收到。
+    {
+      auto * space = new QShortcut(QKeySequence(Qt::Key_Space), this);
+      space->setContext(Qt::ApplicationShortcut);
+      connect(space, &QShortcut::activated, this,
+        [this]() {toggle_navigation_by_space();});
+    }
     connect(reset_button_, &QPushButton::clicked, this, [this]() {
       if (guarded_ && flow_.pending_or_active()) {
         stop_real_navigation("已请求停止导航，底盘运动门已关闭");
@@ -828,6 +838,21 @@ private:
   void start_navigation()
   {
     begin_task(false);
+  }
+
+  /// 空格：导航中→停止；已停止且有可继续的任务→继续。
+  void toggle_navigation_by_space()
+  {
+    if (!guarded_) {return;}
+    if (flow_.pending_or_active() || real_task_active_) {
+      stop_real_navigation("空格：已请求停止导航，底盘运动门已关闭");
+      return;
+    }
+    if (has_resume_goal_) {
+      resume_navigation();
+      return;
+    }
+    status_label_->setText("空格：当前没有可停止或可继续的任务");
   }
 
   void resume_navigation()
