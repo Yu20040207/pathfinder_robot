@@ -5372,3 +5372,69 @@ x[-32.30,14.10]、y[-20.40,9.85]（约 1 m 余量）。
 
 - 之前发现两套旧导航栈残留（71 个进程），已全部停止；当前只有一套。
 - 用户可以在 RViz 用 Publish Point 选一个点看加粗后的预览线；不要点“开始导航”。
+
+## 2026-11-05 14:45 · v1.6：定位/地图编辑/多点导航/停止继续 一批修复
+
+### 会话目标
+继续优化实机导航与定位，逐项修复现场问题（一次只改一个，全部实机验证）。
+
+### 仓库改动
+**定位**
+- `auto_seed_core.find_best_pose`：全局搜索**向量化重写**（原逐位姿循环约 250 万次、跑不完 →
+  "一键重新定位"按下去永远没结果）。实测真实地图 **0.7 s**，残差 0.012 m。
+- `auto_initial_pose`：`/localization/reseed` 改为**同步返回结果**
+  （"定位成功: (x,y,θ) 残差 …" / 具体失败原因），修复拼接造成的 `_scan_overlap` 重复定义。
+
+**地图编辑**
+- 新增 `tools/fix_map_unknown.py` + `tools/watch_map_edits.py`：Map Edit 面板保存会
+  把**未知区(205)全部写成自由(254)**（实测 286825 像素），守护脚本在保存后 2~6 s 自动生成
+  `<名字>_fixed`，只应用真实编辑（画墙/擦墙），未知区完整保留。
+- 本次使用的修正地图：`maps/1A_map_fixed.pgm/.yaml`（与原图仅差 1035 像素 = 用户编辑）。
+
+**多点导航**
+- `real_navigate_through_poses.xml` 补 **`RemovePassedGoals`**：原来每次重规划仍要求穿过
+  已过去的途经点 → 车"走一下又回来"。实测修复后 3 点路线 75 s 走完 ~10.6 m（符合真实绕行）。
+- `frontier_explorer`：`fixed_route_tail_gap_m`（2.5，原硬编码 1.0）——终点离起点近时改逐段；
+  `route_skip_near_m`（0.6）剔除"车已站在上面"的路线点。
+- `/explore/resume` 新服务：停止时**保留路线与段索引**，继续时走"本该走的下一段"
+  （原来面板按最近点重发，刚走完的点会被重走）。一次穿过模式继续时重置派发计数。
+- 静默中止全部加日志 `[任务中止] …`（manual 被打开 / 授权丢失 / 故障 / 停止请求 /
+  试运行超时 / 状态机停止）—— 这是后来定位"任务被谁中止"的关键。
+
+**后退让位（默认关闭）**
+- 左右净空**分开测**，`should_start` 用 `max(左,右)`（原来左右混在一起取 min →
+  右侧 1.0 m 有空间也判成"两侧都窄"而触发后退）。
+- 发布 `/reverse/active`；explorer 在此期间**暂停**任务而不是中止；
+  同一点让位 >2 次 → 跳过该点（`skip_leg` / through-poses 删除最近点）。
+
+**代价地图**
+- 全局障碍层**恢复**（否则路上新障碍不会被绕行），配合 `costmap_clear_period_s`（10 s，**仅空闲时**）
+  周期性清空抑制陈旧标记。实测致命格 4007 真墙 / 幽灵 1（≈0%）。
+- `panel`：单点预览失败提示细化（终点在膨胀区/临时障碍标记）。
+
+**面板**
+- 按钮改为「停止导航（空格）」「继续导航（空格）」，空格用 `Qt::ApplicationShortcut`
+  调用**与鼠标相同的函数**。多点"继续"按任务类型重发（`resume_multi_`）。
+
+### 已验证
+- `PYTHONPATH=ros2_ws/src/fwr_bringup .venv/bin/python -m pytest ros2_ws/src/fwr_bringup/test -q` → **283 passed**
+- `colcon test --packages-select fwr_rviz_nav` → **15 tests, 0 failures**
+- 实机：自动播种 match 0.004~0.010 m、贴墙 97~100%；3 点 through-poses 路线 Goal succeeded
+  （终点距实际停点 0.35 m < 0.4 容差）；地图编辑自动修正验证通过（模拟保存 79 像素）。
+
+### 未验证 / 遗留
+- **后退让位**仍默认关闭；`/ultrasonic_rear/left_in`、`right_in` **没有数据** →
+  `rear_blocked` 恒 True → 后退永远触发不了（接线/端口待查）。
+- 后退让位与导航任务的"暂停→恢复→跳点"链路只做了代码+单测，**未实机验证**。
+- 14:41 右轮失速 `fault 1`（Rpwm 0.77 但 Rmm/s 0，两侧净空 3 m/2.8 m）→ 判定**右轮机械受阻**，
+  已由底盘空闲时自动清除，机械原因待用户检查。
+- 直线段左右摆动（规划器沿代价谷走 + BT 未接平滑器）**未处理**，待后续。
+
+### 当前运行状态
+- 导航栈：`real_navigation.launch.py use_saved_map:=true map:=…/1A_map_fixed.yaml`，
+  日志 `/tmp/fwr_runs/nav_resume4.log`，RViz 已开，`fault 0 / explore stopped`（待机）。
+- 地图守护 `watch_map_edits.py` 后台运行，日志 `/tmp/fwr_runs/map_fix.log`。
+
+### 下一步
+- 查超声 rear 左右 in 通道；解决后退让位与导航的协同后再实机验证。
+- 处理直线摆动（先测 `/plan` 横向偏移 vs `/cmd_vel_nav` 的 ω 翻转次数，再决定改规划还是控制器）。
