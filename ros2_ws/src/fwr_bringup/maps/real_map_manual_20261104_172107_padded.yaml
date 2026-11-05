@@ -1,7 +1,0 @@
-free_thresh: 0.25
-image: real_map_manual_20261104_172107_padded.pgm
-mode: trinary
-negate: 0
-occupied_thresh: 0.65
-origin: [-33.3, -21.4, 0]
-resolution: 0.05

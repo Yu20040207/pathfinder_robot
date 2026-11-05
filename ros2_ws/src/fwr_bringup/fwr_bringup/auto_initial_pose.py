@@ -67,6 +67,31 @@ class AutoInitialPose(Node):
             self.get_logger().info(
                 '用户已手动设置位姿 → 自动播种放弃（不再覆盖）')
 
+    def _pose_is_sane(self, x, y) -> tuple[bool, str]:
+        """拒绝退化匹配：匹配位置必须在地图的**空闲区**且离障碍有净空。
+
+        2026-11-05：地图四周补了 1 m 障碍后，全局搜索在墙带里得到 "match 0.000 m"
+        的完美匹配 → 车被定位到墙角。这里做兜底：不在空闲区就不播种。
+        """
+        m = self._map
+        if m is None:
+            return False, 'no-map'
+        r = m.info.resolution
+        cx = int((x - m.info.origin.position.x) / r)
+        cy = int((y - m.info.origin.position.y) / r)
+        W, H = m.info.width, m.info.height
+        if not (0 <= cx < W and 0 <= cy < H):
+            return False, 'out-of-map'
+        k = max(1, int(round(0.10 / r)))          # 0.10 m 净空
+        for dy in range(-k, k + 1):
+            for dx in range(-k, k + 1):
+                yy, xx = cy + dy, cx + dx
+                if not (0 <= yy < H and 0 <= xx < W):
+                    return False, 'near-map-edge'
+                if m.data[yy * W + xx] != 0:       # 0=空闲；障碍/未知都不接受
+                    return False, 'not-free-or-unknown'
+        return True, 'ok'
+
     def _on_map(self, msg):
         self._map = msg
 
@@ -130,6 +155,15 @@ class AutoInitialPose(Node):
                 f'auto initial pose: weak match ({score:.3f} m > {limit:.2f} m); '
                 f'NOT seeding, please verify localization manually '
                 f'(best guess {base_x:.2f},{base_y:.2f},{math.degrees(base_yaw):.0f} deg)')
+            self._seeded = True
+            return
+        sane, why = self._pose_is_sane(base_x, base_y)
+        if not sane:
+            # 2026-11-05：补边的墙带里会得到 "match 0.000 m" 的退化匹配，
+            # 把车定位到墙角。宁可不动，也不能播一个错的位姿。
+            self.get_logger().error(
+                f'auto initial pose: match {score:.3f} m 落在非空闲区（{why}），'
+                f'拒绝播种；请用 RViz 的 2D Pose Estimate 手动定位')
             self._seeded = True
             return
         self.get_logger().info(
