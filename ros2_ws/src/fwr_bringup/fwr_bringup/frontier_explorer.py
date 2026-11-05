@@ -589,6 +589,9 @@ class FrontierExplorer(Node):
             response.success = False
             response.message = '状态机无法恢复'
             return response
+        if self._multi_points and not self._fixed_goals:
+            # 一次穿过模式：legs=1，必须把派发计数归零才能重新派发整条路线
+            self._sm.reset_dispatched()
         self._mission_suspended = False
         self._retry_pending = False
         self._status = 'idle'

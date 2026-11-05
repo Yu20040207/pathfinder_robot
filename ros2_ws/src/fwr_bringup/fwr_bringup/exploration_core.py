@@ -53,6 +53,14 @@ class ExplorationStateMachine:
         self.enabled = True
         self._stopping = False
 
+    def reset_dispatched(self) -> None:
+        """把"已派发段数"归零，让状态机重新派发（一次穿过模式继续时必须做）。
+
+        一次穿过用 legs=1：派发过一次后 dispatched=1，状态机认为"已经走完"，
+        于是继续后立刻 stop（现场：点继续不动）。
+        """
+        self._fixed_dispatched = 0
+
     def resume_fixed(self) -> bool:
         """从"停止"状态恢复，**保留当前段索引**（继续的是本该走的那一段）。"""
         if not self.fixed_goal:

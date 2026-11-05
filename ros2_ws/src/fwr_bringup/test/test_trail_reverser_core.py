@@ -105,3 +105,26 @@ def test_reverse_pause_skips_waypoint_after_limit():
     assert sm.fixed_leg_index == 2
     assert sm.skip_leg() is False, '最后一段跳过后没有后续'
     assert sm.fixed_leg_index >= 3, '越过最后一段后不再指向有效段'
+
+
+def test_resume_through_poses_redispatches_instead_of_stopping():
+    """一次穿过模式：停止→继续必须重新派发，不能因为 dispatched>=legs 直接结束。
+
+    现场：面板显示"已继续：继续多点路线（剩余 6 点）"，但车不动，
+    日志里 enabled=True 后立刻 enabled=False（状态机判定已走完）。
+    """
+    from fwr_bringup.exploration_core import ExplorationStateMachine
+
+    sm = ExplorationStateMachine()
+    sm.start_fixed(legs=1)
+    # 派发一次
+    d = sm.update(True, True, 0, 'idle', 0.0)
+    assert d.action == 'dispatch'
+    # 跑到一半被停止
+    sm.stop()
+    sm.update(True, True, 0, 'canceled', 1.0)
+    # 继续
+    assert sm.resume_fixed() is True
+    sm.reset_dispatched()
+    d = sm.update(True, True, 0, 'idle', 2.0)
+    assert d.action == 'dispatch', '继续后应重新派发，而不是停止'
