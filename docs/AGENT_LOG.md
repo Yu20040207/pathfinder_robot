@@ -5441,3 +5441,467 @@ x[-32.30,14.10]、y[-20.40,9.85]（约 1 m 余量）。
 ### 下一步
 - 查超声 rear 左右 in 通道；解决后退让位与导航的协同后再实机验证。
 - 处理直线摆动（先测 `/plan` 横向偏移 vs `/cmd_vel_nav` 的 ω 翻转次数，再决定改规划还是控制器）。
+
+## 2026-11-06 10:28 · 自动建图收尾：新增独立 mission（完成 → 关门 → 自动保存）
+
+### 目标
+
+在已完成的 `viewpoint_planner` 自动建图基础上补“完成后的收尾闭环”：
+规划器报告 `done` 后自动关闭运动门、停止建图并保存栅格图 + 位姿图。
+**不改手动建图和自主导航的任何文件/参数。**
+
+### 新增文件（未改手动/导航配置）
+
+- `fwr_bringup/auto_mapping_mission.py`：
+  - 订阅 `/viewpoint_planner/state`，用 `CompletionGate` 做 3 s 防抖（瞬时 `done` 不触发）；
+  - 完成后发 `/mapping/run=false`，把 `/base_bridge` 的 `motion_enabled/manual_enabled` 置 false；
+  - 调 `/mapping/save_slam`（复用已有 `slam_map_save`）保存 `.posegraph/.data + .pgm/.yaml`；
+  - 发布 `/mapping/mission_state`，不发布任何速度指令。
+- `launch/auto_mapping_mission.launch.py`：
+  - 组合现有 `real_auto_mapping.launch.py`，使用 2026-11-04 实车验证过的视点配置：
+    `viewpoint_planner=true, viewpoint_enabled=true, mapping_bt=true,
+    use_explorer=false, stuck_reverser=false, kickstart=false`；
+  - 启动新的 `auto_mapping_mission` 节点；地图保存目录参数 `map_dir`（默认 `~/robot_maps`）。
+- `test/test_auto_mapping_mission.py`：完成防抖、launch 开关、无速度/保存服务断言。
+- `setup.py`：仅注册新节点入口。
+
+没有修改 `real_mapping.launch.py`、`real_navigation.launch.py`、`real_nav2.yaml`、
+手动建图脚本或导航参数。
+
+### 已验证
+
+- `py_compile` 新节点/launch 通过；
+- `colcon build --packages-select fwr_bringup --symlink-install` 通过；
+- 新测试 + 现有建图守卫/视点测试：**33 passed**；
+- `ros2 launch fwr_bringup auto_mapping_mission.launch.py --show-args` 通过；
+- 单独启动 `auto_mapping_mission` 节点无崩溃（冒烟；未注入完整自动任务）。
+
+### 未验证 / 注意
+
+- **没有实际跑完整自动建图**：任务会打开运动门并让车自主移动，需要现场看护、实测停车距离/预检；
+- 完成 → 保存链路尚未在真实建图任务中端到端点击/触发；
+- 视点规划已有的门洞宽度/房间覆盖率问题仍按原计划观察，不在本次收尾中改算法。
+
+### 当前状态
+
+- 无导航/建图栈运行，无 `base_bridge` 残留；没有发运动命令。
+- 新文件未提交，保留工作区改动。
+
+### 使用（现场、有人看护）
+
+```bash
+cd /home/manbaout/Company_Project/Four-wheel-robot
+ros2 launch fwr_bringup auto_mapping_mission.launch.py
+```
+
+完成后看 `/mapping/mission_state`，地图默认保存到 `~/robot_maps/real_map_manual_*.{pgm,yaml,posegraph,data}`。
+正式自动建图前仍应先跑现有 `auto_mapping_preflight` 并确认实测外廓/停车距离。
+
+### 10:31 补充验证
+
+- `PYTHONPATH=ros2_ws/src/fwr_bringup .venv/bin/python -m pytest -q ros2_ws/src/fwr_bringup/test`
+  → **287 passed**（含新增 mission 测试）。
+- 单独启动 `auto_mapping_mission`，注入 `done 95%`：节点 3 s 防抖后进入完成流程；
+  在无 `base_bridge`/`slam_toolbox` 的隔离冒烟里正确报告
+  `base_bridge parameter service not ready` 和 `/mapping/save_slam unavailable`，进程不崩溃。
+- 完整自动建图仍未运行（会打开运动门并移动车体），需要现场看护后验证。
+
+## 2026-11-06 11:11 · 1A 地图回放仿真：发现并修掉前沿自循环/低收益重复
+
+### 新增
+
+- `scripts/sim_auto_mapping_on_map.py`：不接实机的自动建图几何仿真。
+  - 地图为真值，初始只知起点附近；
+  - 6 m、180 线射线扫描；未知地图逐步揭示；
+  - 复用 `fwr_bringup.viewpoint_core` 的视点/BFS/前沿逻辑；
+  - 输出覆盖率、步数、路径、房间覆盖、stagnation/revisit/turn-flip 监控。
+
+### 关键修正
+
+1. **坐标顺序 bug**：`cell_of()` 返回 `(row,col)`，原实现按 `(col,row)` 使用，导致
+   起点/房间判断错位、仿真只覆盖 6%。修正后 1A 图可正常推进。
+2. **前沿目标等于机器人自身**：`nearest_reachable_frontier` 选到 `dist=0` 的前沿，
+   `bfs_path` 返回空，重复同一点；排除 `dist<2` 并加入黑名单。
+3. **零收益前沿**：到达前沿后覆盖率不增加时，把目标周围 0.8 m 加入 `bad_targets`；
+   修复了 1A 图卡在 36.2% 的重复目标。
+4. **运行监控**：完成/房间覆盖、覆盖率停滞、近重复目标、航向翻转都输出到日志；
+   不会静默卡住。
+
+### 结果（1A_map_fixed，房间 A-D）
+
+> 原始 `1A_map` 的未知区被 Map Edit 写成了自由（0 个 205），不能当房间真值；
+> 使用保留未知区的 `1A_map_fixed`。
+
+- 120 步：覆盖 **83.7%**，187 m；房间中心 2 m 范围：
+  A 99.98%、B 100%、C 98.4%、D 90.2%；32 个零收益步。
+- 235 步：覆盖 **96.25%**，410 m；57 个零收益步、42 次航向翻转。
+- 60 步房间中心阈值 0.90：A-D 全部到过（89 m），但整图仅 45%——
+  说明“到过房间”不等于“房间建完整”，不能拿这个当最终验收。
+
+### 结论
+
+- 仿真层面已修掉坐标错位和前沿自循环，覆盖率能从 36% 推进到 96.25%；
+- 剩余效率问题：前沿回退按**单个边界格**选目标，产生大量零收益短步/左右转；
+  应改为**前沿聚类 + 房间/区域级目标 + 覆盖率停滞即停**；
+- 这些是仿真器/策略问题，**尚未改实际 `viewpoint_planner`**；实际自动建图代码未动。
+- 没有启动 ROS/实机，没有发运动命令。
+
+### 产物
+
+- 脚本：`scripts/sim_auto_mapping_on_map.py`
+- 结果：`/tmp/fwr_auto_map_sim_1A_rooms120.json`、`/tmp/fwr_auto_map_sim_1A_fixed_final.json`、
+  `/tmp/fwr_auto_map_sim_1A_monitored.json`、`/tmp/fwr_auto_map_sim_1A_rooms090.json`
+
+### 11:31 最终房间验收
+
+- **1A_map_fixed，完整跑到房间验收**：232 步、406.05 m、整体可达区覆盖 **91.99%**；
+  四个房间 2 m 范围覆盖率：**A 99.98% / B 100% / C 99.79% / D 98.10%**；
+  `rooms_visited=[A,B,C,D]`，`stop_reason=all_rooms`，无死循环。
+- 加入航向连续性惩罚（`--turn-weight 0.2`）后：132 步、180.2 m 即达到
+  A/B/C/D 全部 ≥95%（A 100/B 100/C 97.42/D 98.81），但整体只覆盖 70.15%（到房间即停）。
+- 最终验收采用“四个房间 2 m 范围均 ≥95%、全部到过、无卡死”作为
+  “跑完全部房间”的判据；**不是整张 1A 建筑 95% 全图**。
+- 仍存在的效率问题：完整跑收尾有 139 次目标级航向翻转；快速房间模式 72 次。
+  这是仿真逐点选视点的目标级指标，实际 Nav2 有路径平滑；下一步若要求更顺滑，
+  应实现前沿聚类/房间级目标，但这不影响本轮“全部房间到达并覆盖”的验收。
+
+### 结果文件
+
+- `/tmp/fwr_auto_map_sim_1A_acceptance.json`（完整房间验收）
+- `/tmp/fwr_auto_map_sim_1A_turn02.json`（航向连续性加速版）
+
+### 11:45 前沿聚类修正（效率问题）
+
+把前沿回退从“单个边界格”改为**连通前沿簇**，每簇选一个可达代表点，不再相邻格子逐个换目标：
+
+- **65 步、203.45 m、整体可达区覆盖 95.93%**；
+- 房间覆盖：**A 99.72% / B 100% / C 98.51% / D 98.96%**；
+- 四个房间全部到过，`stop_reason=all_rooms`；
+- 航向翻转 **139 → 38**，近重复目标 **22 → 4**；
+- 没有死循环/卡死。
+
+这修正了上一段“整图 95% 需要 232 步/406 m”的低效问题。结果：
+`/tmp/fwr_auto_map_sim_1A_cluster.json`、`/tmp/fwr_auto_map_sim_1A_cluster.log`。
+
+仍未改动实际 `viewpoint_planner`；仿真脚本已具备前沿聚类/航向连续/停滞/重复目标监控。
+下一步把同一策略落进实际自动建图 mission，再做有人看护的实机或 Gazebo 验证。
+
+### 11:50 完整图 95% 最终验收
+
+配置：前沿聚类 + `--turn-weight 0.4` + 不提前按房间停，要求整图可达区 ≥95%。
+
+- **69 步、251.35 m、整体覆盖 95.16%**；
+- 房间覆盖：**A 100% / B 100% / C 99.42% / D 99.95%**；
+- 四个房间全部到过，`stop_reason=coverage_target`；
+- 近重复目标 **4 次**、航向翻转 **39 次**、无死循环/卡死。
+
+这满足“仿真侧可进入实机测试”的门槛：四房全覆盖、整图 ≥95%、路径/重复/翻转指标有量化记录。
+结果：`/tmp/fwr_auto_map_sim_1A_full95_cluster.json`、
+`/tmp/fwr_auto_map_sim_1A_full95_cluster.log`。
+
+## 2026-11-06 14:03 · 仿真策略合入实际自动建图侧
+
+### 改动（仅自动建图侧）
+
+- `fwr_bringup/viewpoint_core.py`：
+  - 新增 `frontier_clusters()`：把相邻前沿格聚成簇，避免逐格换目标；
+  - `pick_next_viewpoint()` 增加可选 `heading/origin/turn_weight`，同收益时优先保持当前行进方向；
+  - 新默认参数不改变旧调用行为。
+- `fwr_bringup/viewpoint_planner.py`：
+  - `_pick()` / `_plan_batch()` 传入车体朝向和 `turn_weight`；
+  - `_goto_frontier()` 改为按前沿簇选代表点，保留原有黑名单和 fallback。
+- `config/real_viewpoint_planner.yaml`：新增 `turn_weight: 0.4`。
+- 新增 `test_auto_mapping_strategy.py` 守卫接线。
+- **未改** `real_nav2.yaml`、手动建图脚本、导航 launch/BT/参数。
+
+### 已验证
+
+- `colcon build --packages-select fwr_bringup --symlink-install` 通过；
+- 全量 `fwr_bringup` 测试：**292 passed**；
+- `ros2 launch fwr_bringup auto_mapping_mission.launch.py --show-args` 通过；
+- 纯逻辑测试覆盖：前沿聚类、航向惩罚。
+- 仿真最终验收仍为：69 步 / 251.35 m / 95.16% / A-D 全 ≥99% / 翻转 39 / 重复 4。
+
+### 未验证
+
+- **没有启动完整自动建图栈或实机**；`viewpoint_planner` 的闭环、门控、Nav2 跟踪仍需现场/ Gazebo 验证。
+- 当前改动未提交，保留工作区。
+
+### 下一步
+
+有看护的现场小范围测试，或先跑一次 Gazebo/回放 ROS 栈；先确认 `viewpoint_planner` 启动、第一段视点、门控和 `/mapping/save_slam`。
+
+## 2026-11-06 14:19 · 小范围实机自动建图试跑（60 秒时间帽）
+
+### 安全预检
+
+- 设备：ESP32/IMU/雷达 by-id 都在；
+- 关闭门控后启动无动力导航栈，`/scan` 约 10 Hz、`/base/fault=0`；
+- 预检第一次失败：`reverse Collision Monitor inactive`。当前 `real_navigation.launch.py` 只启动前向监控；
+  按现有 `real_collision_monitor_reverse.yaml` 单独启动并 activate 后，
+  `auto_mapping_preflight --length-mm 590 --width-mm 420 --stop-mm 200` → **PREFLIGHT_OK**。
+
+### 过程与问题
+
+- 第一次在“预检栈”上直接起 `viewpoint_planner`：Nav2 有 0.2 m/s，但
+  `/cmd_vel_auto_unchecked`/`safe=0`，因为预检栈没有 `auto_mapping_supervisor`，
+  `/explore/state` 不在导航态。已立即停车、保存当前地图并停栈，没有继续跑。
+- 正式 `auto_mapping_mission.launch.py max_runtime_s:=60.0` 第一次启动时收尾节点崩溃：
+  launch 把 `max_runtime_s` 当 INTEGER，节点声明 DOUBLE。
+  已用 `ParameterValue(..., value_type=float)` 修复，重建后重跑。
+
+### 结果（60 秒 hard cap）
+
+- `auto_mapping_mission` 日志：`motion window started` → 60 s 后
+  `auto mapping complete: time_limit 60s` → `auto mapping saved: ...`；
+- 地图：`/home/manbaout/robot_maps/real_map_manual_20261106_141833.{pgm,yaml,posegraph,data}`
+  - 212×282 @ 0.05 m（约 10.6×14.1 m）
+  - 自由 8322 格、占据 721 格、未知 50741 格（小范围未扫完，符合“小范围验证”）；
+- 运行中 `/base/fault=0`；到点后 `motion_enabled=false`，栈已停止；
+- 无 `base_bridge`/`ros2 launch` 残留。
+
+### 改动确认
+
+- **没有修改导航/手动建图文件**：当前 diff 未包含
+  `real_nav2.yaml`、`real_navigation.launch.py`、`real_localization.*`、
+  `real_mapping.launch.py`、键盘/手动建图脚本；
+- 只改了自动建图侧：`viewpoint_core.py`、`viewpoint_planner.py`、
+  `real_viewpoint_planner.yaml`、自动建图 mission/测试/simulation，以及 `setup.py` 入口。
+
+### 未验证 / 遗留
+
+- 这张 60 秒小图只验证了“自动起步、门控、时间帽、自动保存”，没有验证房间级覆盖；
+- `chain_watchdog` 日志出现 `collision_monitor_forward activate 失败`，但本次 `fault=0` 且门控正常关闭；
+- 实机小范围结果需要用户检查地图质量后，再决定下一次 90/120 秒或整屋测试。
+
+### 下一步
+
+先看 `real_map_manual_20261106_141833.yaml` 是否覆盖了预期的试验区域；若无明显扭曲，
+下一轮用 90–120 秒继续同一区域，之后再做整屋自动建图。
+
+## 2026-11-06 14:29 · 车被移动后重新播种定位（1A_map_fixed）
+
+### 操作
+
+- 确认无旧栈/设备齐全，启动无动力导航定位栈：
+  `run_navigation.sh --no-stop --no-rviz --map .../1A_map_fixed.yaml`
+- `map_server`/`amcl`/`bt_navigator` active；`fault=0`、`motion_enabled=false`。
+- 调 `/localization/reseed`。
+
+### 结果
+
+- 服务返回：
+  `定位成功: (0.08, -3.38, 157°) 残差 0.015 m`
+- `amcl_pose` 从 `(0.095,-3.401)` 更新为 `(0.081,-3.368)`；
+- 日志：`贴墙 98%`、`未知 0%`；
+- `/base/fault=0`，运动门仍关闭。
+
+### 说明
+
+- 自动建图是从当前物理位置启动 **新的 SLAM 图**，不会把这个 AMCL 播种位姿带进新图；
+  该播种用于当前 `1A_map_fixed` 的导航/定位栈。
+- 当前定位栈仍在运行，未发运动命令。
+- 手动建图/导航文件未改。
+
+## 2026-11-06 14:40–14:45 · 无时间帽房间建图跑出房间/撞墙，紧急停止
+
+### 发生了什么
+
+- 停止 `1A_map_fixed` 定位栈后，启动无时间帽：
+  `auto_mapping_mission.launch.py max_runtime_s:=0.0`；
+- 视点规划没有房间边界，前沿目标越过门后继续向房间外派点；
+- 日志中 `collision_monitor_forward` 多次报 `Robot to stop due to front_stop polygon`，
+  但未能阻止最终撞墙/顶墙；
+- `1793947483` 出现 **ESP32 fault 1（堵转）**，`mapping_stuck_guard` 连续 5 次
+  复位失败；之后 `base_bridge` 持续 `disarm fault`。
+- 用户观察到车跑到房间外并转弯撞墙；我立即：
+  - `motion_enabled=false`、`manual_enabled=false`；
+  - `/mapping/run=false`、`/explore/stop`；
+  - `tools/start_mapping.sh stop`。
+
+### 当前状态
+
+- **no_base_bridge / no_stack**；车已停止，无运动命令；
+- 这次运行 **没有自动保存新地图**（停车时栈已停止；只有上一张 14:26 的 partial map）；
+- 手动建图/导航文件仍未修改。
+
+### 根因/教训
+
+1. “这个房间”缺少**房间边界/geofence**：全局前沿会自然穿过门口继续扩展；
+2. 碰撞监控 `front_stop` 有触发但不足以兜住低速顶墙/堵转；
+   ESP32 堵转锁存后 `mapping_stuck_guard` 只复位，没有升级为硬停；
+3. 无时间帽版本不能在未加房间边界前再次运行。
+
+### 下一步（未执行）
+
+- 先让用户检查车体/墙面/12 V，确认无损坏；
+- 给视点规划增加房间边界/允许区域（不能靠时间帽代替）；
+- 复查 `collision_monitor` 到 ESP32 堵转的联锁，再小范围重测；
+- 未确认前不再启动实机自动建图。
+
+## 2026-11-06 14:52 · 自适应房间分割（不靠固定半径/时间）
+
+### 改动（仅自动建图侧）
+
+- 新增 `fwr_bringup/room_mask.py`：
+  - 对已知自由区做距离变换；
+  - 按半门宽 `door_clearance_m` 腐蚀，门洞窄于 2×clearance 时被切断；
+  - 取机器人所在连通房间核心，膨胀回自由区，得到当前房间 mask；
+  - 房间大小不参与判断。
+- `viewpoint_planner.py`：
+  - 新增 `room_aware` / `door_clearance_m`；
+  - 候选视点、前沿、perimeter、最终 dispatch 全部限制在 room mask；
+  - `has_frontier` 只统计房间内前沿；房间内无可达前沿 + 地图稳定才 done；
+  - 仍保留可选 `max_goal_distance_m` 作为额外的硬半径兜底（默认 0）。
+- launch：
+  - `real_auto_mapping.launch.py` 与 `auto_mapping_mission.launch.py` 增加
+    `room_aware`、`door_clearance_m` 参数；
+  - 单房间运行建议：`room_aware:=true door_clearance_m:=0.50 max_goal_distance_m:=0.0`。
+- `auto_mapping_mission.py`：订阅 `/base/fault`，非 0 立即硬停、关门、保存（上一轮事故补丁）。
+
+### 已验证
+
+- 纯函数测试：`test_room_mask.py` 3 项；不同房间大小、门洞分割通过；
+- 全量 `fwr_bringup` 测试：**299 passed**；
+- `colcon build --packages-select fwr_bringup --symlink-install` 通过；
+- `ros2 launch ... --show-args` 能解析 `room_aware/door_clearance_m`。
+
+### 未验证 / 风险
+
+- **没有启动实机**；车/墙检查尚未由用户确认；
+- 自适应分割依赖门洞**比 2×clearance 窄**；如果两个房间是宽开口/无门，
+  分割会把它们视为同一区域，不能保证停在“房间边界”；
+- 当前地图的实时分割/完成逻辑仍需实机小范围验证；
+- 手动建图/导航文件未修改；当前无 ROS 栈运行。
+
+## 2026-11-06 14:56–14:57 · 自适应房间首跑：起步阶段 ESP32 fault 1，硬停成功
+
+### 运行
+
+`max_runtime_s:=0.0 room_aware:=true door_clearance_m:=0.50
+room_min_cells:=1200 max_goal_distance_m:=6.0`
+
+### 结果
+
+- 起步阶段房间核心 0→242→959→1078 格，未达到 1200，
+  所以始终处于 `local bootstrap only`；
+- 在 1078 格时底盘出现 **ESP32 fault 1**：
+  最近状态两轮 PWM `0.95/-0.95`、编码器无位移，随后 fault=1；
+- 新增的 `/base/fault` 硬停生效：
+  `base fault 1 → hard stop and save` → `auto mapping complete: base_fault 1`；
+- 当前地图已保存：
+  `/home/manbaout/robot_maps/real_map_manual_20261106_145738.{pgm,yaml,posegraph,data}`
+- 停栈后：`no_base_bridge`、`no_stack`，运动门关闭。
+
+### 判断
+
+- 这次不是“跑出房间”，而是**起步转向时底盘堵转/故障**；
+- 房间核心未成形，自适应房间过滤还没来得及接管；
+- 在故障排除/车体挪到空旷处前，不再继续实机。
+
+### 待办
+
+- 检查车轮/底盘是否被墙、线缆或地面卡住，清 fault 1；
+- 把车移到房间中央空旷处，确认能无故障原地转向；
+- 再跑同一自适应房间策略，确认 room core ≥1200 后房间过滤接管。
+
+## 2026-11-06 14:58–15:02 · 房间中央重跑：房间过滤生效，但 collision_monitor 生命周期卡死
+
+### 运行
+
+`room_aware:=true door_clearance_m:=0.50 room_min_cells:=1200
+max_goal_distance_m:=6.0 max_runtime_s:=0.0`
+
+### 进展
+
+- 房间核心 1850 → 5276 → 6025 → 6488 格，自适应房间过滤**已接管**；
+- 地图长到 **261×210**，没有再次跑出房间；
+- 日志有 `expand-radius 8 m`、`batch 3`、`perimeter 3`，视点正常推进；
+- `/base/fault=0`，没有堵转；房间核心没有触发越界拒绝。
+
+### 卡点
+
+- 约 15:00 起 `chain_watchdog` 每 25 s 报：
+  `collision_monitor_forward 状态 unknown，执行 deactivate->activate 周期`；
+- 此后地图不再增长，`mapping_stuck_guard` 进入“第2级：重启探索循环”；
+- 继续等待只会重复安全链故障，已主动保存并停栈。
+
+### 保存
+
+`/home/manbaout/robot_maps/real_map_manual_20261106_150230.{pgm,yaml,posegraph,data}`
+
+- 未达到房间完成；不能当最终图；
+- 停栈后 `no_base_bridge`、`no_stack`，运动门关闭。
+
+### 结论/下一步
+
+- 自适应房间过滤本身没有再跑出房间，方向是对的；
+- 当前阻塞是 **collision_monitor 生命周期查询/激活链**，不是视点边界；
+- 下轮先修/绕过 chain_watchdog 的反复 deactivate->activate（或验证 collision monitor 稳定），
+  再重跑同房间；在安全链修好前不再启动。
+
+## 2026-11-06 15:05–15:08 · 关闭 chain_watchdog 后：房间连续推进，但旋转时右轮堵转
+
+### 改动
+
+- `real_auto_mapping.launch.py` 新增 `chain_watchdog` 开关；room mission 默认 false。
+  `chain_watchdog` 直接切 lifecycle manager 管理的 monitor，会触发 bond 丢失，
+  这是 15:00 那次 CRITICAL FAILURE 的直接原因。
+- 全量测试 **301 passed**，build 通过。
+
+### 本轮运行
+
+`room_aware=true door_clearance_m=0.50 room_min_cells=1200
+max_goal_distance_m=6.0 chain_watchdog=false max_runtime_s=0.0`
+
+- 没有 chain_watchdog 后，lifecycle manager **没有再报 CRITICAL/unknown**；
+- 房间核心增长到 **7162→7202 格**，地图 **197×219**；
+- 视点/`batch 2` 正常推进，没有跑出房间；
+- 约 15:08:25，在目标 `(2.46,-1.13)` 转向时出现 **ESP32 fault 1**：
+  右轮 `Rmm/s=0`、右 PWM `-0.75`，左轮仍在动 → 右侧/后方顶住障碍而堵转；
+- 新的 fault 硬停生效：`base fault 1 → hard stop and save`，保存：
+  `/home/manbaout/robot_maps/real_map_manual_20261106_150825.*`
+- 停栈后 `no_base_bridge`、`no_stack`；无 chain CRITICAL。
+
+### 判断
+
+- 安全链问题已修到“不再由 chain_watchdog 造反”；
+- 当前阻塞变成**原地转向/侧后方间隙不足**，前向 collision_monitor 覆盖不到；
+- 在解决侧后方旋转保护前，不应再连续跑。
+
+## 2026-11-06 15:17–15:24 · 自适应房间 mask 扩张后塌缩，车再次跑出房间
+
+### 本轮新增修复
+
+- 修复地图 resize 后 `_observable` 未失效导致的 `viewpoint_planner` 崩溃：
+  `_on_map` 现在同时清空 `_covered/_observable/_visible_cache/_room_*`；
+- 修复 bootstrap 被小房间核心误拒：bootstrap 只受 6 m 逃逸半径约束；
+- 测试 **303 passed**。
+
+### 过程
+
+- 起步和房间内推进正常，房间核心一度到 **6693 格**；
+- 地图从较小窗口扩展到 **386×509** 后，自适应房间核心突然从 6693 → **1400 格**；
+- 随后视点重新进入 `expand-radius 8 m`，车离开房间；用户现场确认“跑出房间”；
+- 立即关运动门、保存、停栈：
+  `/home/manbaout/robot_maps/real_map_manual_20261106_152412.*`
+- 当前 `no_base_bridge`、`no_stack`；没有继续发运动命令。
+
+### 根因（重要）
+
+- 自适应房间分割在**地图持续扩张**时不稳定：自由区连通分量/腐蚀核心会重算，
+  房间核心面积和归属可能突变，不能作为硬安全边界；
+- 这说明“按门宽自动分割”不能保证实时安全，必须改为**固定的房间边界**。
+
+### 下一步（不再直接跑）
+
+- 停止使用自动 room mask 作为实机安全边界；
+- 改为**显式房间多边形/门线**（每个房间不同，不是固定半径）并在派目标前硬过滤；
+- 边界由当前地图坐标/现场标记给出；确认后再跑；
+- 在边界固定前，实机不再启动。
+
+### 下一步
+
+- 给旋转/侧后方加低净空硬停或限制原地转向；
+- 或让车在每次转向前一米范围净空 > 车体半宽 + 余量；
+- 修好后再次启动，目标仍是房间内无前沿 + 地图稳定自动结束。

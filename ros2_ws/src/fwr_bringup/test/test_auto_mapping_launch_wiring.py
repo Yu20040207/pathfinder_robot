@@ -308,3 +308,14 @@ def test_panel_auto_previews_after_selecting_points():
     seg = seg[:seg.index('void ', 10)]
     assert 'request_preview()' in seg, '选点后应自动触发预览'
     assert 'preview_ready_ = false' in seg
+
+
+def test_closed_loop_route_uses_sequential_legs():
+    """终点离**路线起点**近也算闭环，必须逐段执行。
+
+    2026-11-07 现场："选了个终点在起点附近的，走了几步就停" —— through-poses 的
+    goal checker 只看最后一个点，车去起点路上路过终点就被判"已到达"。
+    """
+    src = (ROOT / 'fwr_bringup' / 'frontier_explorer.py').read_text()
+    assert 'loop_gap' in src, '需要比较终点与路线起点的距离'
+    assert 'tail_gap < tail_limit or loop_gap < tail_limit' in src

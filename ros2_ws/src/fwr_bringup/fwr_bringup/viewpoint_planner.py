@@ -31,6 +31,7 @@ from tf2_ros import Buffer, TransformListener
 from rcl_interfaces.msg import Parameter as ParamMsg, ParameterType
 from rcl_interfaces.srv import SetParameters
 
+from . import room_mask as rm
 from . import viewpoint_core as vc
 
 
@@ -56,6 +57,16 @@ class ViewpointPlanner(Node):
         self.declare_parameter('hop_timeout_s', 45.0)
         self.declare_parameter('arrive_m', 0.45)
         self.declare_parameter('replan_period_s', 1.0)
+        # 0.4 was validated in the 1A map-replay simulation: keeps all rooms
+        # >=95% while reducing target-level heading reversals.
+        self.declare_parameter('turn_weight', 0.4)
+        # 0 = unlimited.  Small-room trials set e.g. 4.0 m so frontier
+        # planning cannot leave the room through a doorway.
+        self.declare_parameter('max_goal_distance_m', 0.0)
+        # Adaptive room split: no fixed size; cut at door-width gaps.
+        self.declare_parameter('room_aware', False)
+        self.declare_parameter('door_clearance_m', 0.50)
+        self.declare_parameter('room_min_cells', 1200)
         self.declare_parameter('map_topic', '/map')
         # 门控（与 auto_mapping_supervisor 用同一套服务/参数，不新造接口）
         self.declare_parameter('open_gate', True)      # False = 只算不发（纯调试）
@@ -93,6 +104,9 @@ class ViewpointPlanner(Node):
         self.declare_parameter('bootstrap_fwd_timeout_s', 20.0)
 
         self._map: OccupancyGrid | None = None
+        self._geofence_origin: tuple[int, int] | None = None
+        self._room_mask = None
+        self._room_key = None
         self._covered: np.ndarray | None = None
         self._visible_cache: np.ndarray | None = None
         self._cache_key = None
@@ -170,8 +184,15 @@ class ViewpointPlanner(Node):
     def _on_map(self, msg: OccupancyGrid) -> None:
         if self._map is None or (msg.info.width, msg.info.height) != (
                 self._map.info.width, self._map.info.height):
+            # Every cached array is shape-bound.  A resize (common when SLAM
+            # expands the map) used to leave _observable at the old size and
+            # crash _observable_coverage with a broadcast error.
             self._covered = None
+            self._observable = None
+            self._visible_cache = None
             self._cache_key = None
+            self._room_mask = None
+            self._room_key = None
         self._map = msg
 
     def _robot_cell(self):
@@ -186,6 +207,42 @@ class ViewpointPlanner(Node):
         col = int((x - m.info.origin.position.x) / m.info.resolution)
         row = int((y - m.info.origin.position.y) / m.info.resolution)
         return (row, col), (x, y)
+
+    def _inside_geofence(self, cell, check_room: bool = True) -> bool:
+        limit = float(self.get_parameter('max_goal_distance_m').value)
+        if limit <= 0.0 or self._geofence_origin is None or self._map is None:
+            return self._inside_room(cell) if check_room else True
+        dy = cell[0] - self._geofence_origin[0]
+        dx = cell[1] - self._geofence_origin[1]
+        if math.hypot(dy, dx) * self._map.info.resolution > limit:
+            return False
+        return self._inside_room(cell) if check_room else True
+
+    def _inside_room(self, cell) -> bool:
+        if not bool(self.get_parameter('room_aware').value):
+            return True
+        return self._room_mask is None or bool(self._room_mask[cell[0], cell[1]])
+
+    def _update_room_mask(self, free, cell) -> None:
+        if not bool(self.get_parameter('room_aware').value):
+            self._room_mask = None
+            return
+        key = (free.shape, int(free.sum()), int(cell[0]), int(cell[1]))
+        if self._room_mask is not None and key == self._room_key:
+            return
+        self._room_key = key
+        mask = rm.segment_room(
+            free, cell, self._map.info.resolution,
+            float(self.get_parameter('door_clearance_m').value))
+        min_cells = int(self.get_parameter('room_min_cells').value)
+        if mask is None or int(mask.sum()) < min_cells:
+            self._room_mask = None
+            self.get_logger().warn(
+                'room-aware: core not stable yet (%s cells); local bootstrap only' %
+                ('none' if mask is None else int(mask.sum())))
+        else:
+            self._room_mask = mask
+            self.get_logger().info('room-aware: room mask %d cells' % int(mask.sum()))
 
     def _on_scan(self, msg: LaserScan) -> None:
         self._scan = msg
@@ -352,6 +409,8 @@ class ViewpointPlanner(Node):
         if cell is None:
             self._set_state('waiting-tf')
             return
+        if self._geofence_origin is None:
+            self._geofence_origin = cell
         now = time.monotonic()
         if now < self._dwell_until:          # 到点停留收集扫描
             self._accumulate_visibility(cell)
@@ -375,10 +434,13 @@ class ViewpointPlanner(Node):
         stable = (now - self._map_stable_since) >= float(
             self.get_parameter('map_stable_s').value)
 
+        self._update_room_mask(free, cell)
+
         # ⚠️ 覆盖率不能单独当"完成"判据：刚启动时地图只有一小块，
         #    一个视点就"覆盖"了它的 100%（2026-11-04 实测）。
         #    真正的判据是：**没有前沿（门口）且地图不再增长**。
-        has_frontier = bool(vc.frontier_cells(free, unknown))
+        has_frontier = any(self._inside_geofence(f)
+                           for f in vc.frontier_cells(free, unknown))
 
         # 正在执行的目标
         if self._target is not None:
@@ -465,7 +527,7 @@ class ViewpointPlanner(Node):
             boot = self._scan_bootstrap_cell(cell, drivable, free)
         if boot is not None:
             self._visited.add(boot)
-            self._dispatch(boot, now, label='bootstrap')
+            self._dispatch(boot, now, label='bootstrap', allow_outside_room=True)
             return
 
         # 地图太小 / 没有够远的目标 → 用雷达起步（转向最开阔方向 + 前进 1 m）
@@ -530,7 +592,7 @@ class ViewpointPlanner(Node):
             boot = self._scan_bootstrap_cell(cell, drivable, free)
             if boot is not None:
                 self._visited.add(boot)
-                self._dispatch(boot, now, label='bootstrap-forced')
+                self._dispatch(boot, now, label='bootstrap-forced', allow_outside_room=True)
                 return
             self._set_state('frontier-blocked')
             return
@@ -609,6 +671,9 @@ class ViewpointPlanner(Node):
             cands = vc.candidate_viewpoints(drivable, 1)
         if not cands:
             return None
+        cands = [c for c in cands if self._inside_geofence(c)]
+        if not cands:
+            return None
         dist = vc.bfs_distance(drivable, cell)
         range_cells = int(float(self.get_parameter('sensor_range_m').value) / res)
         fill = int(self.get_parameter('fill_cells').value)
@@ -628,7 +693,9 @@ class ViewpointPlanner(Node):
         idx = vc.pick_next_viewpoint(
             cands, vis, self._covered.ravel(), dist, radius_cells,
             visited=self._visited,
-            min_gain_cells=int(self.get_parameter('min_gain_cells').value))
+            min_gain_cells=int(self.get_parameter('min_gain_cells').value),
+            heading=self._robot_heading(), origin=cell,
+            turn_weight=float(self.get_parameter('turn_weight').value))
         return None if idx is None else cands[idx]
 
     def _scan_bootstrap_cell(self, cell, drivable, free):
@@ -665,6 +732,9 @@ class ViewpointPlanner(Node):
                 ty, tx = yy, xx
                 break
         if ty is None:
+            return None
+        if not self._inside_geofence((ty, tx), check_room=False):
+            self.get_logger().warn('雷达起步目标越出房间/兜底半径，放弃')
             return None
         self.get_logger().info('雷达起步：开阔方向 %.0f°（净空 %.1f m）→ 目标格 (%d,%d)' % (
             math.degrees(ang), clear, ty, tx))
@@ -714,6 +784,9 @@ class ViewpointPlanner(Node):
         cands = vc.candidate_viewpoints(drivable, step)
         if not cands:
             return []
+        cands = [c for c in cands if self._inside_geofence(c)]
+        if not cands:
+            return []
         seed = self._snap(cell, drivable)
         if seed is None:
             return []
@@ -742,7 +815,9 @@ class ViewpointPlanner(Node):
                 cands, vis, covered, step_dist, radius_cells,
                 visited=self._visited | set(batch),
                 min_gain_cells=int(self.get_parameter('min_gain_cells').value),
-                home_dist=home_dist)
+                home_dist=home_dist,
+                heading=self._robot_heading(), origin=seed,
+                turn_weight=float(self.get_parameter('turn_weight').value))
             if idx is None:
                 break
             batch.append(cands[idx])
@@ -873,6 +948,29 @@ class ViewpointPlanner(Node):
             return any(math.hypot(c[0] - b[0], c[1] - b[1]) * self._map.info.resolution < 0.8
                        for b in self._bad_frontiers)
 
+        # 2026-11-06 (1A map replay): choose one reachable representative per
+        # connected frontier cluster.  Per-cell fallback caused near-zero-gain
+        # target switching and left/right ping-pong at the same wall.
+        best_tgt, best_score = None, -1.0
+        for cluster in vc.frontier_clusters(fronts, free.shape):
+            live = [f for f in cluster
+                    if dist[f[0], f[1]] >= 0 and not _blacklisted(f)
+                    and self._inside_geofence(f)]
+            if not live:
+                continue
+            far_live = [f for f in live if dist[f[0], f[1]] >= nearest]
+            use = far_live or live
+            tgt = vc.expansion_target(use, drivable, dist, inset_cells=inset)
+            if tgt is None:
+                continue
+            d = min(int(dist[f[0], f[1]]) for f in live)
+            score = len(cluster) / (d + 1.0)
+            if score > best_score:
+                best_tgt, best_score = tgt, score
+        if best_tgt is not None:
+            self._dispatch(best_tgt, now, label='frontier')
+            return True
+
         reachable = [f for f in fronts
                      if dist[f[0], f[1]] >= 0 and not _blacklisted(f)]
         reachable.sort(key=lambda f: dist[f[0], f[1]])
@@ -917,7 +1015,15 @@ class ViewpointPlanner(Node):
         self._set_bool_param('motion_enabled', False)
         self._gate_open = False
 
-    def _dispatch(self, cell, now, label: str = 'viewpoint') -> None:
+    def _dispatch(self, cell, now, label: str = 'viewpoint',
+                  allow_outside_room: bool = False) -> None:
+        if not self._inside_geofence(cell, check_room=not allow_outside_room):
+            self.get_logger().warn(
+                'geofence: reject target %s (outside %.1f m)' % (
+                    cell, float(self.get_parameter('max_goal_distance_m').value)))
+            self._target = None
+            self._set_state('geofence-reject')
+            return
         m = self._map
         res = m.info.resolution
         x = m.info.origin.position.x + (cell[1] + 0.5) * res

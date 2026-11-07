@@ -148,12 +148,17 @@ def pick_next_viewpoint(candidates: Sequence[tuple[int, int]],
                         radius_cells: int,
                         visited: Iterable[tuple[int, int]] = (),
                         min_gain_cells: int = 12,
-                        home_dist: np.ndarray | None = None) -> int | None:
+                        home_dist: np.ndarray | None = None,
+                        heading: float | None = None,
+                        origin: tuple[int, int] | None = None,
+                        turn_weight: float = 0.0) -> int | None:
     """在半径内挑"性价比最高"（新增可见/路径长度）的视点，返回候选下标。
 
     - 半径限制用 home_dist（相对车本身）判断，dist 只用来算性价比；
       两者分开是为了支持"滚动续点"：选点要连贯（相对上一点），但不能越选越远。
     - 新增可见格少于 min_gain_cells 的不要（避免为 1 格跑很远）
+    - heading/origin/turn_weight 可选：给当前朝向一个惩罚，减少左右来回换目标。
+      origin 是机器人栅格 (row,col)；heading 是 map 世界 yaw。
     """
     visited_set = set(visited)
     best_i, best_score = None, 0.0
@@ -171,9 +176,44 @@ def pick_next_viewpoint(candidates: Sequence[tuple[int, int]],
         if gain < min_gain_cells:
             continue
         score = gain / (d + 1.0)          # 性价比：新增可见格 / 路径代价
+        if (heading is not None and origin is not None and turn_weight > 0.0):
+            # Grid row grows opposite to map +Y.  Keep the current travel
+            # direction unless a large gain justifies a turn.
+            target_yaw = math.atan2(-(cell[0] - origin[0]),
+                                    cell[1] - origin[1])
+            delta = (target_yaw - heading + math.pi) % (2.0 * math.pi) - math.pi
+            score *= max(0.15, 1.0 - turn_weight * abs(delta) / math.pi)
         if score > best_score:
             best_score, best_i = score, i
     return best_i
+
+
+def frontier_clusters(frontiers: Sequence[tuple[int, int]],
+                      shape: tuple[int, int]) -> list[list[tuple[int, int]]]:
+    """把 8 邻接的前沿格聚成簇。
+
+    建图回退时，逐格选前沿会让机器人在同一段墙边反复换目标（左右摆）。
+    每簇只选一个代表点，避免这种零收益切换。
+    """
+    _ = shape
+    remaining = set(frontiers)
+    clusters: list[list[tuple[int, int]]] = []
+    while remaining:
+        seed = remaining.pop()
+        q = deque([seed])
+        cluster = [seed]
+        while q:
+            y, x = q.popleft()
+            for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1),
+                           (-1, -1), (-1, 1), (1, -1), (1, 1)):
+                nxt = (y + dy, x + dx)
+                if nxt in remaining:
+                    remaining.remove(nxt)
+                    cluster.append(nxt)
+                    q.append(nxt)
+        clusters.append(cluster)
+    return clusters
+
 
 
 def frontier_cells(free: np.ndarray, unknown: np.ndarray) -> list[tuple[int, int]]:

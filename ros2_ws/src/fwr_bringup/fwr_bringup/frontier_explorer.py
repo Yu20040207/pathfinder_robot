@@ -546,19 +546,24 @@ class FrontierExplorer(Node):
                              if math.hypot(x - rx, y - ry) <= skip_r)))
             pts = kept
         tail_gap = math.hypot(pts[-1][0] - rx, pts[-1][1] - ry)
+        # 2026-11-07：闭环路线还有一个坑 —— **终点离路线起点近**时，
+        # 车按导航先去起点，路过终点附近就被 Nav2 的 goal checker 判"已到达"，
+        # 整条路线提前结束（现场："终点在起点附近就走了几步就停"）。
+        # 所以终点离车近**或**离起点近，都必须改逐段执行。
+        loop_gap = math.hypot(pts[-1][0] - pts[0][0], pts[-1][1] - pts[0][1])
         tail_limit = float(self.get_parameter('fixed_route_tail_gap_m').value)
         self.get_logger().info(
-            '多点路线 %d 个点: %s  终点距车 %.2f m（阈值 %.1f）' % (
+            '多点路线 %d 个点: %s  终点距车 %.2f m / 距起点 %.2f m（阈值 %.1f）' % (
                 len(pts), ' → '.join('(%.2f,%.2f)' % (x, y) for x, y, _ in pts),
-                tail_gap, tail_limit))
-        if tail_gap < tail_limit:
+                tail_gap, loop_gap, tail_limit))
+        if tail_gap < tail_limit or loop_gap < tail_limit:
             self._multi_points = None
             self._fixed_goals = pts
             self._fixed_goal = pts[0]
             self._sm.start_fixed(legs=len(pts))
             self.get_logger().warn(
-                '终点距车仅 %.2f m（闭环路线）→ 改为逐段执行 %d 段，'
-                '否则 goal checker 会立刻判到达' % (tail_gap, len(pts)))
+                '闭环路线（终点距车 %.2f m / 距起点 %.2f m）→ 改为逐段执行 %d 段，'
+                '否则 goal checker 会立刻判到达' % (tail_gap, loop_gap, len(pts)))
             response.accepted = True
             response.reason = f'ok: {len(pts)} points (sequential, tail gap {tail_gap:.2f} m)'
             return response

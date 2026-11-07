@@ -158,3 +158,34 @@ def test_fill_leaks_only_a_few_cells_past_wall():
     behind = [y for y, x in cells if 3 <= x <= 5 and y > 2]
     assert not behind or max(behind) - 2 <= fill, (
         '填充渗透了 %d 格，超过允许的 %d' % (max(behind) - 2 if behind else 0, fill))
+
+
+def test_heading_penalty_prefers_forward_candidate():
+    """航向连续性：同等收益时不应为身后的点立刻掉头。"""
+    w = h = 20
+    dist = np.zeros((h, w), dtype=np.int32)
+    covered = np.zeros(w * h, dtype=bool)
+    vis = np.arange(100, dtype=np.int64)
+    cands = [(5, 12), (5, 2)]          # east / west of robot at (5,7)
+    visibility = [vis, vis.copy()]
+    i_forward = vc.pick_next_viewpoint(
+        cands, visibility, covered, dist, radius_cells=50,
+        heading=0.0, origin=(5, 7), turn_weight=0.5)
+    i_plain = vc.pick_next_viewpoint(
+        cands, visibility, covered, dist, radius_cells=50)
+    assert i_forward == 0, '朝向 0° 时应优先同一方向的候选'
+    assert i_plain is not None
+
+
+def test_frontier_clusters_group_adjacent_cells():
+    """相邻前沿格必须合成一簇，否则回退会逐格换目标。"""
+    w = h = 12
+    free = np.zeros((h, w), dtype=bool)
+    unknown = np.zeros((h, w), dtype=bool)
+    for y, x in [(3, 3), (3, 4), (4, 4), (8, 8)]:
+        free[y, x] = True
+        unknown[y, x + 1] = True
+    fronts = vc.frontier_cells(free, unknown)
+    clusters = vc.frontier_clusters(fronts, (h, w))
+    sizes = sorted(len(c) for c in clusters)
+    assert sizes == [1, 3], f'unexpected clusters: {clusters}'

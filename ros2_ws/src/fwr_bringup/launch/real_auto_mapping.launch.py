@@ -15,6 +15,7 @@ from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -42,6 +43,12 @@ def generate_launch_description():
         # 两个都默认 false ⇒ 不传参数时行为与之前**完全一致**。
         DeclareLaunchArgument('viewpoint_planner', default_value='false'),
         DeclareLaunchArgument('viewpoint_enabled', default_value='false'),
+        # 0 = 不限制；小范围房间测试设 3~5 m，超出房间边界的视点直接拒绝。
+        DeclareLaunchArgument('max_goal_distance_m', default_value='0.0'),
+        # Adaptive room split by door width; no fixed room size.
+        DeclareLaunchArgument('room_aware', default_value='false'),
+        DeclareLaunchArgument('door_clearance_m', default_value='0.50'),
+        DeclareLaunchArgument('room_min_cells', default_value='1200'),
         # 建图专用行为树（条件重规划，防中途改道）。默认 = 导航版，行为不变。
         DeclareLaunchArgument('mapping_bt', default_value='false'),
         # stuck_reverser 会把"没人派目标"误判成"被堵"然后倒车。用视点规划时可以关掉。
@@ -51,6 +58,10 @@ def generate_launch_description():
         DeclareLaunchArgument('kick_reverse', default_value='true'),
         # 建图卡住自动修复（默认开：用户要求这类卡死不再需要人工介入）
         DeclareLaunchArgument('stuck_guard', default_value='true'),
+        # chain_watchdog directly changes a lifecycle-managed node; with the
+        # collision lifecycle manager present this can trigger a bond failure.
+        # Keep it optional; room runs disable it and let the manager own the node.
+        DeclareLaunchArgument('chain_watchdog', default_value='true'),
         # 建图 + Nav2 + 门控/碰撞监控/方向选择器（复用 real_navigation 的 use_saved_map:=false 分支）
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(str(share / 'launch' / 'real_navigation.launch.py')),
@@ -121,7 +132,8 @@ def generate_launch_description():
         # 链路看门狗：碰撞监控卡死时自动重启（老毛病，见 AGENTS.md）
         ExecuteProcess(
             cmd=['python3', str(Path(__file__).resolve().parents[4] / 'tools' / 'chain_watchdog.py')],
-            name='chain_watchdog', output='screen'),
+            name='chain_watchdog', output='screen',
+            condition=IfCondition(LaunchConfiguration('chain_watchdog'))),
         # 监督节点：踢一脚小方块让地图长轮廓 → 打开自动授权交给 explore_lite
         # （同时 10 Hz 发布 /explore/state=navigating 保持安全链）
         Node(package='fwr_bringup', executable='auto_mapping_supervisor',
@@ -147,5 +159,16 @@ def generate_launch_description():
              parameters=[str(share / 'config' / 'real_viewpoint_planner.yaml'),
                          {'use_sim_time': use_sim_time,
                           'enabled': PythonExpression([
-                              "'", LaunchConfiguration('viewpoint_enabled'), "' == 'true'"])}]),
+                              "'", LaunchConfiguration('viewpoint_enabled'), "' == 'true'"]),
+                          'max_goal_distance_m': ParameterValue(
+                              LaunchConfiguration('max_goal_distance_m'),
+                              value_type=float),
+                          'room_aware': PythonExpression([
+                              "'", LaunchConfiguration('room_aware'), "' == 'true'"]),
+                          'door_clearance_m': ParameterValue(
+                              LaunchConfiguration('door_clearance_m'),
+                              value_type=float),
+                          'room_min_cells': ParameterValue(
+                              LaunchConfiguration('room_min_cells'),
+                              value_type=int)}]),
     ])

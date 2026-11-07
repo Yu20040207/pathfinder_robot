@@ -20,6 +20,7 @@ viewpoint_planner:
     hop_timeout_s: 45.0       # 单跳超时
     arrive_m: 0.45            # 判定"到了"的距离
     replan_period_s: 1.0      # 决策周期
+    turn_weight: 0.4          # 航向连续性惩罚；1A 回放验证：四房全过、翻转 39 次
     map_topic: /map
     # 门控：自己开运动门（与 supervisor 同一套接口）
     open_gate: true           # false = 只计算不派目标（纯离线调试）
