@@ -1023,8 +1023,23 @@ class FrontierExplorer(Node):
             if limit > 0 and self._consecutive_failures >= limit:
                 self._consecutive_failures = 0
                 self._clear_costmaps()
+            # 2026-11-07：导航任务失败时**自愈重试**。
+            # 现场：全局规划报 "Starting point in lethal space!"（车所在格被瞬时标成障碍，
+            # 例如贴墙时脚印/障碍层残留），行为树重试 6 次后 abort → 整条路线直接结束。
+            # 这里清一次代价地图再重派同一段，最多 max_stuck_retries 次。
+            if (self._sm.fixed_goal and self._sm.enabled
+                    and self._stuck_retries < int(self.get_parameter('max_stuck_retries').value)):
+                self._stuck_retries += 1
+                self._clear_costmaps()
+                self._status = 'idle'
+                self.get_logger().warn(
+                    '导航失败 → 清空代价地图并重派同一段（第 %d/%d 次重试）' % (
+                        self._stuck_retries,
+                        int(self.get_parameter('max_stuck_retries').value)))
+                return
         else:
             self._consecutive_failures = 0
+            self._stuck_retries = 0
         self._handle = None
         self._cancel_future = None
         self._cancel_after_accept = False

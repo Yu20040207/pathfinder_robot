@@ -319,3 +319,16 @@ def test_closed_loop_route_uses_sequential_legs():
     src = (ROOT / 'fwr_bringup' / 'frontier_explorer.py').read_text()
     assert 'loop_gap' in src, '需要比较终点与路线起点的距离'
     assert 'tail_gap < tail_limit or loop_gap < tail_limit' in src
+
+
+def test_failed_fixed_goal_is_retried_after_clearing():
+    """导航失败（例如"起点格致命"）必须清空代价地图并重派同一段，而不是直接结束任务。
+
+    2026-11-07 现场：GridBased 报 "Starting point in lethal space!"，行为树重试 6 次后
+    abort，整条多点路线结束（用户："怎么停下来了"）。
+    """
+    src = (ROOT / 'fwr_bringup' / 'frontier_explorer.py').read_text()
+    seg = src[src.index('def _finished('):]
+    seg = seg[:seg.index('def ', 20)]
+    assert 'max_stuck_retries' in seg and '_clear_costmaps()' in seg
+    assert "self._status = 'idle'" in seg, '重试应让状态机重新派发'
