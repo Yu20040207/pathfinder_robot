@@ -5905,3 +5905,56 @@ max_goal_distance_m=6.0 chain_watchdog=false max_runtime_s=0.0`
 - 给旋转/侧后方加低净空硬停或限制原地转向；
 - 或让车在每次转向前一米范围净空 > 车体半宽 + 余量；
 - 修好后再次启动，目标仍是房间内无前沿 + 地图稳定自动结束。
+
+## 2026-11-07 11:05 · v1.7：多点导航"提前结束"的四个陷阱 + 停止/继续按进度恢复
+
+### 会话目标
+实机运行中多点导航"走到一半就停"，逐个定位并修复；保存为 v1.7。
+
+### 仓库改动
+- `frontier_explorer`：
+  - 闭环判定补上 **`loop_gap`**（终点距**路线起点**）——原来只比"终点距车"，
+    `终点在起点附近` 的路线会被 goal checker 在"去起点路上路过终点"时判已到达。
+  - 剔除"车已站住的路线点"时**永不剔除终点**（现场：终点选在车旁 0.2 m → 被剔除 →
+    停在倒数第二个点、RViz 终点标记消失）。
+  - 导航失败（如 `Starting point in lethal space!`）→ **清空代价地图并重派同一段**，
+    最多 `max_stuck_retries`(2) 次；成功则计数归零。
+  - 新增 `/explore/resume`：停止只挂起（保留路线与段索引），继续走"本该走的那一段"；
+    through-poses 继续时重置派发计数（否则状态机认为已走完立刻停）。
+  - `/reverse/active`：让位后退期间**暂停**任务（不中止）；同点让位 >2 次跳过该点。
+  - 全部静默中止加 `[任务中止] …` 日志（manual/授权/故障/停止/超时/状态机）。
+- `trail_reverser`：左右净空**分开测**，`should_start` 用 `max`（原来混一起取 min →
+  右侧 1 m 有空间也误判"两侧都窄"）；发布 `/reverse/active`；`_finish` 时置 False。
+- `exploration_core`：新增 `resume_fixed()` / `reset_dispatched()` / `skip_leg()`。
+- `real_navigate_through_poses.xml`：补 **`RemovePassedGoals`**（radius 0.7）——
+  这是"经过途经点后折返"的根因；实测修复后 3 点路线 75 s 走完约 10.6 m。
+- 面板：按钮加"（空格）"，空格 `Qt::ApplicationShortcut` 调**与鼠标相同**的函数；
+  多点"继续"按任务类型重发（`resume_multi_`）；**选点后自动预览**（原来开始按钮一直灰）；
+  单点预览失败提示细化（膨胀区/临时障碍）。
+- `tools/sim_reverse_chain_sequential.py`、`_through_poses.py`：用真实 explorer 对象
+  模拟"暂停→恢复→跳点"，**强制独立 ROS 域**（`ROS_DOMAIN_ID≠0`）防污染实机。
+- `AGENTS.md`：§3.975 改为"障碍层保留 + 空闲周期清空"；新增 §3.976（四个提前结束陷阱
+  与参数表）、§3.977（后退让位现状：默认关闭、未实机验证）。
+
+### 已验证
+- `PYTHONPATH=ros2_ws/src/fwr_bringup .venv/bin/python -m pytest ros2_ws/src/fwr_bringup/test -q`
+  → **306 passed**；`colcon test --packages-select fwr_rviz_nav` → 15 tests / 0 failures。
+- 实机（日志 `/tmp/fwr_runs/nav_1107a.log`、`nav_1107b.log`、`nav_1107c.log`）：
+  - 复现并定位两次失败：`Starting point in lethal space!`（车贴墙 0.35 m）→ 已加重试自愈；
+    `剔除 … (0.07,-0.60)` 把终点删掉 → 已修。
+  - 修复后用户确认"可以了"。
+  - 自动播种：match 0.027~0.044 m、贴墙 90%。
+- 模拟（独立域 77）：顺序 3 段与 through-poses 4 点两条链路全部符合预期。
+
+### 未验证 / 遗留
+- **后退让位**仍未实机验证（默认关闭）；它与"暂停→恢复→跳点"的联动只有单测+模拟。
+- 直线段左右摆动未处理（规划器沿代价谷 + BT 未接平滑器）。
+- 14:41 曾出现右轮失速（Rpwm 0.77 / Rmm/s 0）→ 判为**右轮机械受阻**，原因待查。
+
+### 当前运行状态
+- 栈：`run_navigation.launch.py start_rviz:=false`（地图 1A_map_fixed），
+  日志 `/tmp/fwr_runs/nav_1107c.log`，RViz 已开，fault 0、待机。
+
+### 下一步
+- 直线摆动：先量 `/plan` 横向偏移与 `/cmd_vel_nav` 的 ω 翻转次数，再决定改规划还是控制器。
+- 右轮机械检查；若解决可再评估后退让位实机验证。
