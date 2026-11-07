@@ -332,3 +332,15 @@ def test_failed_fixed_goal_is_retried_after_clearing():
     seg = seg[:seg.index('def ', 20)]
     assert 'max_stuck_retries' in seg and '_clear_costmaps()' in seg
     assert "self._status = 'idle'" in seg, '重试应让状态机重新派发'
+
+
+def test_route_never_drops_the_destination_waypoint():
+    """剔除"车已站在上面"的点时，**终点必须保留**。
+
+    2026-11-07 现场：操作者把终点选在车当前位置附近 → 终点被剔除 → 路线少一点，
+    停在终点前一个航点、RViz 里终点标记也消失了。
+    """
+    src = (ROOT / 'fwr_bringup' / 'frontier_explorer.py').read_text()
+    seg = src[src.index('route_skip_near_m'):]
+    seg = seg[:seg.index('tail_gap')]
+    assert 'i == len(pts) - 1 or' in seg, '终点不能参与剔除'

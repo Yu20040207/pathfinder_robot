@@ -537,13 +537,18 @@ class FrontierExplorer(Node):
         # NavigateThroughPoses 要求"穿过"一个零长度首段 → 控制器围着该点转圈
         # （现场表现："到起点后一直徘徊"）。这里把车已经站在上面的点剔掉。
         skip_r = float(self.get_parameter('route_skip_near_m').value)
-        kept = [p_ for p_ in pts if math.hypot(p_[0] - rx, p_[1] - ry) > skip_r]
+        # 2026-11-07 修正：**绝不能剔除终点**。操作者常把终点选在车当前位置附近，
+        # 原来连终点一起剔除 → 路线少一个点 → "停在终点前一个航点、终点标记也没了"。
+        # 只剔除"除终点以外"的、车已经站在上面的点（那才是零长度首段问题的来源）。
+        kept = [p_ for i, p_ in enumerate(pts)
+                if i == len(pts) - 1 or math.hypot(p_[0] - rx, p_[1] - ry) > skip_r]
         if len(kept) >= 2 and len(kept) != len(pts):
             self.get_logger().warn(
-                '剔除 %d 个"车已站在上面"的路线点（<%.1f m）：%s' % (
+                '剔除 %d 个"车已站在上面"的路线点（<%.1f m，终点始终保留）：%s' % (
                     len(pts) - len(kept), skip_r,
-                    ' '.join('(%.2f,%.2f)' % (x, y) for x, y, _ in pts
-                             if math.hypot(x - rx, y - ry) <= skip_r)))
+                    ' '.join('(%.2f,%.2f)' % (x, y) for i, (x, y, _) in enumerate(pts)
+                             if i != len(pts) - 1
+                             and math.hypot(x - rx, y - ry) <= skip_r)))
             pts = kept
         tail_gap = math.hypot(pts[-1][0] - rx, pts[-1][1] - ry)
         # 2026-11-07：闭环路线还有一个坑 —— **终点离路线起点近**时，
