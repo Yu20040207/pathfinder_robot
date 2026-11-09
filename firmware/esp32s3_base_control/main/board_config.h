@@ -84,3 +84,26 @@
 #define ENC_EB_0 GPIO_NUM_9
 #define ENC_EA_1 GPIO_NUM_10
 #define ENC_EB_1 GPIO_NUM_11
+
+// ---------------------------------------------------------------------------
+// 6. 速度环前馈与起步参数（按电机 + 减速比 + 负载标定）
+//
+// 2026-11-09 实测（100mm 轮 / 100:1 电机 / 悬空）占空比→速度曲线：
+//     10% → 35 mm/s   15% → 57   20% → 78   25% → 99   30% → 121   40% → 163
+// 拟合：速度 ≈ -7 + 427 × 占空比  →  占空比 ≈ (速度 + 7) / 427
+//
+// 旧电机（66mm 轮）的常数是 0.22 + 0.0035v / 起步 0.50 / 低速兜底 0.58，
+// 用在新电机上会让 100 mm/s 实际跑 185 mm/s（前馈给太高，而积分只能加不能减）。
+// ---------------------------------------------------------------------------
+#ifndef FF_BASE_DUTY
+#define FF_BASE_DUTY 0.02f          // 前馈常数项
+#endif
+#ifndef FF_PER_MMPS
+#define FF_PER_MMPS 0.0024f         // 前馈每 mm/s 的占空比增量
+#endif
+#ifndef STARTUP_PULSE_DUTY
+#define STARTUP_PULSE_DUTY 0.12f    // 起转脉冲起始占空比（能转起来即可）
+#endif
+#ifndef LOW_SPEED_FLOOR_DUTY
+#define LOW_SPEED_FLOOR_DUTY 0.15f  // 低速（<40 mm/s）兜底占空比
+#endif

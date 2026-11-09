@@ -332,7 +332,8 @@ void base_tick(base_control_t *c, int64_t now, int32_t left, int32_t right,
                 c->startup_s[i] += dt;
                 // Start at the proven suspended-wheel duty. Only a wheel
                 // still below 15 mm/s receives the higher loaded-start duty.
-                c->pwm[i] = direction*clamp(.5f + 1.25f*c->startup_s[i], .5f, MAX_DUTY);
+                c->pwm[i] = direction*clamp(STARTUP_PULSE_DUTY + 1.25f*c->startup_s[i],
+                                    STARTUP_PULSE_DUTY, MAX_DUTY);
                 c->stall_s[i] = wheel_stalled(c->target[i], c->measured[i],
                                               direction) ? c->stall_s[i]+dt : 0;
                 c->wrong_s[i] = direction*c->measured[i]<-20 ? c->wrong_s[i]+dt : 0;
@@ -355,7 +356,7 @@ void base_tick(base_control_t *c, int64_t now, int32_t left, int32_t right,
             float trial_i = clamp(c->integral[i]+.0015f*error*dt, 0, .75f);
             // 2026-10-29：实测 0.5 占空比只能到 ~36 mm/s，原前馈(0.22+0.0017v)偏低，
 // 中高速下要靠积分慢慢爬、期间容易撞上失速判据。增益提到 0.0035。
-            float feedforward = .22f + .0035f*desired;
+            float feedforward = FF_BASE_DUTY + FF_PER_MMPS*desired;
             effort = feedforward + .0012f*error + trial_i;
             if (effort<=.75f || error<0) c->integral[i] = trial_i;
             effort = clamp(feedforward + .0012f*error + c->integral[i], 0, MAX_DUTY);
@@ -364,7 +365,7 @@ void base_tick(base_control_t *c, int64_t now, int32_t left, int32_t right,
         // startup pulse. Normal tracking remains free to use lower duty.
         if (!pivot && goal*direction > 0 && c->startup_s[i] >= .05f &&
             direction*c->measured[i] < 40.0f)
-            effort = fmaxf(effort, .58f);
+            effort = fmaxf(effort, LOW_SPEED_FLOOR_DUTY);
         // A pivot needs authority above and below its rolling duty. The
         // fixed 60% floor made gyro correction unable to slow a fast turn.
         // Use a separate wheel-speed PI around rolling feedforward; the
