@@ -1,4 +1,5 @@
 #include "control.h"
+#include "board_config.h"
 #include <math.h>
 #include <string.h>
 
@@ -195,15 +196,15 @@ void base_tick(base_control_t *c, int64_t now, int32_t left, int32_t right,
         // Subtract via unsigned arithmetic to handle int32 encoder wrap.
         int32_t delta = (int32_t)((uint32_t)current[i]-(uint32_t)c->counts[i]);
         deltas[i] = delta;
-        float speed = (i==0 ? -1.0f : 1.0f)*delta*(210.0f/1468.0f)/dt;
+        float speed = (i==0 ? -1.0f : 1.0f)*delta*WHEEL_MM_PER_COUNT/dt;
         c->measured[i] += (1.0f-expf(-dt/.08f))*(speed-c->measured[i]);
         if (c->active && (uint32_t)(skips[i]-c->skipped[i])>8) fail(c, BASE_ENCODER);
         if (c->active && c->sync_mode)
             c->sync_distance[i] += c->target[i]*(i==0 ? -1.0f : 1.0f)*
-                                   delta*(210.0f/1468.0f);
+                                   delta*WHEEL_MM_PER_COUNT;
         if (c->active && c->turn_mode) {
             float recent_step = c->target[i]*(i==0 ? -1.0f : 1.0f)*
-                                delta*(210.0f/1468.0f);
+                                delta*WHEEL_MM_PER_COUNT;
             c->turn_recent_mm[i] += recent_step-
                                     c->turn_history_mm[i][c->turn_ring_pos];
             c->turn_history_mm[i][c->turn_ring_pos] = recent_step;

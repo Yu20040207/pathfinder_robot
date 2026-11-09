@@ -8,7 +8,10 @@
 #include "freertos/task.h"
 #include "control.h"
 #include "protocol.h"
+#include "board_config.h"
+#if !DRIVER_WSDC2412D
 #include "motor_direction.h"
+#endif
 #include "quadrature.h"
 
 static portMUX_TYPE lock = portMUX_INITIALIZER_UNLOCKED;
@@ -16,9 +19,16 @@ static base_control_t controller;
 static volatile int32_t counts[2];
 static volatile uint32_t skipped[2];
 static volatile uint8_t previous[2];
-static const gpio_num_t ea[2] = {GPIO_NUM_8, GPIO_NUM_10};
-static const gpio_num_t eb[2] = {GPIO_NUM_9, GPIO_NUM_11};
-static const gpio_num_t motor_pins[4] = {GPIO_NUM_4, GPIO_NUM_5, GPIO_NUM_6, GPIO_NUM_7};
+static const gpio_num_t ea[2] = {ENC_EA_0, ENC_EA_1};
+static const gpio_num_t eb[2] = {ENC_EB_0, ENC_EB_1};
+#if DRIVER_WSDC2412D
+static const gpio_num_t pwm_pins[2] = {PWM_PIN_0, PWM_PIN_1};
+static const gpio_num_t ina_pins[2] = {INA_PIN_0, INA_PIN_1};
+static const gpio_num_t inb_pins[2] = {INB_PIN_0, INB_PIN_1};
+static volatile int8_t last_sign[2];      // 上一次的输出方向，用于换向归零
+#else
+static const gpio_num_t motor_pins[4] = {PWM_PIN_0, PWM_PIN_1, PWM_PIN_2, PWM_PIN_3};
+#endif
 
 static uint8_t encoder_state(unsigned motor) {
     return (gpio_get_level(ea[motor])<<1) | gpio_get_level(eb[motor]);
@@ -33,16 +43,49 @@ static void edge(void *arg) {
     previous[motor] = current;
     portEXIT_CRITICAL_ISR(&lock);
 }
-static void pwm(int channel, float duty) {
-    ESP_ERROR_CHECK(ledc_set_duty(LEDC_LOW_SPEED_MODE, channel, (uint32_t)lroundf(duty*1024)));
-    ESP_ERROR_CHECK(ledc_update_duty(LEDC_LOW_SPEED_MODE, channel));
+static void pwm(unsigned channel, float duty) {
+    if (duty < 0) duty = 0;
+    if (duty > 1) duty = 1;
+    ESP_ERROR_CHECK(ledc_set_duty(LEDC_LOW_SPEED_MODE, (ledc_channel_t)channel,
+                                  (uint32_t)lroundf(duty*1024)));
+    ESP_ERROR_CHECK(ledc_update_duty(LEDC_LOW_SPEED_MODE, (ledc_channel_t)channel));
 }
+#if DRIVER_WSDC2412D
+// WSDC2412D 真值表：INA=INB=L → 制动；INA=L,INB=H → 正转；INA=H,INB=L → 反转；
+//                  INA=INB=H → 脱机（滑行）。停车用制动，和旧板"两路 PWM 全低"一致。
+static void brake(unsigned m) {
+    gpio_set_level(ina_pins[m], 0);
+    gpio_set_level(inb_pins[m], 0);
+}
+static void drive(unsigned m, float duty) {
+    int8_t sign = duty > 0 ? 1 : (duty < 0 ? -1 : 0);
+    // 手册要求"大能量正反转切换前先把 PWM 降到 0% 再换向"。这里强制多走一个
+    // 20 ms 周期：本周期只归零，下一周期才输出新方向，保证有一个干净的零点。
+    if (sign != 0 && last_sign[m] != 0 && sign != last_sign[m]) {
+        pwm(m, 0);
+        brake(m);
+        last_sign[m] = 0;
+        return;
+    }
+    if (sign == 0) {
+        pwm(m, 0);
+        brake(m);
+        last_sign[m] = 0;
+        return;
+    }
+    if (sign > 0) { gpio_set_level(ina_pins[m], 0); gpio_set_level(inb_pins[m], 1); }
+    else          { gpio_set_level(ina_pins[m], 1); gpio_set_level(inb_pins[m], 0); }
+    pwm(m, fabsf(duty));
+    last_sign[m] = sign;
+}
+#else
 static void drive(unsigned motor, float duty) {
     int forward = motor_channel((motor_side_t)motor, MOTOR_FORWARD);
     int reverse = motor_channel((motor_side_t)motor, MOTOR_REVERSE);
     if (duty>0) { pwm(reverse, 0); pwm(forward, duty); }
     else { pwm(forward, 0); pwm(reverse, -duty); }
 }
+#endif
 static void control_task(void *arg) {
     (void)arg;
     TickType_t wake = xTaskGetTickCount();
@@ -85,6 +128,35 @@ static void report(bool legacy) {
     }
 }
 void app_main(void) {
+#if DRIVER_WSDC2412D
+    // ⚠️ 上电顺序很重要：方向脚必须先钉成 LOW/LOW（制动），再配置 LEDC。
+    // 曾经的现象：PWM 脚悬空(=高) + 方向脚被固件拉低 → 全速正转失控。
+    for (int i=0; i<2; ++i) {
+        ESP_ERROR_CHECK(gpio_reset_pin(ina_pins[i]));
+        ESP_ERROR_CHECK(gpio_set_direction(ina_pins[i], GPIO_MODE_OUTPUT));
+        ESP_ERROR_CHECK(gpio_set_level(ina_pins[i], 0));
+        ESP_ERROR_CHECK(gpio_reset_pin(inb_pins[i]));
+        ESP_ERROR_CHECK(gpio_set_direction(inb_pins[i], GPIO_MODE_OUTPUT));
+        ESP_ERROR_CHECK(gpio_set_level(inb_pins[i], 0));
+        ESP_ERROR_CHECK(gpio_reset_pin(pwm_pins[i]));
+        ESP_ERROR_CHECK(gpio_set_direction(pwm_pins[i], GPIO_MODE_OUTPUT));
+        ESP_ERROR_CHECK(gpio_set_level(pwm_pins[i], 0));
+        last_sign[i] = 0;
+    }
+    ledc_timer_config_t timer = {
+        .speed_mode=LEDC_LOW_SPEED_MODE, .duty_resolution=LEDC_TIMER_10_BIT,
+        .timer_num=LEDC_TIMER_0, .freq_hz=PWM_FREQ_HZ, .clk_cfg=LEDC_AUTO_CLK
+    };
+    ESP_ERROR_CHECK(ledc_timer_config(&timer));
+    for (int i=0; i<2; ++i) {
+        ledc_channel_config_t config = {
+            .gpio_num=pwm_pins[i], .speed_mode=LEDC_LOW_SPEED_MODE,
+            .channel=(ledc_channel_t)i, .intr_type=LEDC_INTR_DISABLE,
+            .timer_sel=LEDC_TIMER_0, .duty=0, .hpoint=0
+        };
+        ESP_ERROR_CHECK(ledc_channel_config(&config));
+    }
+#else
     for (int i=0; i<4; ++i) {
         ESP_ERROR_CHECK(gpio_reset_pin(motor_pins[i]));
         ESP_ERROR_CHECK(gpio_set_level(motor_pins[i], 0));
@@ -92,7 +164,7 @@ void app_main(void) {
     }
     ledc_timer_config_t timer = {
         .speed_mode=LEDC_LOW_SPEED_MODE, .duty_resolution=LEDC_TIMER_10_BIT,
-        .timer_num=LEDC_TIMER_0, .freq_hz=10000, .clk_cfg=LEDC_AUTO_CLK
+        .timer_num=LEDC_TIMER_0, .freq_hz=PWM_FREQ_HZ, .clk_cfg=LEDC_AUTO_CLK
     };
     ESP_ERROR_CHECK(ledc_timer_config(&timer));
     for (int i=0; i<4; ++i) {
@@ -103,6 +175,7 @@ void app_main(void) {
         };
         ESP_ERROR_CHECK(ledc_channel_config(&config));
     }
+#endif
     gpio_config_t inputs = {
         .pin_bit_mask=(1ULL<<8)|(1ULL<<9)|(1ULL<<10)|(1ULL<<11),
         .mode=GPIO_MODE_INPUT, .pull_up_en=GPIO_PULLUP_DISABLE,
