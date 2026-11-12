@@ -1,7 +1,9 @@
+#include <cstdio>
 #include <cmath>
 #include <array>
 #include <chrono>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -9,8 +11,33 @@
 #include <QComboBox>
 #include <QLabel>
 #include <QWidget>
+#include <atomic>
+#include <thread>
+
+#include <QApplication>
+
+// ---------------------------------------------------------------------------
+// 直接向 X 服务器查询"物理按键是否按下"（RViz 里长按只收到 ~0.3 s 的按键事件，
+// 只看事件永远判不出"按住"）。这里只声明用到的几个 Xlib 符号，
+// 不包含 X11 头文件 —— 它会把 None/Bool/KeyPress 等定义成宏，和 Qt 冲突。
+// ---------------------------------------------------------------------------
+extern "C" {
+struct _XDisplay;
+typedef struct _XDisplay Display;
+Display * XOpenDisplay(const char * name);
+int XCloseDisplay(Display * display);
+int XQueryKeymap(Display * display, char keys[32]);
+unsigned long XKeysymToKeycode(Display * display, unsigned long keysym);
+}
+#include <QCheckBox>
+#include <QDateTime>
+#include <QEvent>
+#include <QGridLayout>
+#include <QHBoxLayout>
+#include <QKeyEvent>
 #include <QPushButton>
 #include <QShortcut>
+#include <QTimer>
 #include <QKeySequence>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -109,7 +136,7 @@ protected:
     speed_box_->setCurrentIndex(2);
     // 模式选择：导航 / 建图（启动时自动判断）
     mode_box_ = new QComboBox(this);
-    mode_box_->addItems({"导航模式", "建图模式"});
+    mode_box_->addItems({"导航模式", "建图模式", "手动模式"});
     layout->addWidget(mode_box_);
 
     nav_group_ = new QWidget(this);
@@ -132,6 +159,81 @@ protected:
     map_layout->addWidget(save_map_button_);
     layout->addWidget(map_group_);
 
+    // ---- 手动模式（2026-11-12 用户要求）----
+    // 键盘操控直接做在面板里：RViz 里没有终端，拉起 teleop_twist_keyboard 也收不到按键。
+    manual_group_ = new QWidget(this);
+    {
+      auto * manual_layout = new QVBoxLayout(manual_group_);
+      manual_layout->setContentsMargins(0, 0, 0, 0);
+      auto * speed_row = new QHBoxLayout();
+      speed_row->addWidget(new QLabel("速度:", this));
+      manual_speed_box_ = new QComboBox(this);
+      manual_speed_box_->addItems({"0.30 m/s", "0.25 m/s", "0.20 m/s", "0.18 m/s", "0.15 m/s", "0.12 m/s"});
+      manual_speed_box_->setCurrentIndex(5);          // 默认最慢 0.12 m/s
+      speed_row->addWidget(manual_speed_box_);
+      manual_layout->addLayout(speed_row);
+      // 方向按钮：**鼠标按住就走，松开就停**。
+      // 2026-11-12 实测：RViz 里长按键盘只收到 ~0.15 s 的按键事件（系统键盘重复正常，
+      // 但在 RViz 里被截断），所以提供鼠标按住方案 —— Qt 的 pressed/released 100% 可靠。
+      auto * pad = new QGridLayout();
+      auto make_btn = [this](const char * text) {
+        auto * b = new QPushButton(QString::fromUtf8(text), this);
+        b->setMinimumHeight(34);
+        return b;
+      };
+      manual_fwd_button_ = make_btn("↑ 前进");
+      manual_back_button_ = make_btn("↓ 后退");
+      manual_left_button_ = make_btn("← 左转");
+      manual_right_button_ = make_btn("右转 →");
+      pad->addWidget(manual_fwd_button_, 0, 1);
+      pad->addWidget(manual_left_button_, 1, 0);
+      pad->addWidget(manual_right_button_, 1, 2);
+      pad->addWidget(manual_back_button_, 2, 1);
+      manual_layout->addLayout(pad);
+      // 按住=走，松开=停；单击也给 1.5 s 的"起步"（万一 pressed 事件被吞也能动）
+      // ⚠️ 必须用**指针**捕获成员标志：lambda 里按引用捕获一个引用参数会悬空
+      //（捕获到的是栈上的引用变量，函数返回后就是野引用 —— 之前"点了没反应"就是它）。
+      auto wire = [this](QPushButton * b, int idx, const char * name) {
+        connect(b, &QPushButton::pressed, this, [this, idx, name]() {
+          manual_btn_[idx] = true;
+          panel_debug_log(std::string("btn ") + name + " down");
+        });
+        connect(b, &QPushButton::released, this, [this, idx, name]() {
+          manual_btn_[idx] = false;
+          panel_debug_log(std::string("btn ") + name + " up");
+        });
+        connect(b, &QPushButton::clicked, this, [this, idx, name]() {
+          if (manual_latch_box_ != nullptr && manual_latch_box_->isChecked()) {
+            const bool on = !manual_btn_[idx];     // 持续模式：点击切换保持
+            for (int i = 0; i < 4; ++i) {manual_kb_[i] = false; manual_btn_[i] = false;}
+            manual_btn_[idx] = on;
+            panel_debug_log(std::string("btn ") + name + (on ? " latch ON" : " latch OFF"));
+            return;
+          }
+          manual_btn_[idx] = true;            // 单击兜底：1.5 s 后自动停
+          const int gen = ++manual_click_gen_;
+          panel_debug_log(std::string("btn ") + name + " clicked -> 1.5s");
+          QTimer::singleShot(1500, this, [this, idx, gen]() {
+            if (gen == manual_click_gen_) {manual_btn_[idx] = false;}
+          });
+        });
+      };
+      wire(manual_fwd_button_, 0, "fwd");
+      wire(manual_back_button_, 1, "back");
+      wire(manual_left_button_, 2, "left");
+      wire(manual_right_button_, 3, "right");
+
+      manual_latch_box_ = new QCheckBox("持续模式（按一下保持，再按同一键停）", this);
+      manual_layout->addWidget(manual_latch_box_);
+      auto * hint = new QLabel(
+        "手动模式：鼠标**按住**方向按钮即走、松开即停；键盘 W/S/A/D 也可。"
+        "切回其它模式会自动关闭运动门。", this);
+      hint->setWordWrap(true);
+      manual_layout->addWidget(hint);
+      manual_stop_button_ = new QPushButton("立即停车（清零速度）", this);
+      manual_layout->addWidget(manual_stop_button_);
+      layout->addWidget(manual_group_);
+    }
     if (guarded_) {layout->addWidget(recover_button_);}   // 两种模式都要
     layout->addStretch();
 
@@ -155,6 +257,22 @@ protected:
     // subscribes to /plan; planner_server overwrites it on the next plan.
     plan_clear_pub_ = node_->create_publisher<nav_msgs::msg::Path>("/plan", rclcpp::QoS(1));
     manual_vel_pub_ = node_->create_publisher<geometry_msgs::msg::Twist>("/cmd_vel_manual", 10);
+    // 手动模式：20 Hz 把按键状态发到 /cmd_vel_manual（松手就是 0）
+    manual_gate_timer_ = new QTimer(this);
+    manual_gate_timer_->setInterval(1000);
+    connect(manual_gate_timer_, &QTimer::timeout, this, [this]() {
+      if (manual_active_ && guarded_) {set_manual_gates(true);}   // 保活：栈重启后自动恢复
+    });
+    manual_timer_ = new QTimer(this);
+    manual_timer_->setInterval(50);
+    connect(manual_timer_, &QTimer::timeout, this, [this]() {manual_tick();});
+    if (manual_stop_button_ != nullptr) {
+      connect(manual_stop_button_, &QPushButton::clicked, this, [this]() {
+        clear_manual_keys();
+        if (manual_vel_pub_) {manual_vel_pub_->publish(geometry_msgs::msg::Twist());}
+        if (status_label_ != nullptr) {status_label_->setText("已清零速度（手动模式保持）");}
+      });
+    }
     base_param_client_ =
       std::make_shared<rclcpp::AsyncParametersClient>(node_, "/base_bridge");
     mapping_save_client_ = node_->create_client<std_srvs::srv::Trigger>("/mapping/save");
@@ -579,13 +697,252 @@ private:
 
   void selected_revision_guard() {}
 
+  /// 手动模式/键盘调试日志（写到开发机 /tmp/fwr_panel_debug.log）
+  static void panel_debug_log(const std::string & line)
+  {
+    static FILE * fp = std::fopen("/tmp/fwr_panel_debug.log", "a");
+    if (fp == nullptr) {return;}
+    std::fprintf(fp, "%.3f %s\n", std::chrono::duration<double>(
+      std::chrono::steady_clock::now().time_since_epoch()).count(), line.c_str());
+    std::fflush(fp);
+  }
+
   void apply_mode()
   {
-    const bool mapping = (mode_box_ != nullptr && mode_box_->currentIndex() == 1);
-    if (nav_group_ != nullptr) {nav_group_->setVisible(!mapping);}
+    const int mode = (mode_box_ != nullptr) ? mode_box_->currentIndex() : 0;  // 0 导航 1 建图 2 手动
+    const bool mapping = (mode == 1);
+    const bool manual = (mode == 2);
+    if (nav_group_ != nullptr) {nav_group_->setVisible(mode == 0);}
     if (map_group_ != nullptr) {map_group_->setVisible(mapping);}
-    if (start_label_ != nullptr) {start_label_->setVisible(!mapping);}
-    if (goal_label_ != nullptr) {goal_label_->setVisible(!mapping);}
+    if (manual_group_ != nullptr) {manual_group_->setVisible(manual);}
+    if (start_label_ != nullptr) {start_label_->setVisible(!mapping && !manual);}
+    if (goal_label_ != nullptr) {goal_label_->setVisible(!mapping && !manual);}
+    if (manual != manual_active_) {
+      if (manual) {enter_manual_mode();} else {leave_manual_mode();}
+    }
+  }
+
+  // ---------- 手动模式 ----------
+  void enter_manual_mode()
+  {
+    // 先停掉可能正在跑的导航任务（手动通道和导航任务互斥）
+    if (guarded_ && flow_.pending_or_active()) {
+      stop_real_navigation("切换到手动模式，已停止导航任务");
+    }
+    clear_manual_keys();
+    manual_active_ = true;
+    if (guarded_) {set_manual_gates(true);}
+    if (manual_timer_ != nullptr) {manual_timer_->start();}
+    if (!manual_pub_thread_.joinable()) {
+      manual_pub_run_ = true;
+      manual_pub_thread_ = std::thread([this]() {
+        Display * disp = XOpenDisplay(nullptr);
+        const unsigned long syms[4][2] = {
+          {0x0077UL, 0xff52UL}, {0x0073UL, 0xff54UL},
+          {0x0061UL, 0xff51UL}, {0x0064UL, 0xff53UL}};
+        while (manual_pub_run_.load()) {
+          bool phys[4] = {false, false, false, false};
+          if (disp != nullptr) {
+            char keys[32] = {0};
+            XQueryKeymap(disp, keys);
+            for (int i = 0; i < 4; ++i) {
+              for (int k = 0; k < 2; ++k) {
+                const unsigned long kc = XKeysymToKeycode(disp, syms[i][k]);
+                if (kc != 0 && (keys[kc / 8] & (1 << (kc % 8)))) {phys[i] = true;}
+              }
+            }
+          }
+          const double v = manual_pub_speed_.load();
+          geometry_msgs::msg::Twist cmd;
+          if (phys[0] || manual_btn_[0].load()) {cmd.linear.x += v;}
+          if (phys[1] || manual_btn_[1].load()) {cmd.linear.x -= v;}
+          if (phys[2] || manual_btn_[2].load()) {cmd.angular.z += 0.5;}
+          if (phys[3] || manual_btn_[3].load()) {cmd.angular.z -= 0.5;}
+          if (manual_vel_pub_) {manual_vel_pub_->publish(cmd);}
+          std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        if (disp != nullptr) {XCloseDisplay(disp);}
+      });
+    }
+    if (manual_gate_timer_ != nullptr) {manual_gate_timer_->start();}
+    if (qApp != nullptr) {qApp->installEventFilter(this);}
+    if (x_display_ == nullptr) {x_display_ = XOpenDisplay(nullptr);}
+    panel_debug_log("enter_manual_mode");
+    if (status_label_ != nullptr) {
+      status_label_->setText("手动模式：W/S 前进后退，A/D 转向；松手即停");
+    }
+  }
+
+  void leave_manual_mode()
+  {
+    manual_active_ = false;
+    clear_manual_keys();
+    if (manual_timer_ != nullptr) {manual_timer_->stop();}
+    manual_pub_run_ = false;
+    if (manual_pub_thread_.joinable()) {manual_pub_thread_.join();}
+    manual_pub_speed_ = 0.12;
+    if (manual_gate_timer_ != nullptr) {manual_gate_timer_->stop();}
+    if (qApp != nullptr) {qApp->removeEventFilter(this);}
+    if (manual_vel_pub_) {
+      manual_vel_pub_->publish(geometry_msgs::msg::Twist());   // 先发一帧零速
+    }
+    if (guarded_) {set_manual_gates(false);}
+    if (x_display_ != nullptr) {XCloseDisplay(x_display_); x_display_ = nullptr;}
+    panel_debug_log("leave_manual_mode");
+    if (status_label_ != nullptr) {status_label_->setText("已退出手动模式，运动门已关闭");}
+  }
+
+  /// 手动模式：开运动门 + 开手动通道（导航模式下这两个都是关的）
+  void set_manual_gates(bool enabled)
+  {
+    if (!base_param_client_ || !base_param_client_->service_is_ready()) {
+      if (status_label_ != nullptr) {status_label_->setText("base_bridge 参数服务不可用");}
+      return;
+    }
+    std::vector<rclcpp::Parameter> params{
+      rclcpp::Parameter("motion_enabled", enabled),
+      rclcpp::Parameter("manual_enabled", enabled),
+      rclcpp::Parameter("manual_allow_mixed", false)};
+    base_param_client_->set_parameters(params);
+  }
+
+  static bool is_manual_key(int key)
+  {
+    return key == Qt::Key_W || key == Qt::Key_S || key == Qt::Key_A || key == Qt::Key_D ||
+           key == Qt::Key_Up || key == Qt::Key_Down || key == Qt::Key_Left || key == Qt::Key_Right;
+  }
+
+  void set_manual_key(int key, bool pressed)
+  {
+    const char * what = nullptr;
+    int idx = -1;
+    switch (key) {
+      case Qt::Key_W: case Qt::Key_Up: idx = 0; what = "前进"; break;
+      case Qt::Key_S: case Qt::Key_Down: idx = 1; what = "后退"; break;
+      case Qt::Key_A: case Qt::Key_Left: idx = 2; what = "左转"; break;
+      case Qt::Key_D: case Qt::Key_Right: idx = 3; what = "右转"; break;
+      default: break;
+    }
+    if (idx >= 0) {
+      const bool latch = manual_latch_box_ != nullptr && manual_latch_box_->isChecked();
+      if (latch) {
+        // 持续模式：按一下切换保持。
+        // ⚠️ 必须"松开后才允许再次切换"，否则键盘自动重复每 30 ms 触发一次切换，
+        // 按住 W 会变成 开/关/开/关 → 现场就是"有前进但一卡一卡"。
+        const qint64 now_ms = QDateTime::currentMSecsSinceEpoch();
+        if (pressed) {
+          // 只有"真正松开过 >=300 ms"之后的按下才算一次新点击。
+          // 键盘自动重复是 30 ms 一对 down/up，间隔远小于 300 ms，不会触发切换。
+          const bool fresh = now_ms - manual_latch_release_ms_[idx] > 300;
+          if (fresh) {
+            const bool on = !manual_kb_[idx];
+            for (int i = 0; i < 4; ++i) {manual_kb_[i] = false; manual_btn_[i] = false;}
+            manual_kb_[idx] = on;
+            manual_latch_release_ms_[idx] = now_ms;   // 之后的自动重复不再触发切换
+            panel_debug_log("latch toggle");
+          }
+        } else {
+          manual_latch_release_ms_[idx] = now_ms;
+        }
+      } else {
+        manual_kb_[idx] = pressed;
+        if (pressed) {
+          // RViz 里长按只能收到 ~0.3 s 的按键重复，所以给 120 ms 自动续期
+          manual_kb_until_ms_[idx] = QDateTime::currentMSecsSinceEpoch() + 120;
+        }
+      }
+    }
+    panel_debug_log(std::string("key ") + (what ? what : "?") + (pressed ? " down" : " up"));
+    // 可见反馈：确认键盘事件到底有没有被面板收到（调试手动模式"不动"时最关键）
+    if (what != nullptr && status_label_ != nullptr) {
+      status_label_->setText(QString("手动模式：%1%2（速度 %3 m/s）")
+        .arg(QString::fromUtf8(what))
+        .arg(pressed ? "" : " 松开")
+        .arg(manual_linear_speed(), 0, 'f', 2));
+    }
+  }
+
+  void clear_manual_keys()
+  {
+    for (int i = 0; i < 4; ++i) {manual_kb_[i] = manual_btn_[i] = false;}
+  }
+
+  /// 手动模式档位：0.30 / 0.25 / 0.20 / 0.18 / 0.15 / 0.12 m/s（下拉框顺序）
+  double manual_linear_speed() const
+  {
+    static const double kSpeeds[6] = {0.30, 0.25, 0.20, 0.18, 0.15, 0.12};
+    const int idx = (manual_speed_box_ != nullptr) ? manual_speed_box_->currentIndex() : 5;
+    return kSpeeds[(idx >= 0 && idx < 6) ? idx : 5];
+  }
+
+  void manual_tick()
+  {
+    if (!manual_active_ || !manual_vel_pub_) {return;}
+    const double v = manual_linear_speed();
+    const double w = 0.5;                       // 转向角速度固定 0.5 rad/s
+    geometry_msgs::msg::Twist cmd;
+    const qint64 now_ms = QDateTime::currentMSecsSinceEpoch();
+    // 直接向 X 服务器查询"这个键此刻是否物理按下"。
+    // RViz 里长按只收到 ~0.3 s 的按键事件（之后自动重复被截断），只看事件永远判不出"按住"。
+    bool phys[4] = {false, false, false, false};
+    if (x_display_ != nullptr) {
+      // KeySym 常量值见 X11/keysymdef.h
+      static const unsigned long syms[4][2] = {
+        {0x0077UL, 0xff52UL},   // w, Up
+        {0x0073UL, 0xff54UL},   // s, Down
+        {0x0061UL, 0xff51UL},   // a, Left
+        {0x0064UL, 0xff53UL}};  // d, Right
+      char keys[32] = {0};
+      XQueryKeymap(x_display_, keys);
+      for (int i = 0; i < 4; ++i) {
+        for (int k = 0; k < 2; ++k) {
+          const unsigned long kc = XKeysymToKeycode(x_display_, syms[i][k]);
+          if (kc != 0 && (keys[kc / 8] & (1 << (kc % 8)))) {phys[i] = true;}
+        }
+      }
+    }
+    auto on = [this, now_ms, &phys](int i) {
+      return manual_kb_[i] || manual_btn_[i] || phys[i] || now_ms < manual_kb_until_ms_[i];
+    };
+    if (on(0)) {cmd.linear.x += v;}
+    if (on(1)) {cmd.linear.x -= v;}
+    if (on(2)) {cmd.angular.z += w;}
+    if (on(3)) {cmd.angular.z -= w;}
+    manual_pub_speed_ = v;                 // 发布交给独立线程
+    panel_debug_log("pub " + std::to_string(cmd.linear.x) + " " + std::to_string(cmd.angular.z));
+  }
+
+  bool eventFilter(QObject * obj, QEvent * event) override
+  {
+    if (manual_active_ && event != nullptr) {
+      const auto type = event->type();
+      if (type == QEvent::KeyPress || type == QEvent::KeyRelease) {
+        auto * key_event = static_cast<QKeyEvent *>(event);
+        if (is_manual_key(key_event->key())) {
+          const int key = key_event->key();
+          if (type == QEvent::KeyPress) {
+            manual_release_at_[key] = 0;            // 取消待决的松手
+            set_manual_key(key, true);
+          } else {
+            // 2026-11-12 实测：按住键时 Qt 每 ~30 ms 发一对 down/up，
+            // 而且 up 的 isAutoRepeat() 在这里是 false → 不能用它判断。
+            // 改成"松手去抖"：收到 up 先记时间，90 ms 内没有新的 down 才真正清零。
+            const qint64 now_ms = QDateTime::currentMSecsSinceEpoch();
+            manual_release_at_[key] = now_ms;
+            QTimer::singleShot(90, this, [this, key, now_ms]() {
+              auto it = manual_release_at_.find(key);
+              if (it != manual_release_at_.end() && it->second == now_ms) {
+                set_manual_key(key, false);
+              }
+            });
+          }
+          return true;
+        }
+      } else if (type == QEvent::FocusOut || type == QEvent::WindowDeactivate) {
+        clear_manual_keys();                 // 失焦立刻停，防止"按键卡住"
+      }
+    }
+    return rviz_common::Panel::eventFilter(obj, event);
   }
 
   /// 一键重新定位：调 auto_initial_pose 的 /localization/reseed 服务，
@@ -1229,6 +1586,29 @@ private:
   QComboBox * mode_box_ = nullptr;
   QWidget * nav_group_ = nullptr;
   QWidget * map_group_ = nullptr;
+  QWidget * manual_group_ = nullptr;
+  QPushButton * manual_fwd_button_ = nullptr;
+  QPushButton * manual_back_button_ = nullptr;
+  QPushButton * manual_left_button_ = nullptr;
+  QPushButton * manual_right_button_ = nullptr;
+  QPushButton * manual_stop_button_ = nullptr;
+  QComboBox * manual_speed_box_ = nullptr;
+  QCheckBox * manual_latch_box_ = nullptr;
+  QTimer * manual_timer_ = nullptr;
+  QTimer * manual_gate_timer_ = nullptr;
+  bool manual_active_ = false;
+  // 每个方向两个独立来源：键盘(manual_kb_) / 按钮(manual_btn_)，生效值取"或"。
+  // 混在一起会出问题：键盘的去抖定时器会把按钮的按住状态清掉（实测按下 200 ms 后被清）。
+  bool manual_kb_[4] = {false, false, false, false};    // 0 前 1 后 2 左 3 右
+  std::atomic<bool> manual_btn_[4] = {false, false, false, false};
+  std::thread manual_pub_thread_;
+  std::atomic<bool> manual_pub_run_{false};
+  std::atomic<double> manual_pub_speed_{0.12};
+  int manual_click_gen_ = 0;
+  qint64 manual_latch_release_ms_[4] = {-1000000, -1000000, -1000000, -1000000};  // 上次"真正松开"时刻
+  qint64 manual_kb_until_ms_[4] = {0, 0, 0, 0};     // 键盘按下后的有效期（自动续期）
+  Display * x_display_ = nullptr;                   // 直接查物理按键（RViz 会截断长按重复）
+  std::map<int, qint64> manual_release_at_;
   QPushButton * seed_button_ = nullptr;
   rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr reseed_client_;
   QComboBox * speed_box_ = nullptr;

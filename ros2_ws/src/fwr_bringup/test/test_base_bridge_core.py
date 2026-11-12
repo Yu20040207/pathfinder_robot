@@ -22,9 +22,9 @@ def test_forward_reverse_and_positive_ccw_mapping():
     assert core.step(None, .02).command == b'v 80.000 80.000\n'
     assert core.accept_cmd(-.08, 0, .03) == (-80, -80)
     left, right = core.accept_cmd(0, .4, .04)
-    # 2026-10-30 换橡胶轮后轮距复标 0.268 → 0.262：ω=0.4 时单轮 = 0.4*0.262/2*1000 = 52.4 mm/s
-    assert left == pytest.approx(-52.4)
-    assert right == pytest.approx(52.4)
+    # 2026-11-12 轮距实测/标定 0.317：ω=0.4 时单轮 = 0.4*0.317/2*1000 = 63.4 mm/s
+    assert left == pytest.approx(-63.4)
+    assert right == pytest.approx(63.4)
 
 
 def test_invalid_or_excessive_command_is_rejected():
@@ -124,15 +124,15 @@ def test_invalid_record_does_not_update_odom():
 
 def test_encoder_forward_and_reboot_rebaseline():
     core = ready_core()
-    out = core.step(state(us=1100000, left=-1468, right=1468), 1.0)
-    # 一圈计数 = 一个有效轮周长（2026-10-30 换橡胶轮后 3 米法实测标定为 0.2075 m）
-    assert out.odom.x == pytest.approx(.2075)
+    out = core.step(state(us=1100000, left=-6400, right=6400), 1.0)
+    # 一圈计数 = 一个轮周长（2026-11-11 新硬件：100 mm 轮，π×0.1 = 0.314159 m）
+    assert out.odom.x == pytest.approx(.314159)
     assert out.wheel_positions_rad == pytest.approx((2 * 3.141592653589793,) * 2)
     assert core.step(state(us=1000), 1.1).odom is None
     assert core.step(state(us=11000, left=-10, right=10), 1.11).odom is None
     core.handshake('BASE_CONTROL_V2')
     assert core.step(state(us=11000, left=-10, right=10), 1.12).odom is None
-    assert core.step(state(us=21000, left=-20, right=20), 1.13).odom.x == pytest.approx(.2075 + .2075 * 10 / 1468)
+    assert core.step(state(us=21000, left=-20, right=20), 1.13).odom.x == pytest.approx(.314159 + .314159 * 10 / 6400)
 
 
 def test_implausible_encoder_jump_does_not_move_joint_positions():

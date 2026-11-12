@@ -236,9 +236,18 @@ class Watchdog(Node):
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument('--dry-run', action='store_true')
+    ap.add_argument('--restart-scan', action='store_true',
+                    help='雷达断流超过 scan_stale_s 时自动重启 sllidar_node')
+    ap.add_argument('--dedupe-scan', action='store_true',
+                    help='/scan 出现多个发布者时结束全部雷达进程（默认只告警）')
     args = ap.parse_args()
     rclpy.init()
     node = Watchdog(args.dry_run)
+    from rclpy.parameter import Parameter
+    node.set_parameters([
+        Parameter('restart_scan', Parameter.Type.BOOL, bool(args.restart_scan)),
+        Parameter('dedupe_scan', Parameter.Type.BOOL, bool(args.dedupe_scan)),
+    ])
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:

@@ -22,6 +22,9 @@ def generate_launch_description():
         # IMU 航向尺度修正：2026-10-30 雷达互相关标定（转一圈 355.04° vs 真值 359.55°）
         DeclareLaunchArgument('imu_yaw_scale', default_value='1.019'),  # 2026-10-30 雷达互相关实测
         DeclareLaunchArgument('start_slam', default_value='true'),
+        # 2026-11-12：雷达可以由外部看门狗独占（start_lidar:=false），
+        # 避免 launch 与看门狗同时开串口 → sllidar_node 死锁在 futex 上、/scan 断流。
+        DeclareLaunchArgument('start_lidar', default_value='true'),
         DeclareLaunchArgument('slam_executable', default_value='async_slam_toolbox_node'),
         DeclareLaunchArgument('slam_params',
                               default_value=str(share / 'config' / 'real_slam.yaml')),
@@ -34,6 +37,7 @@ def generate_launch_description():
                           # 2026-10-30 实测：六轴航向少算 1.25%，乘 1.0127 修正
                           'yaw_scale': LaunchConfiguration('imu_yaw_scale')}]),
         Node(package='sllidar_ros2', executable='sllidar_node', name='sllidar_node',
+             condition=IfCondition(LaunchConfiguration('start_lidar')),
              output='screen', parameters=[{
                  'channel_type': 'serial', 'serial_port': LaunchConfiguration('lidar_port'),
                  'serial_baudrate': 460800, 'frame_id': 'laser_front',

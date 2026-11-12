@@ -31,6 +31,7 @@ def generate_launch_description():
         # localizer:=amcl 用通用 AMCL + 地图图片；localizer:=slam 走 slam_toolbox
         # 的 localization 模式（加载建图时序列化的 posegraph，边定位边微调地图）。
         DeclareLaunchArgument('localizer', default_value='amcl'),
+        DeclareLaunchArgument('start_lidar', default_value='true'),
         DeclareLaunchArgument(
             'slam_params',
             default_value=str(share / 'config' / 'real_slam_localization.yaml')),
@@ -41,6 +42,7 @@ def generate_launch_description():
                 'lidar_port': LaunchConfiguration('lidar_port'),
                 'start_imu': LaunchConfiguration('start_imu'),
                 'start_slam': start_slam,
+                'start_lidar': LaunchConfiguration('start_lidar'),
                 'slam_params': LaunchConfiguration('slam_params'),
             }.items()),
         OpaqueFunction(function=_start_slam_localization,

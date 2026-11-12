@@ -225,8 +225,12 @@ class BaseBridgeCore:
     # 2026-10-29 轮距实测标定：原地正/反各 180°，编码器 178.6° vs IMU 176.6°/176.7°，
     # 两轮实测（0.263→0.2659；再用 0.2659 复测残差 +1.7%）取均值 0.268。
     # 残余 1~2% 是转向打滑的物理现象，任何轮距值都修不掉。
-    def __init__(self, track_m: float = .262, circumference_m: float = .2075,
-                 counts_per_rev: int = 1468) -> None:
+    # 2026-11-11 换 WSDC2412D-V3 + 100:1 电机 + 100 mm 轮：
+    # 周长名义 0.314159 m，编码器 16PPR×4×100:1 = 6400 counts/rev。
+    # 轮距：2026-11-12 卷尺实测 317 mm；修好固件 pivot 后旋转标定
+    # 轮里程计/IMU = 1.174 × 0.271 ≈ 0.318 m，与卷尺一致，取 0.317。
+    def __init__(self, track_m: float = .317, circumference_m: float = .314159,
+                 counts_per_rev: int = 6400) -> None:
         self.track_m = track_m
         self.counts_per_rev = counts_per_rev
         self.odom = WheelOdometry(circumference_m, track_m, counts_per_rev)
@@ -236,6 +240,7 @@ class BaseBridgeCore:
         self._last_state_at = None
         self._last_cmd_at = None
         self._target = None
+        self._cmd_hold_s = .20
         self._last_counts = None
         self._last_esp_us = None
         self._wheel_positions = [0.0, 0.0]
@@ -269,7 +274,15 @@ class BaseBridgeCore:
         self.verified = parse_handshake(line)
         return self.verified
 
-    def accept_cmd(self, v_mps: float, omega_rps: float, now_s: float) -> tuple[float, float]:
+    def accept_cmd(self, v_mps: float, omega_rps: float, now_s: float,
+                   hold_s: float = .20) -> tuple[float, float]:
+        """下发一帧速度指令。
+
+        hold_s 是"这一帧在多久之内仍然有效"：
+        自动链路用 0.20 s（严格，卡一下就停）；手动链路可以放宽到 0.45 s，
+        否则 RViz 渲染偶发卡顿（>200 ms）会让固件每收到一个 'x' 就断一下，
+        现场表现就是"一卡一卡"。
+        """
         if self._turn_owner:
             raise RuntimeError('relative turn owns base')
         self._target = None
@@ -279,9 +292,14 @@ class BaseBridgeCore:
         left = 1000.0 * (v_mps - omega_rps * self.track_m / 2.0)
         right = 1000.0 * (v_mps + omega_rps * self.track_m / 2.0)
         encode_wheel_speed(left, right)
-        if self.ready(now_s):
+        # 2026-11-12：原来要求 self.ready(now_s)（含"状态帧 ≤0.25 s"）才记录目标。
+        # 但 ESP32 固件只在串口空闲时才上报状态；底盘持续下发速度时状态会变旧，
+        # 于是目标被清空、底盘改发 'x' → 走 4 秒停 3 秒的周期性顿挫。
+        # 现在只要求"链路已连接 + 握手完成 + 无故障"，不看状态帧新鲜度。
+        if self.connected and self.verified and self.fault == 0:
             self._target = (left, right)
             self._last_cmd_at = now_s
+            self._cmd_hold_s = float(hold_s)
         return left, right
 
     def begin_turn(self, now_s: float) -> bool:
@@ -305,6 +323,15 @@ class BaseBridgeCore:
         self.halt()
 
     def halt(self) -> None:
+        # 诊断：谁把目标清掉的（节流 0.5 s，避免刷屏）
+        import time as _time
+        import traceback as _tb
+        now = _time.monotonic()
+        if now - getattr(self, '_last_halt_log', 0.0) > 0.5:
+            self._last_halt_log = now
+            frames = _tb.extract_stack(limit=4)[-2]
+            print(f'[core] halt from {frames.filename.split("/")[-1]}:{frames.lineno}',
+                  flush=True)
         self._turn_owner = False
         self._target = None
         self._last_cmd_at = None
@@ -351,8 +378,9 @@ class BaseBridgeCore:
         ready = self.ready(now_s)
         if not self.connected:
             command = b''
-        elif (ready and self._target is not None and self._last_cmd_at is not None
-              and 0 <= now_s - self._last_cmd_at <= .20):
+        elif (self.connected and self.verified and self.fault == 0 and
+              self._target is not None and self._last_cmd_at is not None
+              and 0 <= now_s - self._last_cmd_at <= self._cmd_hold_s):
             command = encode_wheel_speed(*self._target)
         else:
             command = b'x'

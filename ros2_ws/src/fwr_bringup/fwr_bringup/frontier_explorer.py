@@ -52,11 +52,25 @@ class FrontierExplorer(Node):
         self.declare_parameter('clear_costmap_after_failures', 2)
         # 2026-11-05：全局障碍层保留（否则新障碍不会被绕行），但旧的障碍标记在 260° 视野下
         # 清不掉 → 周期性清空一次；清空后下一帧扫描会立刻重新标记当前真实障碍。
-        self.declare_parameter('costmap_clear_period_s', 10.0)
+        # 2026-11-12 实测（关键）：**周期清空代价地图本身会导致间歇规划失败**。
+        # 清空后到各图层重新生效之间有个窗口，这期间规划器会报 no valid path。
+        # 现场压测：开周期清空 → 目标 0/5 成功；关掉 → 5/5 成功（平均 0.01 s）。
+        # 所以默认关闭；只在"明确失败后重试"和"雷达断流/恢复"这两个事件上清。
+        self.declare_parameter('costmap_clear_period_s', 0.0)
+        # 2026-11-12：导航**进行中**也要清一次全局代价地图（只清全局，不动局部）。
+        # 现场：跑一段后规划器开始报 no valid path（门洞被陈旧标记堵住），重启栈立刻恢复 ——
+        # 说明是全局代价地图污染累积，不是地图本身。25 s 清一次，动态障碍 0.1~0.2 s 内会被
+        # 重新标记；局部代价地图和 collision_monitor 全程不动，避障能力不受影响。
+        self.declare_parameter('costmap_clear_nav_period_s', 0.0)
         # 2026-11-05（用户要求）：后退让位期间**暂停**任务而不是中止；
         # 同一个目标点让位超过这个次数 → 跳过它，去下一个点（防死胡同死循环）。
         self.declare_parameter('reverse_pause_enabled', True)
         self.declare_parameter('max_reverse_episodes_per_leg', 2)
+        # 2026-11-12：雷达断流会让 base_bridge 在 0.5 s 后撤授权；看门狗 2~3 s 就能拉回来。
+        # 所以短暂授权丢失应该**暂停**任务，而不是中止整条路线；超过这个时间才放弃。
+        # 2026-11-12：雷达驱动会阻塞 8~15 s（futex 死锁），8 s 宽限太短会把任务中止。
+        # 放宽到 20 s：这期间机器人本来就是停的（授权丢了），恢复后自动继续。
+        self.declare_parameter('arm_loss_grace_s', 20.0)
         self.declare_parameter('static_map', False)
         self._static_map = bool(self.get_parameter('static_map').value)
         self._trial_started = None
@@ -101,10 +115,13 @@ class FrontierExplorer(Node):
         self._consecutive_failures = 0
         self._clear_clients = []
         self._last_costmap_clear = 0.0
+        self._last_nav_clear = 0.0
         self._reverse_active = False
         self._paused_for_reverse = False
         self._reverse_episodes = 0
         self._mission_suspended = False
+        self._paused_for_sensor = False
+        self._sensor_pause_deadline = 0.0
         self._cancel_after_accept = False
         self._cancel_future = None
         self._status = 'idle'
@@ -119,7 +136,12 @@ class FrontierExplorer(Node):
         self.create_subscription(Odometry, '/odom', self._on_odom, 10)
         self.create_subscription(Int32, '/base/fault', self._on_fault, 10)
         self.create_subscription(Bool, '/base/manual_enabled', self._on_manual, 10)
-        for srv in ('/global_costmap/global_costmap/clear_entirely_global_costmap',
+        # 2026-11-12：Nav2 里两种命名都可能存在（costmap 节点带/不带命名空间），
+        # 两个都登记，清空时谁可用就用谁。现场出现过"服务明明在、client 却报不可用"
+        # 的 DDS 抖动 —— 所以下面 _clear_costmaps 不再只依赖 service_is_ready()。
+        for srv in ('/global_costmap/clear_entirely_global_costmap',
+                    '/global_costmap/global_costmap/clear_entirely_global_costmap',
+                    '/local_costmap/clear_entirely_local_costmap',
                     '/local_costmap/local_costmap/clear_entirely_local_costmap'):
             self._clear_clients.append(self.create_client(ClearEntireCostmap, srv))
         self._stop_box_pts = 0
@@ -325,11 +347,29 @@ class FrontierExplorer(Node):
             self._end_recovery(False)
 
     def _on_bridge_arm(self, msg):
+        was = self._bridge_armed
         self._bridge_armed = msg.data
-        if not msg.data and self._sm.enabled and bool(self.get_parameter('require_bridge_arm').value):
+        require = bool(self.get_parameter('require_bridge_arm').value)
+        if not msg.data and self._sm.enabled and require:
+            # 2026-11-12：雷达断流 → 底盘 0.5 s 后撤授权 → 以前这里直接中止整条路线。
+            # 看门狗 2~3 s 能把雷达拉回来，所以先**暂停**等恢复；超时才放弃。
+            grace = float(self.get_parameter('arm_loss_grace_s').value)
+            if grace > 0:
+                if not self._paused_for_sensor:
+                    self._paused_for_sensor = True
+                    self._sensor_pause_deadline = time.monotonic() + grace
+                    self.get_logger().warn(
+                        '底盘授权丢失 → 暂停任务（等传感器恢复，最多 %.0f s）' % grace)
+                return
             self._trip('底盘自动授权丢失（/base/auto_armed=False）')
             self._sm.stop()
             self._end_recovery(False)
+            return
+        if msg.data and was is False and self._paused_for_sensor:
+            self._paused_for_sensor = False
+            self.get_logger().warn('底盘授权恢复 → 继续原任务')
+            if self._status in ('canceled', 'aborted', 'failed', 'idle', 'succeeded'):
+                self._status = 'idle'
 
     def _on_fault(self, msg):
         self._fault = msg.data
@@ -639,11 +679,42 @@ class FrontierExplorer(Node):
         period = float(self.get_parameter('costmap_clear_period_s').value)
         # 只在**空闲**时清：导航中清空会在重规划那一帧把动态障碍一起清掉，
         # 规划器可能因此"看见空地"直接穿过去（2026-11-05 权衡）。
+        # 2026-11-12：目标句柄残留自愈。现场：一次任务失败后 _handle 没被释放，
+        # 之后每次点"开始导航"都被 preflight 判成 busy（"启动被拒绝：preflight failed: busy"），
+        # 只能重启栈。这里在"状态已终结但句柄还在"超过 8 秒时强制释放。
+        if (self._handle is not None
+                and self._status in ('idle', 'stopped', 'failed', 'canceled', 'succeeded')
+                and now - self._handle_set_at > 8.0):
+            self.get_logger().warn(
+                '目标句柄残留 %.0f s（status=%s）→ 强制释放，避免启动被判 busy'
+                % (now - self._handle_set_at, self._status))
+            self._handle = None
+            self._cancel_future = None
         if self._paused_for_reverse:
             # 让位后退期间不推进任务（不派发、不取消、不判失败）
             return
+        if self._paused_for_sensor:
+            # 授权丢失（雷达断流等）期间冻结任务；超过宽限才放弃
+            if now <= self._sensor_pause_deadline:
+                return
+            self._paused_for_sensor = False
+            self._trip('授权丢失超过 %.0f s 未恢复' % float(
+                self.get_parameter('arm_loss_grace_s').value))
+            self._sm.stop()
+            self._end_recovery(False)
+            return
         idle_now = (self._handle is None
                     and self._status in ('idle', 'succeeded', 'stopped', 'canceled'))
+        # 导航进行中：只清**全局**代价地图（规划用），局部代价地图不动（避障靠它）
+        nav_period = float(self.get_parameter('costmap_clear_nav_period_s').value)
+        if (nav_period > 0 and not idle_now and self._sm.enabled
+                and now - self._last_nav_clear > nav_period):
+            self._last_nav_clear = now
+            clients = getattr(self, '_clear_clients', ())
+            if clients and clients[0].service_is_ready():
+                clients[0].call_async(ClearEntireCostmap.Request())
+                self.get_logger().debug(
+                    '导航中清空全局代价地图（%.0f s 周期）' % nav_period)
         if period > 0 and idle_now and now - self._last_costmap_clear > period:
             self._last_costmap_clear = now
             asked = 0
@@ -838,18 +909,26 @@ class FrontierExplorer(Node):
             self._sm.stop()
         self._status = 'idle'
 
-    def _clear_costmaps(self) -> None:
-        """清空全局/局部代价地图（治"跑久了到处规划失败"的幽灵障碍累积）。"""
-        asked = False
-        for client in self._clear_clients:
-            if client.service_is_ready():
+    def _clear_costmaps(self, reason: str = '连续规划失败达到阈值') -> None:
+        """清空全局/局部代价地图（治"跑久了到处规划失败"的幽灵障碍累积）。
+
+        只对 ready 的 client 发送；若一个都不 ready（DDS 抖动时会出现），
+        仍然全部尝试一次 —— 宁可多发一次，也不要"什么都没做却说服务不可用"。
+        """
+        ready = [c for c in self._clear_clients if c.service_is_ready()]
+        targets = ready or list(self._clear_clients)
+        sent = 0
+        for client in targets:
+            try:
                 client.call_async(ClearEntireCostmap.Request())
-                asked = True
-        if asked:
+                sent += 1
+            except Exception:                                   # noqa: BLE001
+                pass
+        if sent:
             self.get_logger().warn(
-                '连续规划失败达到阈值 → 已请求清空代价地图（清除累积的陈旧障碍标记）')
+                '%s → 已请求清空代价地图（%d 个服务，ready=%d）' % (reason, sent, len(ready)))
         else:
-            self.get_logger().warn('连续规划失败，但清空代价地图服务不可用')
+            self.get_logger().warn('%s，但清空代价地图请求全部失败' % reason)
 
     def _retry_after_stuck(self):
         """监控压零导致取消后，立刻按原任务重新规划（最多 max_stuck_retries 次）。
@@ -1000,6 +1079,7 @@ class FrontierExplorer(Node):
     def _accepted(self, future):
         try:
             self._handle = future.result()
+            self._handle_set_at = time.monotonic()
             if not self._handle.accepted:
                 self._handle = None
                 self._cancel_after_accept = False
@@ -1027,7 +1107,7 @@ class FrontierExplorer(Node):
             limit = int(self.get_parameter('clear_costmap_after_failures').value)
             if limit > 0 and self._consecutive_failures >= limit:
                 self._consecutive_failures = 0
-                self._clear_costmaps()
+                self._clear_costmaps('连续 %d 次导航失败' % limit)
             # 2026-11-07：导航任务失败时**自愈重试**。
             # 现场：全局规划报 "Starting point in lethal space!"（车所在格被瞬时标成障碍，
             # 例如贴墙时脚印/障碍层残留），行为树重试 6 次后 abort → 整条路线直接结束。
@@ -1035,7 +1115,7 @@ class FrontierExplorer(Node):
             if (self._sm.fixed_goal and self._sm.enabled
                     and self._stuck_retries < int(self.get_parameter('max_stuck_retries').value)):
                 self._stuck_retries += 1
-                self._clear_costmaps()
+                self._clear_costmaps('导航失败重试（第 %d 次）' % self._stuck_retries)
                 self._status = 'idle'
                 self.get_logger().warn(
                     '导航失败 → 清空代价地图并重派同一段（第 %d/%d 次重试）' % (
@@ -1048,6 +1128,11 @@ class FrontierExplorer(Node):
         self._handle = None
         self._cancel_future = None
         self._cancel_after_accept = False
+        # 2026-11-12 实测（决定性）：任务结束后清一次全局代价地图。
+        # 证据：同一目标在清空前 0/5 失败、清空后 5/5 成功 —— 挡路的是累积的陈旧障碍标记。
+        # 在"任务结束"时清（而不是周期清），既不打断规划，也保证下一次选点前地图是干净的。
+        if self._status in ('succeeded', 'failed', 'canceled'):
+            self._clear_costmaps('任务结束(%s)' % self._status)
         if self._retry_pending:
             self._retry_pending = False
             self._retry_after_stuck()

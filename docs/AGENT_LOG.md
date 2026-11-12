@@ -5958,3 +5958,99 @@ max_goal_distance_m=6.0 chain_watchdog=false max_runtime_s=0.0`
 ### 下一步
 - 直线摆动：先量 `/plan` 横向偏移与 `/cmd_vel_nav` 的 ω 翻转次数，再决定改规划还是控制器。
 - 右轮机械检查；若解决可再评估后退让位实机验证。
+
+## 2026-11-12 09:45 · 换新主控后：雷达断流 → 幽灵障碍，给看门狗加"断流/恢复时清代价地图"
+
+### 会话目标
+继续换主控（N305 + WSDC2412D-V3 + 100:1 + 100 mm 轮）后的导航验证；
+解决"雷达断流期间全局代价地图残留幽灵障碍 → 规划失败"的老问题（解法沿用 2026-11-05 的思路）。
+
+### 仓库改动
+- `tools/lidar_watchdog.py`（未提交，未跟踪）：
+  - 新增 `nav2_msgs/srv/ClearEntireCostmap` 客户端，指向
+    `/global_costmap/clear_entirely_global_costmap`、`/local_costmap/clear_entirely_local_costmap`；
+  - **检测到 `/scan` 断流时清一次**，**雷达恢复第一帧再清一次**（幽灵标记正是断流期间累积的）；
+  - 新增 `--no-clear`、`--clear-period S`（默认 0，只做断流相关清空）；
+  - 启动日志会写明清空策略，便于确认版本。
+- 新增 `scripts/start_lidar_watchdog.sh`：`setsid --fork` 后台启动 + 日志
+  `/tmp/fwr_runs/lidar_watchdog.log`（原来手动 `setsid nohup &` 在 ssh 断开后会被回收）。
+
+### 已验证（主控 fwr-n305）
+- 新脚本启动后进程存活（pid 12440），日志：
+  `雷达看门狗启动（自动重启）：stale=2.0s cooldown=15.0s，断流/恢复时清空代价地图`
+- 手动调用两个 ClearEntireCostmap 服务均返回成功；清空后全局代价地图
+  致命格 36071、抽样 5153：真墙 5145 / **幽灵 8（0%）**。
+- 当前 `/scan` 新鲜度 0.06 s、雷达与导航栈均正常。
+
+### 未验证 / 遗留
+- **看门狗的清空分支未在真实断流中触发过**（只验证了服务可用 + 手动清空有效）。
+- 主控上原来的 `~/.config/systemd/user/fwr-lidar-watchdog.service` **已被删除**，
+  现在看门狗没有 systemd 托管，ssh 断线/重启后不会自动拉起 —— 需要的话可重建 unit。
+- 雷达静默卡死（进程在、CPU/IO 冻结）**根因未查**；候选方向：dmesg 里的 USB/CP2102 事件、
+  USB autosuspend、供电/EMI、sllidar 固件与驱动匹配。
+- 断流 2~3 秒期间 `base_bridge` 会撤授权，`frontier_explorer` 目前对"授权丢失"是**中止任务**；
+  可复用后退让位的"暂停"机制改成暂停-恢复（需用户批准）。
+
+### 当前运行状态
+- 主控：导航栈运行中（日志 `/tmp/fwr_runs/nav.log`）；看门狗 pid 12440（`/tmp/fwr_runs/lidar_watchdog.log`）。
+- 开发机：RViz 已连；仓库同样在 `f8eee51` + 未提交改动。
+
+### 下一步
+- 用户手动点 RViz 面板做导航验证；若断流后仍然规划失败，再看是否要开 `--clear-period`。
+
+## 2026-11-12 15:35 · 手动模式 v1.0 定版（RViz 面板键盘/按钮控车）
+
+### 会话目标
+在 RViz 面板新增「手动模式」：键盘/按钮直接控制底盘，并把它调到"按住就走、松手就停、不卡顿"。
+
+### 今天的五层根因（按发现顺序）
+1. **Qt 按键自动重复 + RViz 截断长按**：面板只在 7% 的帧里发出速度
+   → 去抖 + 物理按键查询（`XQueryKeymap`）+ 独立线程按 20 Hz 发布。
+2. **base_bridge 残留 `nav_active`**：动作状态消息停了但标志没清 → 手动指令被静默丢弃
+   → 动作状态 2 s 无更新自动清零 + 手动通道打开时强制清零 + 拦截打日志。
+3. **底盘栈重启后门控回 false**：面板只在"进入手动模式"时开一次门 → 面板每 1 s 保活一次。
+4. **车尾 4 路超声 `no_response`**：fail-safe 锁死后退 → 手动模式默认不看车尾超声
+   （`manual_rear_guard_enabled=false`），自动链路仍然保护。
+5. **`/cmd_vel_auto_safe` 以 20 Hz 广播**：`_on_velocity` 在 `manual_enabled=True` 时每个消息都
+   `_core.halt()` → 手动目标每秒被清 20 次 = 走一下停一下。
+   → 手动模式下手动链路优先，自动链路消息直接忽略（源是 auto 时才停机）。
+
+另外修掉两个"看起来改了没生效"的工程问题：
+- `scripts/run_navigation.sh` 用 `pgrep -x base_bridge` 判断残留进程，但进程名是 `python3`，
+  这条检查从来没生效过；幽灵进程会占着 ESP32 串口，新实例"看起来正常"却写不出指令。
+  现改为命令行匹配 + `fuser` 检查串口。
+- 手动指令保持窗口 `manual_cmd_hold_s` 0.25 → 1.0 s（只容忍丢消息，松手仍立即停）。
+
+### 仓库改动
+- `fwr_rviz_nav/src/two_point_nav_panel.cpp`：手动模式（三模式切换、六档速度 0.12~0.30、
+  方向按钮、持续模式、键盘去抖、X11 物理按键查询、独立发布线程、手动门控 1 s 保活、
+  逐帧调试日志 `/tmp/fwr_panel_debug.log`）。
+- `fwr_bringup/base_bridge.py`：`manual_max_speed_mps`、`manual_cmd_hold_s`、
+  `manual_requires_scan`、`manual_rear_guard_enabled`、`manual_priority`（自动链路不打断手动）、
+  残留 `nav_active` 自愈、`[manual]`/`[tx]` 诊断日志。
+- `fwr_bringup/base_bridge_core.py`：`accept_cmd(hold_s=)`、目标记录/下发不再依赖状态帧新鲜度、
+  `halt()` 来源诊断。
+- `scripts/run_navigation.sh`：残留进程 + 串口占用检查。
+- 测试：`test_manual_teleop.py`、`test_auto_mapping_launch_wiring.py`、`test_turn_action_interface.py`。
+
+### 已验证（主控 fwr-n305，车轮架空 + X11 注入模拟按键）
+- 按住 W **28 秒**：固件 setpoint 稳定 200 mm/s、轮速 200~203、pwm 0.50~0.51，
+  **全程无掉速**（修复前是"走 4 秒停 3 秒"）。
+- 按住 A **6 秒**：setpoint 79、轮速 80（原地左转），松手后 1 秒内停。
+- 松开按键：面板下一帧即发 0，底盘 0.25 s 窗口内停。
+- 台架（架空）实测电机能力：duty 0.30/0.45/0.60/0.65 → 117/180/242/264 mm/s；
+  闭环 100/200/300 mm/s 全跟踪（pwm 0.26/0.51/0.75）；线性外推 duty 0.95 ≈ 0.39 m/s。
+- 测试：开发机 324 项、主控 316 项全部通过。
+
+### 未验证 / 遗留
+- **地面实测**由用户完成；起步约 1.5 s 才明显动是固件速度斜率（150 mm/s²）造成，要更快需改固件。
+- 车尾 4 路超声 `no_response`（硬件/接线）未修，自动链路仍靠它做后退保护。
+- 台架测试后轮式里程计空转，自动播种会匹配到地图外（本次已手工重新播种恢复）。
+
+### 当前运行状态
+- 主控：导航栈运行中；`/tmp/fwr_runs/nav.log`（含 `[manual]`/`[tx]` 诊断行）。
+- 开发机：RViz 运行中；面板调试日志 `/tmp/fwr_panel_debug.log`。
+
+### 下一步
+- 地面验证手动模式六档速度（重点 0.25 / 0.30）。
+- 排查"导航路径一直弯曲"（用户 15:31 提出）：先抓 `/plan` 与代价地图，确认是规划器绕代价还是预览线。

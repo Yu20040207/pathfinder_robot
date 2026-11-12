@@ -31,6 +31,7 @@ from .heading_hold import HeadingHold
 from .imu_yaw_rate_control import ImuYawRateController
 
 _DEBUG_REJECT = bool(os.environ.get('FWR_BASE_DEBUG'))
+_TX_LOG = bool(os.environ.get('FWR_TX_LOG'))
 
 
 class BaseBridgeNode(Node):
@@ -39,14 +40,22 @@ class BaseBridgeNode(Node):
         self.declare_parameter('device', DEFAULT_DEVICE)
         self.declare_parameter('motion_enabled', False)
         self.declare_parameter('manual_enabled', False)
+        # 手动指令的保持窗口：RViz 渲染偶发卡顿 >200 ms 会让固件收到 'x' 断一下，
+        # 现场就是"一卡一卡"。0.25 s 既能过滤 RViz 卡顿，松手后滑行也只有 ~3 cm。
+        # 手动指令的"无消息容忍窗口"。注意它只在**收不到任何消息**时生效；
+        # 面板松手会立刻发一帧 0，所以松手照样马上停。
+        # 之前 0.25 s：WiFi 偶发 300~600 ms 抖动就插 'x' 停车 → 现场"偶尔卡一下"。
+        self.declare_parameter('manual_cmd_hold_s', 1.0)
         self.declare_parameter('allow_pivot', False)
         # 2026-11-03：固件速度环的**稳态标度误差**补偿。
         # 实测：下发 141 mm/s，固件自己也报 214 mm/s（说明它知道跑快了，
         # 但积分下限为 0、无法向下修正），实际就是 214。
         # 试过放开负积分，结果引起极限环振荡（0↔0.46 m/s，12 次停走），已回退。
         # 因此改在这里按固定比例补偿：乘 0.66 让实际速度≈指令速度。
-        # 同时缩放 v 和 ω，转弯半径不变。固件修正后应把它改回 1.0。
-        self.declare_parameter('wheel_speed_scale', 0.66)
+        # 同时缩放 v 和 ω，转弯半径不变。
+        # 2026-11-09 固件按 100:1 电机重标速度环（100 mm/s 跟踪 102.8），
+        # 不再需要软件补偿，故改回 1.0；0.66 只适用于旧固件。
+        self.declare_parameter('wheel_speed_scale', 1.0)
         self._device = str(self.get_parameter('device').value)
         self._core = BaseBridgeCore()
         self._permit = RecoveryPermitCore()
@@ -69,10 +78,15 @@ class BaseBridgeNode(Node):
         self._clear_fault_on_connect = False
         self._last_auto_clear = 0.0
         self._last_handshake_attempt = 0.0
+        self._last_state_req = 0.0
         self._imu_yaw = None
         self._imu_yaw_rate = 0.0
         self._last_imu_at = None
         self._nav_active = {'pose': False, 'through': False}
+        # 2026-11-12：幽灵导航目标会让手动指令被静默丢弃（现场"按了完全不动"）。
+        # 记录每个 action status 的更新时间，并在手动通道打开时强制清零。
+        self._nav_status_at = {'pose': 0.0, 'through': 0.0}
+        self._manual_enabled_prev = False
         self._command_source = None
         self._safe_cmd_zero = True
         self._manual_yaw_rate = ImuYawRateController()
@@ -82,6 +96,17 @@ class BaseBridgeNode(Node):
         # 2026-10-31：后向超声守卫。true 时拒绝任何"后退"指令（v<0）。
         # 只限制后退，不产生前进/倒车指令；不改变自动倒车许可。
         self.declare_parameter('rear_guard_enabled', True)
+        # 手动模式是否也受车尾超声守卫限制。默认 False：
+        # 手动是有人在看着的低速操作，车尾超声坏了也不该把后退锁死。
+        # 自动/导航链路仍然照旧受 rear_guard 保护。
+        self.declare_parameter('manual_rear_guard_enabled', False)
+        # 手动模式的**单轮**速度上限。0.30 m/s 直行时单轮正好 300 mm/s，
+        # 是固件 parse_velocity 的硬上限；再高固件会直接丢弃该帧。
+        self.declare_parameter('manual_max_speed_mps', 0.30)
+        # 手动模式是否要求雷达数据新鲜。默认 False：手动是有人看守的低速操作，
+        # 雷达偶发 2 s 卡顿（本机已知硬件问题）不该把车掐停 —— 那正是
+        # "按住 W 一卡一卡"的直接原因。自动/导航链路仍然强制要求雷达。
+        self.declare_parameter('manual_requires_scan', False)
         # 导航倒退限速（绝对值）：车尾 4 点超声覆盖有限，慢一点更稳
         self.declare_parameter('max_reverse_mps', 0.12)
         self.declare_parameter('heading_hold_gain', 1.5)
@@ -227,6 +252,16 @@ class BaseBridgeNode(Node):
         now = time.monotonic()
         self._safe_cmd_at = now
         self._safe_cmd_zero = abs(msg.linear.x) < 1e-9 and abs(msg.angular.z) < 1e-9
+        # 2026-11-12（本轮顿挫的根因）：/cmd_vel_auto_safe 由碰撞监控/选择器以 20 Hz
+        # 持续发布（空闲时是 0）。原来这里只要 manual_enabled=True 就 _core.halt()，
+        # 等于每秒 20 次把手动目标清零 → 手动模式"走一下停一下"（实测 4 s 走/3 s 停）。
+        # 手动模式下手动链路优先：自动链路的消息直接忽略（源是 auto 时才真正停机）。
+        if bool(self.get_parameter('manual_enabled').value):
+            self._auto_armed = False
+            self._permit.abort()
+            if self._command_source == 'auto':
+                self._core.halt()
+            return
         if not self._sensors_ready(now) or not self._core.ready(now):
             self._auto_armed = False
             self._permit.abort()
@@ -236,11 +271,6 @@ class BaseBridgeNode(Node):
             self._auto_armed = False
             self._permit.abort()
             self._reject_motion('state-stale')
-            return
-        if bool(self.get_parameter('manual_enabled').value):
-            self._auto_armed = False
-            self._permit.abort()
-            self._reject_motion('manual-enabled')
             return
         if abs(msg.linear.x) < 1e-9 and abs(msg.angular.z) < 1e-9:
             if self._command_source == 'auto':
@@ -304,15 +334,21 @@ class BaseBridgeNode(Node):
         self._manual_debug.publish(debug)
         if not command_source_allowed('manual', bool(self.get_parameter('manual_enabled').value),
                                       any(self._nav_active.values())):
+            self.get_logger().warn('手动指令被导航任务状态拦截（nav_active 残留？）',
+                                   throttle_duration_sec=2.0)
             return
-        if not self._sensors_ready(now):
+        if not self._sensors_ready(now, require_scan=bool(
+                self.get_parameter('manual_requires_scan').value)):
             return
         if (msg.linear.x < -1e-6 and self._rear_blocked and
-                bool(self.get_parameter('rear_guard_enabled').value)):
+                bool(self.get_parameter('rear_guard_enabled').value) and
+                bool(self.get_parameter('manual_rear_guard_enabled').value)):
             self._core.halt()
             self.get_logger().warn('后退被车尾超声守卫拦截', throttle_duration_sec=2.0)
             return
         if not manual_velocity(msg.linear.x, msg.angular.z, self._core.track_m,
+                                max_linear_mps=float(
+                                    self.get_parameter('manual_max_speed_mps').value),
                                 allow_mixed=bool(
                                     self.get_parameter('manual_allow_mixed').value)):
             self._core.halt()
@@ -320,22 +356,30 @@ class BaseBridgeNode(Node):
                                    throttle_duration_sec=2.0)
             return
         try:
-            if abs(msg.angular.z) > 1e-9:
-                corrected_yaw_rate = self._manual_yaw_rate.update(
-                    msg.angular.z, self._imu_yaw_rate, now)
-                self._heading_hold.reset()
-            else:
-                self._manual_yaw_rate.reset()
-                # 只前进不转向时，用 IMU 航向把车拉回直线（差速车左右轮不等径会画弧）。
-                if (bool(self.get_parameter('heading_hold_enabled').value) and
-                        self._imu_yaw is not None):
-                    corrected_yaw_rate = self._heading_hold.update(
-                        msg.linear.x, 0.0, self._imu_yaw, now)
-                else:
-                    self._heading_hold.reset()
-                    corrected_yaw_rate = 0.0
-            self._core.accept_cmd(msg.linear.x, corrected_yaw_rate, now)
+            # 2026-11-12：手动模式改为**直通**，不再用 IMU 做航向保持/转向速率修正。
+            # 原因：手动直行时航向保持会不断加大左右轮差速（实测 121/118 → 131/108，
+            # 等效 ω 从 0.02 涨到 0.145 rad/s 并顶到限幅），车一边走一边被拽，
+            # 现场感受就是"一卡一卡"。手动是人在操控，转向应该由人决定。
+            self._manual_yaw_rate.reset()
+            self._heading_hold.reset()
+            corrected_yaw_rate = msg.angular.z
+            # 2026-11-12：0.25/0.30 m/s 档"一卡一卡"的根因 ——
+            # 航向保持会给一点点 ω，单轮 = v + ω·track/2 就会超过固件 ±300 mm/s，
+            # encode_wheel_speed 直接抛异常 → 整帧被丢 → 停一下再走。
+            # 这里先按单轮上限等比缩放（保持曲率），永远不产生非法帧。
+            v_cmd, w_cmd = scale_velocity_to_wheel_limit(
+                msg.linear.x, corrected_yaw_rate, self._core.track_m,
+                max_wheel_mps=float(self.get_parameter('manual_max_speed_mps').value))
+            self._core.accept_cmd(v_cmd, w_cmd, now,
+                                  hold_s=float(self.get_parameter('manual_cmd_hold_s').value))
             self._command_source = 'manual'
+            # 诊断：把手动链路的内部状态打出来（每秒 1 行），定位"收到但不执行"
+            self.get_logger().info(
+                f'[manual] rx v={msg.linear.x:.3f} w={msg.angular.z:.3f} '
+                f'out v={v_cmd:.3f} w={w_cmd:.3f} target={self._core._target} '
+                f'sensors={self._sensors_ready(now, require_scan=False)} '
+                f'scan={self._scan.ready(now)} imu_age={0 if self._last_imu_at is None else round(now - self._last_imu_at, 3)}',
+                throttle_duration_sec=1.0)
         except (ValueError, RuntimeError) as exc:
             self.get_logger().warn(f'Rejected manual velocity: {exc}',
                                    throttle_duration_sec=2.0)
@@ -356,10 +400,12 @@ class BaseBridgeNode(Node):
     def _stamp_s(stamp) -> float:
         return stamp.sec + stamp.nanosec / 1e9
 
-    def _sensors_ready(self, now: float) -> bool:
-        return (bool(self.get_parameter('motion_enabled').value) and
-                self._scan.ready(now) and self._scan_stamp.ready(now) and
-                self._imu_stamp.ready(now) and self._last_imu_at is not None and
+    def _sensors_ready(self, now: float, require_scan: bool = True) -> bool:
+        if not bool(self.get_parameter('motion_enabled').value):
+            return False
+        if require_scan and not (self._scan.ready(now) and self._scan_stamp.ready(now)):
+            return False
+        return (self._imu_stamp.ready(now) and self._last_imu_at is not None and
                 0 <= now - self._last_imu_at <= float(self.get_parameter('sensor_timeout_s').value))
 
     def _on_imu(self, msg: Imu) -> None:
@@ -385,6 +431,7 @@ class BaseBridgeNode(Node):
         self._rear_blocked = bool(msg.data)
 
     def _on_nav_status(self, kind: str, msg: GoalStatusArray) -> None:
+        self._nav_status_at[kind] = time.monotonic()
         self._nav_active[kind] = any(
             item.status in (1, 2, 3) for item in msg.status_list)
 
@@ -598,6 +645,18 @@ class BaseBridgeNode(Node):
         now = time.monotonic()
         manual_enabled = bool(self.get_parameter('manual_enabled').value)
         self._manual_mode.publish(Bool(data=manual_enabled))
+        # ① 状态消息 2 s 没更新 → 视为残留目标，清掉（否则手动指令被一直丢）
+        for kind in list(self._nav_active):
+            if now - self._nav_status_at.get(kind, 0.0) > 2.0:
+                if self._nav_active[kind]:
+                    print(f'[base] cleared stale nav_active[{kind}]', flush=True)
+                self._nav_active[kind] = False
+        # ② 手动通道刚打开的那一帧：强制清零（面板进手动模式前已经停掉导航任务）
+        if manual_enabled and not self._manual_enabled_prev:
+            if any(self._nav_active.values()):
+                print('[base] manual on -> cleared nav_active', flush=True)
+            self._nav_active = {'pose': False, 'through': False}
+        self._manual_enabled_prev = manual_enabled
         if self._command_source == 'auto':
             gap_action = safe_command_gap_action(
                 now - self._safe_cmd_at if self._safe_cmd_at is not None else float('inf'),
@@ -650,8 +709,25 @@ class BaseBridgeNode(Node):
                         os.write(self._fd, b'?')
                         self._last_handshake_attempt = now
                     output = self._core.step(None, now)
-                    if self._sensors_ready(now):
+                    # 手动来源允许在雷达卡顿时继续（manual_requires_scan=False）
+                    manual_source = (self._command_source == 'manual' and
+                                     not bool(self.get_parameter(
+                                         'manual_requires_scan').value))
+                    if self._sensors_ready(now, require_scan=not manual_source):
                         command = output.command
+                        age = (None if self._core._last_cmd_at is None
+                               else round(now - self._core._last_cmd_at, 3))
+                        if _TX_LOG:
+                            with open('/tmp/fwr_tx.log', 'a') as fh:
+                                fh.write(f'{now:.3f} {command!r} '
+                                         f'tgt={self._core._target} age={age} '
+                                         f'src={self._command_source}\n')
+                        else:
+                            self.get_logger().info(
+                                f'[tx] {command!r} src={self._command_source} '
+                                f'tgt={self._core._target} age={age} '
+                                f'hold={self._core._cmd_hold_s:.2f}',
+                                throttle_duration_sec=1.0)
                     else:
                         print('[base] disarm tick-sensors', flush=True)
                         self._auto_armed = False

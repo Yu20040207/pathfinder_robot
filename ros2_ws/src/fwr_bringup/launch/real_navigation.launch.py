@@ -43,6 +43,7 @@ def generate_launch_description():
                                                 'real_navigate_to_pose.xml')),
         DeclareLaunchArgument('lidar_port', default_value='/dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_Controller_e00aaf475431f111b7818c5f30d20014-if00-port0'),
         DeclareLaunchArgument('start_imu', default_value='true'),
+        DeclareLaunchArgument('start_lidar', default_value='true'),
         DeclareLaunchArgument('use_saved_map', default_value='false'),
         # 2026-10-30：建图引擎可选 slam（slam_toolbox）或 carto（Cartographer）。
         # 离线 bag 回放对比结论：Cartographer 墙更实（87.7% vs 84%）、方向更一致（6° vs 13.5°）。
@@ -64,6 +65,7 @@ def generate_launch_description():
                  LaunchConfiguration('slam_engine'), "' != 'carto'"])),
             launch_arguments={'use_sim_time': use_sim_time,
                               'lidar_port': LaunchConfiguration('lidar_port'),
+                              'start_lidar': LaunchConfiguration('start_lidar'),
                               'start_imu': LaunchConfiguration('start_imu')}.items()),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(

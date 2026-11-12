@@ -372,16 +372,16 @@ void base_tick(base_control_t *c, int64_t now, int32_t left, int32_t right,
         // short startup pulse and existing stall latch handle breakaway.
         if (pivot) {
             float pivot_error = desired-direction*c->measured[i];
-            float proportional = .56f+.003f*pivot_error;
-            float trial = clamp(c->integral[i]+.004f*pivot_error*dt, -.08f, .15f);
-            float unbounded = proportional+trial;
-            if ((unbounded>=.48f && unbounded<=.75f) ||
-                (unbounded>.75f && pivot_error<0) ||
-                (unbounded<.48f && pivot_error>0))
+            // 2026-11-11 换 100:1 电机后重标：旧的 0.56/0.48/0.58 是
+            // AT8236 + 66 mm 轮的滚动占空比；新电机同样速度只需 ~0.08~0.15。
+            // 沿用旧值会让原地转向快约 8 倍（实测指令 27 mm/s → 195 mm/s）。
+            // 改用与直行一致的前馈 + PI，积分保持非负以免重演极限环。
+            float feedforward = FF_BASE_DUTY+FF_PER_MMPS*desired;
+            float trial = clamp(c->integral[i]+.0015f*pivot_error*dt, 0.0f, .30f);
+            float unbounded = feedforward+.0012f*pivot_error+trial;
+            if (unbounded<=.75f || pivot_error<0)
                 c->integral[i] = trial;
-            effort = clamp(proportional+c->integral[i], .48f, MAX_DUTY);
-            if (direction*c->measured[i]<40.0f)
-                effort = fmaxf(effort, .58f);
+            effort = clamp(feedforward+.0012f*pivot_error+c->integral[i], 0, MAX_DUTY);
         }
         // Preserve wheel momentum after the startup pulse: an abrupt duty
         // reduction from the startup duty can stop loaded wheels.
@@ -390,7 +390,7 @@ void base_tick(base_control_t *c, int64_t now, int32_t left, int32_t right,
         if (direction*c->measured[i] <= desired && effort < previous)
             effort = previous;
         float rise_rate = error > 20.0f ? 3.0f : 1.0f;
-        float fall_rate = previous > .55f &&
+        float fall_rate = previous > .30f &&
                           direction*c->measured[i] > desired + 20.0f ?
                           2.0f : .2f;
         c->pwm[i] = direction*approach(previous, effort,

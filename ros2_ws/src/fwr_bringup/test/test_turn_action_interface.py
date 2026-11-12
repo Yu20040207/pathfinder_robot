@@ -14,7 +14,8 @@ def test_turn_action_has_explicit_modes_and_result():
 
 
 def test_turn_wait_yields_to_rclpy_executor_without_asyncio_loop():
-    from rclpy.task import Task
+    import rclpy
+    from rclpy.executors import SingleThreadedExecutor
     from fwr_bringup.base_bridge import BaseBridgeNode
 
     class TimerHost:
@@ -28,15 +29,26 @@ def test_turn_wait_yields_to_rclpy_executor_without_asyncio_loop():
         def destroy_timer(self, _):
             self.destroyed = True
 
-    host = TimerHost()
-    task = Task(BaseBridgeNode._sleep_ros(host, .05))
-    task()
-    assert not task.done()
-    host.callback()
-    task()
-    assert task.done()
-    assert task.result() is None
-    assert host.destroyed
+    # rclpy >= 3.3.20 refuses to resume a Task that was not created through an
+    # executor ("Task tried to reschedule but no executor was set"), so build
+    # the task with create_task() instead of Task(...) directly. A private
+    # context keeps this test independent of the process-global rclpy context.
+    context = rclpy.context.Context()
+    context.init()
+    executor = SingleThreadedExecutor(context=context)
+    try:
+        host = TimerHost()
+        task = executor.create_task(BaseBridgeNode._sleep_ros(host, .05))
+        task()
+        assert not task.done()
+        host.callback()
+        task()
+        assert task.done()
+        assert task.result() is None
+        assert host.destroyed
+    finally:
+        executor.shutdown()
+        context.shutdown()
 
 
 def test_nav_goal_status_tracks_active_goal_during_command_pause():
@@ -45,6 +57,7 @@ def test_nav_goal_status_tracks_active_goal_during_command_pause():
 
     class Host:
         _nav_active = {'pose': False, 'through': False}
+        _nav_status_at = {'pose': 0.0, 'through': 0.0}
 
     host = Host()
     msg = GoalStatusArray()

@@ -11,8 +11,12 @@
       <PipelineSequence name="NavigateWithReplanning">
         <RateController hz="0.5">
           <Sequence name="PrunePassedGoals">
+            <!-- 2026-11-12：半径 0.7 → 0.3。0.7 太宽松 —— 车在门口原地打转（规划失败时
+                 行为树在 spin）会被判定为"已经路过"该途经点，于是把它从目标里剔除，
+                 剩下的目标直接变成终点 → 现象就是"原地左转几次，然后跳过去终点"。
+                 0.3 m 只在真的贴着该点经过时才剔除。 -->
             <RemovePassedGoals input_goals="{goals}" output_goals="{goals}"
-                               radius="0.7"/>
+                               radius="0.3"/>
             <ComputePathThroughPoses goals="{goals}" path="{path}" planner_id="GridBased"/>
           </Sequence>
         </RateController>

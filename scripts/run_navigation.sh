@@ -18,6 +18,7 @@ MAP=""
 STOP=1
 RVIZ=true
 PRINT_MAP=0
+START_LIDAR=true
 
 usage() {
   sed -n '2,9p' "$0"
@@ -29,6 +30,9 @@ while [[ $# -gt 0 ]]; do
     --no-stop) STOP=0; shift ;;
     --no-rviz) RVIZ=false; shift ;;
     --print-map) PRINT_MAP=1; shift ;;
+    # 2026-11-12：雷达交给外部看门狗独占（launch 与看门狗同时开串口会让
+    # sllidar_node 死锁在 futex 上，/scan 每 ~15 s 断一次）。
+    --no-lidar) START_LIDAR=false; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "未知参数: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -94,11 +98,23 @@ if [[ "$STOP" -eq 1 ]]; then
   echo "== 停止旧 ROS 栈 =="
   bash "$ROOT/tools/start_mapping.sh" stop
   sleep 8
-  # Prefer the process check: `ros2 node list` may still serve a cached
-  # /base_bridge from the daemon for a few seconds after the process dies.
-  if pgrep -x base_bridge >/dev/null 2>&1; then
+  # 2026-11-12：原来用 `pgrep -x base_bridge` 判断，但进程名其实是 python3
+  # （comm 不等于 base_bridge），这条检查从来没生效 —— 结果残留的 base_bridge
+  # 会占着 ESP32 串口，新起的实例看起来"一切正常"却写不出任何指令
+  # （现象：面板发 0.2、[manual] target=(200,200)，但固件 setpoint 恒 0）。
+  pkill -f "[f]wr_bringup/base_bridge" 2>/dev/null || true
+  sleep 2
+  if pgrep -f "[f]wr_bringup/base_bridge" >/dev/null 2>&1; then
     echo "旧栈仍有 base_bridge 进程；请检查进程后再运行，避免串口/AMCL/SLAM 冲突。" >&2
     exit 1
+  fi
+  # 再确认 ESP32 串口真的空出来了（幽灵句柄会让新实例静默失效）
+  ESP_PORT=$(ls /dev/serial/by-id/ 2>/dev/null | grep -i "Espressif" | head -1)
+  if [ -n "$ESP_PORT" ] && [ -e "/dev/serial/by-id/$ESP_PORT" ]; then
+    if fuser -s "/dev/serial/by-id/$ESP_PORT" 2>/dev/null; then
+      echo "ESP32 串口仍被占用（可能是残留进程）：$(fuser /dev/serial/by-id/$ESP_PORT 2>&1)" >&2
+      exit 1
+    fi
   fi
 fi
 
@@ -111,4 +127,5 @@ echo
 
 exec ros2 launch fwr_bringup run_navigation.launch.py \
   "map:=$MAP" \
-  "start_rviz:=$RVIZ"
+  "start_rviz:=$RVIZ" \
+  "start_lidar:=$START_LIDAR"

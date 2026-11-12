@@ -238,7 +238,8 @@ def test_through_poses_bt_removes_passed_goals():
     order = [c.tag for c in seq]
     assert order[0] == 'RemovePassedGoals' and order[1] == 'ComputePathThroughPoses', order
     node = next(e for e in tree.getroot().iter() if e.tag == 'RemovePassedGoals')
-    assert node.get('radius') == '0.7'
+    # 2026-11-12：0.7 会在车原地打转时把没去过的途经点也剔除 → 必须 ≤0.3
+    assert float(node.get('radius')) <= 0.3, '剔除半径过大会跳过没去过的途经点'
 
 
 def test_panel_space_toggles_navigation():
@@ -330,7 +331,7 @@ def test_failed_fixed_goal_is_retried_after_clearing():
     src = (ROOT / 'fwr_bringup' / 'frontier_explorer.py').read_text()
     seg = src[src.index('def _finished('):]
     seg = seg[:seg.index('def ', 20)]
-    assert 'max_stuck_retries' in seg and '_clear_costmaps()' in seg
+    assert 'max_stuck_retries' in seg and '_clear_costmaps(' in seg
     assert "self._status = 'idle'" in seg, '重试应让状态机重新派发'
 
 
@@ -344,3 +345,67 @@ def test_route_never_drops_the_destination_waypoint():
     seg = src[src.index('route_skip_near_m'):]
     seg = seg[:seg.index('tail_gap')]
     assert 'i == len(pts) - 1 or' in seg, '终点不能参与剔除'
+
+
+def test_short_arm_loss_pauses_instead_of_aborting():
+    """雷达断流导致底盘撤授权时，任务应**暂停**等传感器恢复，而不是整条中止。
+
+    2026-11-12 现场：sllidar_node 静默卡死 2~3 s → base_bridge 撤授权 →
+    frontier_explorer 中止整条多点路线；看门狗把雷达拉回来后任务已经没了。
+    """
+    src = (ROOT / 'fwr_bringup' / 'frontier_explorer.py').read_text()
+    assert 'arm_loss_grace_s' in src
+    seg = src[src.index('def _on_bridge_arm'):]
+    seg = seg[:seg.index('def _on_fault')]
+    assert '_paused_for_sensor' in seg, '授权丢失应进入暂停态'
+    assert 'self._sm.stop()' in seg, '超过宽限仍要能放弃（保留兜底）'
+    # tick 里必须处理暂停与超时
+    tick = src[src.index('def _tick(self):'):]
+    tick = tick[:tick.index('def _dispatch')]
+    assert '_paused_for_sensor' in tick and '_sensor_pause_deadline' in tick
+
+
+def test_costmap_is_cleared_while_navigating_too():
+    """导航进行中必须周期清全局代价地图（只清全局）。
+
+    2026-11-12 现场：跑一段后规划器开始 no valid path（门洞被陈旧标记堵住），
+    重启栈立刻恢复 → 全局代价地图污染累积，不是地图问题。
+    """
+    src = (ROOT / 'fwr_bringup' / 'frontier_explorer.py').read_text()
+    assert 'costmap_clear_nav_period_s' in src
+    seg = src[src.index('costmap_clear_nav_period_s'):]
+    seg = seg[:seg.index('def _dispatch') if 'def _dispatch' in seg else 4000]
+    assert 'clients[0].call_async' in seg, '只清全局（索引 0），不动局部'
+
+
+def test_stale_goal_handle_is_released():
+    """任务失败后句柄残留会让后续"开始导航"永远被判 busy（只能重启栈）。
+
+    2026-11-12 现场："启动被拒绝：preflight failed: busy" —— 就是因为 _handle 没释放。
+    """
+    src = (ROOT / 'fwr_bringup' / 'frontier_explorer.py').read_text()
+    assert '_handle_set_at' in src
+    assert '目标句柄残留' in src
+    seg = src[src.index('目标句柄残留'):]
+    assert 'self._handle = None' in seg[:600]
+
+
+def test_panel_has_manual_mode_with_keyboard_drive():
+    """面板必须有"手动模式"：选中后开运动门+手动通道，键盘 W/S/A/D 直接控车。
+
+    2026-11-12 用户要求：新增手动模式，点击后自动进入键盘手动操控。
+    键盘处理做在面板里（RViz 没有终端，拉起 teleop_twist_keyboard 收不到按键）。
+    """
+    panel = (ROOT.parent / 'fwr_rviz_nav' / 'src' / 'two_point_nav_panel.cpp').read_text()
+    assert '"手动模式"' in panel
+    assert 'enter_manual_mode' in panel and 'leave_manual_mode' in panel
+    assert 'set_manual_gates' in panel, '手动模式必须同时打开运动门和手动通道'
+    assert 'manual_enabled' in panel
+    assert 'installEventFilter' in panel
+    assert 'Qt::Key_W' in panel and 'Qt::Key_S' in panel
+    assert 'manual_tick' in panel and 'cmd_vel_manual' in panel
+    # 手动模式六档速度：0.30 / 0.25 / 0.20 / 0.18 / 0.15 / 0.12 m/s
+    assert 'manual_speed_box_' in panel
+    for v in ('0.30', '0.25', '0.20', '0.18', '0.15', '0.12'):
+        assert ('%s m/s' % v) in panel, '缺少速度档位 %s m/s' % v
+    assert 'kSpeeds[6] = {0.30, 0.25, 0.20, 0.18, 0.15, 0.12}' in panel
