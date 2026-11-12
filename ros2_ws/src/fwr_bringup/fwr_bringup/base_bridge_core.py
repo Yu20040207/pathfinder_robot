@@ -303,7 +303,11 @@ class BaseBridgeCore:
         return left, right
 
     def begin_turn(self, now_s: float) -> bool:
-        if (self._turn_owner or not self.ready(now_s) or
+        # 2026-11-12：不再要求"状态帧 ≤0.25 s"。固件只在串口空闲时上报，
+        # 底盘持续写 'x'/速度时状态会变旧 → ready() 变 False → 转向永远被拒
+        # （现场：掉头对准连续被拒 3 次，Nav2 只能自己按最短转角转）。
+        if (self._turn_owner or
+                not (self.connected and self.verified and self.fault == 0) or
                 (self._target is not None and self._last_cmd_at is not None and
                  0 <= now_s - self._last_cmd_at <= .20)):
             return False

@@ -93,4 +93,7 @@ def test_turn_cannot_take_over_fresh_navigation_velocity():
     core.accept_cmd(.08, 0, .01)
     assert not core.begin_turn(.02)
     assert core.step(None, .03).command == b'v 80.000 80.000\n'
-    assert core.begin_turn(.30) is False  # serial state is stale by then
+    # 2026-11-12 规则变更：状态帧变旧不再阻止转向（固件只在串口空闲时上报，
+    # 底盘持续写指令时状态天然会旧；现场因此"掉头对准连续被拒"）。
+    # 现在只看"链路已连接 + 握手 + 无故障"。
+    assert core.begin_turn(.30) is True

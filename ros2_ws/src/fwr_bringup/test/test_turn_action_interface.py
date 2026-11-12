@@ -75,11 +75,32 @@ def test_turn_goal_rejected_when_nav_goal_active_without_recent_cmd_vel():
     from rclpy.action import GoalResponse
     from fwr_bringup.base_bridge import BaseBridgeNode
 
+    class _Param:
+        def __init__(self, v):
+            self.value = v
+
+    class _Stamp:
+        def age_at(self, _):
+            return 0.01
+
+    class _Logger:
+        def warn(self, *_a, **_k):
+            pass
+
     class Host:
         _nav_active = {'pose': True, 'through': False}
+        _imu_yaw = 0.1
+        _last_imu_at = 1.0
+        _imu_stamp = _Stamp()
 
         def _sensors_ready(self, _):
             return True
+
+        def get_parameter(self, name):
+            return _Param(True)
+
+        def get_logger(self):
+            return _Logger()
 
     class Request:
         mode = 2

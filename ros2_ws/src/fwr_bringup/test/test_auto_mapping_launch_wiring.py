@@ -344,7 +344,11 @@ def test_route_never_drops_the_destination_waypoint():
     src = (ROOT / 'fwr_bringup' / 'frontier_explorer.py').read_text()
     seg = src[src.index('route_skip_near_m'):]
     seg = seg[:seg.index('tail_gap')]
-    assert 'i == len(pts) - 1 or' in seg, '终点不能参与剔除'
+    # 2026-11-12 起规则更严格：只有"第一个点贴在车身上"才剔除，
+    # kept = kept[1:] 保留最后一个点 → 终点与中间途经点都不会被删。
+    assert 'kept = list(pts)' in seg, '剔除必须基于完整列表'
+    assert 'kept = kept[1:]' in seg, '只允许剔除第一个点'
+    assert 'i == len(pts) - 1 or' not in seg, '旧的"按距离全量剔除"已移除'
 
 
 def test_short_arm_loss_pauses_instead_of_aborting():

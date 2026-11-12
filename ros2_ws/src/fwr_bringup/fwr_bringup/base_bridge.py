@@ -46,7 +46,9 @@ class BaseBridgeNode(Node):
         # 面板松手会立刻发一帧 0，所以松手照样马上停。
         # 之前 0.25 s：WiFi 偶发 300~600 ms 抖动就插 'x' 停车 → 现场"偶尔卡一下"。
         self.declare_parameter('manual_cmd_hold_s', 1.0)
-        self.declare_parameter('allow_pivot', False)
+        # 2026-11-12：掉头对准（frontier_explorer 的 prealign）需要原地转（PIVOT）。
+        # 现在只有 frontier_explorer 会调 /turn_relative，且调用前已确认没有导航目标在跑。
+        self.declare_parameter('allow_pivot', True)
         # 2026-11-03：固件速度环的**稳态标度误差**补偿。
         # 实测：下发 141 mm/s，固件自己也报 214 mm/s（说明它知道跑快了，
         # 但积分下限为 0、无法向下修正），实际就是 214。
@@ -79,6 +81,10 @@ class BaseBridgeNode(Node):
         self._last_auto_clear = 0.0
         self._last_handshake_attempt = 0.0
         self._last_state_req = 0.0
+        self._last_sent_command = None
+        # 串口保活：记录最后一次收到状态帧的时间（ESP32 只在这条链路上报状态）
+        self._last_state_at = 0.0
+        self._last_link_poke = 0.0
         self._imu_yaw = None
         self._imu_yaw_rate = 0.0
         self._last_imu_at = None
@@ -263,12 +269,14 @@ class BaseBridgeNode(Node):
                 self._core.halt()
             return
         if not self._sensors_ready(now) or not self._core.ready(now):
-            self._auto_armed = False
+            # 2026-11-12（A）：这里原来会清掉 _auto_armed。雷达只要卡 2 秒，
+            # 自动授权就被永久撤销，雷达恢复后 Nav2 的指令仍被拒
+            # （[tx] b'x' src=auto tgt=None），恢复旋转也转不了 → Goal failed。
+            # 现在只暂停本帧（门控本来就不会输出），授权保留，传感器恢复后自动继续。
             self._permit.abort()
             self._reject_motion('sensors')
             return
         if self._explore_state_at is None or now - self._explore_state_at > .25:
-            self._auto_armed = False
             self._permit.abort()
             self._reject_motion('state-stale')
             return
@@ -437,11 +445,21 @@ class BaseBridgeNode(Node):
 
     def _turn_goal(self, request):
         now = time.monotonic()
-        if (not self._sensors_ready(now) or any(self._nav_active.values()) or
-                (request.mode == TurnRelative.Goal.PIVOT and
-                 not bool(self.get_parameter('allow_pivot').value)) or
-                self._imu_yaw is None or self._last_imu_at is None or
-                self._imu_stamp.age_at(now) > .15):
+        turn_why = []
+        if not self._sensors_ready(now):
+            turn_why.append('sensors')
+        if any(self._nav_active.values()):
+            turn_why.append('nav_active')
+        if (request.mode == TurnRelative.Goal.PIVOT and
+                not bool(self.get_parameter('allow_pivot').value)):
+            turn_why.append('pivot_disabled')
+        if self._imu_yaw is None or self._last_imu_at is None:
+            turn_why.append('no_imu_yaw')
+        elif self._imu_stamp.age_at(now) > .15:
+            turn_why.append('imu_stale')
+        if turn_why:
+            self.get_logger().warn('转向目标被拒：' + ','.join(turn_why),
+                                   throttle_duration_sec=1.0)
             return GoalResponse.REJECT
         try:
             TurnController(request.angle_deg, request.mode, now)
@@ -532,6 +550,7 @@ class BaseBridgeNode(Node):
             os.write(self._fd, b'x?')
             self._last_handshake_attempt = now
             self._clear_fault_on_connect = True
+            self._last_state_at = now
             self.get_logger().info(f'ESP32 serial opened exclusively: {self._device}')
         except (OSError, ValueError) as exc:
             self.get_logger().warn(f'ESP32 serial unavailable: {exc}', throttle_duration_sec=5.0)
@@ -568,6 +587,7 @@ class BaseBridgeNode(Node):
             state = parse_state_line(decoded)
             if state is None:
                 continue
+            self._last_state_at = now
             debug = Float64MultiArray()
             debug.data = [float(state.esp_us), state.left_measured,
                           state.right_measured, state.left_setpoint,
@@ -704,6 +724,22 @@ class BaseBridgeNode(Node):
                     if self._fd is None:
                         break
                 if self._fd is not None:
+                    # 2026-11-12：ESP32 状态帧静默（现场出现过：进程/句柄都在，但一条
+                    # 状态都收不到 → /base/ready=false → 面板"底盘未就绪"、导航停）。
+                    # 这里做保活：2 s 没状态就重新握手，6 s 还没恢复就断开重开串口。
+                    silence = now - self._last_state_at if self._last_state_at else 0.0
+                    if silence > 2.0 and now - self._last_link_poke >= 1.0:
+                        self._last_link_poke = now
+                        self._core.verified = False
+                        try:
+                            os.write(self._fd, b'?')
+                        except OSError as exc:
+                            self._disconnect(str(exc))
+                            return
+                        print('[base] 状态帧静默 %.1fs → 重新握手' % silence, flush=True)
+                    if silence > 6.0:
+                        self._disconnect('state frames silent > 6 s')
+                        return
                     if (not self._core.verified and
                             now - self._last_handshake_attempt >= 1.0):
                         os.write(self._fd, b'?')
@@ -730,11 +766,14 @@ class BaseBridgeNode(Node):
                                 throttle_duration_sec=1.0)
                     else:
                         print('[base] disarm tick-sensors', flush=True)
-                        self._auto_armed = False
                         self._core.halt()
                         self._manual_yaw_rate.reset()
                         command = b'x'
-                    os.write(self._fd, command)
+                    # 连续相同的 'x' 不重复写：固件只有在串口空闲时才会每 100 ms
+                    # 上报 S2 状态，一直写 'x' 会让状态断流、ready() 判假。
+                    if not (command == b'x' and self._last_sent_command == b'x'):
+                        os.write(self._fd, command)
+                    self._last_sent_command = command
             except OSError as exc:
                 self._disconnect(str(exc))
         if (self._stopped_at is not None and self._auto_armed and

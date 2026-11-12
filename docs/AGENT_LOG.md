@@ -6054,3 +6054,60 @@ max_goal_distance_m=6.0 chain_watchdog=false max_runtime_s=0.0`
 ### 下一步
 - 地面验证手动模式六档速度（重点 0.25 / 0.30）。
 - 排查"导航路径一直弯曲"（用户 15:31 提出）：先抓 `/plan` 与代价地图，确认是规划器绕代价还是预览线。
+
+## 2026-11-12 17:30 · v1.8：车体尺寸/门洞余量/近目标保护/继续语义/串口保活
+
+### 会话目标
+手动模式 v1.0 之后的一批现场问题：进门口擦边、路径弯曲、近目标"开始即结束"、
+继续导航后不动、换航点时不走途经点、底盘偶发"车里停了但 RViz 还在走"。
+
+### 仓库改动
+- `config/real_nav2.yaml`
+  - `footprint`: 0.60×0.43 → **0.60×0.36**（新车壳实测 360 mm；旧壳 350 mm，配置一直写 0.43）
+  - `footprint_padding`: 0.02 → **0.06**（有效包络 0.48 m，每侧比真实车体多留 6 cm）
+  - `FollowPath.lookahead_dist`: 0.55 → **0.52**（进门转弯少抄内弯；0.45 会左右摆，不要再低）
+  - `FollowPath.transform_tolerance` 0.2 → **0.5**、`behavior_server.transform_tolerance` 0.1 → **0.5**
+- `fwr_bringup/base_bridge.py`
+  - 串口保活：ESP32 状态帧静默 2 s → 重新握手；6 s → 断开重开串口（现场出现过"句柄在、
+    一条状态都收不到、/base/ready=false、面板提示底盘未就绪"）
+  - 空闲 `x` 帧去重（连续相同 `x` 不重复写，给固件留出上报窗口）
+  - `allow_pivot` 默认 False → **True**（掉头对准需要原地转）
+  - 转向目标被拒时打印原因（sensors / nav_active / pivot_disabled / no_imu_yaw / imu_stale）
+  - 手动模式优先：`/cmd_vel_auto_safe` 的 20 Hz 消息不再打断手动目标
+- `fwr_bringup/base_bridge_core.py`
+  - `accept_cmd` / `step` / `begin_turn` 不再依赖"状态帧新鲜"（固件只在串口空闲时上报）
+  - `accept_cmd(hold_s=)`：手动指令保持窗口可配
+- `fwr_bringup/frontier_explorer.py`
+  - 单点目标 < `min_fixed_goal_distance_m`(0.5) → 明确拒绝（不再"开始即结束"）
+  - 路线只剔除"贴在车身上的第一个点"；**途经点/终点永不剔除**（现场：选了途经点却直奔终点）
+  - 若除终点外都贴在车身上 → 退化为单点任务
+  - 继续导航：已完成 → 明确提示"已完成，没有可继续的段"；失败/取消 → 真正重派最后一段
+  - 掉头选边（雷达左右余量 → 空旷侧，分段 ≤90°）**代码保留但默认关闭**
+    （与面板启动流程/运动门时序打架，会导致"点开始立刻结束"；等做成面板侧或独立节点再开）
+- `fwr_rviz_nav/src/two_point_nav_panel.cpp`
+  - 重新定位前自动关闭运动门（原来会报 "motion paths must be disabled and serial connected"）
+  - 六档手动速度 0.12~0.30、方向按钮、持续模式、X11 物理按键查询、独立发布线程（见 manual-v1.0）
+
+### 已验证
+- 车体/门洞：地图门洞净宽实测 **0.97 m**（真实 0.92 m），不是地图偏窄；擦边来自转弯跟踪误差
+- 规划余量：无障碍直线（3.22 m）规划最大横向偏离 0.24 m、路径长 +1%
+- 近目标保护：单点 0.36 m 目标被拒并给出坐标化的原因（日志与面板均可见）
+- 转向动作：30° PIVOT 请求 `success=True reason=complete`（TURN 控制器只接受 2~90°）
+- 串口保活：部署后 `/base/motor_debug` 恢复 10 Hz；静默告警计数 0（未触发）
+- 测试：开发机 331 项、主控 323 项全部通过
+
+### 未验证 / 遗留
+- 掉头选边功能未上线（默认关闭）；正确做法：面板侧在发目标前完成对准，或独立 aligner 节点
+- "车停了但 RViz 还在动"只抓到过链路静默一次；根因未完全确认（A 链路/B 打滑/C AMCL 漂移）
+- 车尾 4 路超声仍是 `no_response`（硬件），手动已豁免、导航靠它做后退保护
+- EKF 持续报 `Failed to meet update rate`（约 100+ 次），怀疑 CPU/调度；transform_tolerance 已放宽兜底
+
+### 当前运行状态
+- 主控：导航栈运行中（`/tmp/fwr_runs/nav.log`），base_bridge 带串口保活
+- 开发机：RViz 运行中
+- 参数快照：tag **v1.8**（见下方参数表）
+
+### 下一步
+- 地面验证：穿门余量、近目标提示、暂停/继续、途经点顺序
+- 掉头选边按面板侧方案重做
+- 观察串口保活是否触发，以及"间歇停车"是否复发

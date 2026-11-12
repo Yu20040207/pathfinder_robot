@@ -958,16 +958,24 @@ private:
       }
       return;
     }
-    if (status_label_ != nullptr) {status_label_->setText("重新定位：正在匹配地图（约 1 秒）…");}
-    auto request = std::make_shared<std_srvs::srv::Trigger::Request>();
-    reseed_client_->async_send_request(request,
-      [this](rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture future) {
-        const auto response = future.get();
-        if (status_label_ != nullptr) {
-          // 服务现在会等匹配完成再返回，直接把结果（含坐标）显示出来
-          status_label_->setText(QString::fromStdString(response->message));
-        }
-      });
+    if (status_label_ != nullptr) {status_label_->setText("重新定位：先关运动门…");}
+    // 2026-11-12：/localization/reseed 要求"运动路径已关闭 + 串口正常"。
+    // 面板原来直接调用，导航刚停下时运动门还开着 → 现场报
+    // "复位失败: motion paths must be disabled and serial connected"。
+    // 这里先主动关门，等 0.6 s 让底盘落地，再请求播种。
+    if (guarded_) {set_manual_gates(false);}   // motion_enabled / manual_enabled 都置 false
+    QTimer::singleShot(600, this, [this]() {
+      if (status_label_ != nullptr) {status_label_->setText("重新定位：正在匹配地图（约 1 秒）…");}
+      auto request = std::make_shared<std_srvs::srv::Trigger::Request>();
+      reseed_client_->async_send_request(request,
+        [this](rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture future) {
+          const auto response = future.get();
+          if (status_label_ != nullptr) {
+            // 服务会等匹配完成再返回，直接把结果（含坐标）显示出来
+            status_label_->setText(QString::fromStdString(response->message));
+          }
+        });
+    });
   }
 
   void refresh_labels()

@@ -5,6 +5,7 @@ import time
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped, Twist
 from nav2_msgs.action import NavigateThroughPoses, NavigateToPose
+from fwr_interfaces.action import TurnRelative
 from nav2_msgs.srv import ClearEntireCostmap
 from nav_msgs.msg import OccupancyGrid, Odometry
 from sensor_msgs.msg import LaserScan, Imu
@@ -13,6 +14,8 @@ from fwr_interfaces.srv import (RecoveryPermit, StartFixedGoal,
 import rclpy
 from rclpy.action import ActionClient
 from rclpy.node import Node
+from rcl_interfaces.srv import SetParameters
+from rcl_interfaces.msg import Parameter as ParamMsg, ParameterValue, ParameterType
 from rclpy.qos import qos_profile_sensor_data, QoSProfile, DurabilityPolicy
 from std_msgs.msg import Int32, String, Bool
 from std_srvs.srv import Trigger
@@ -39,6 +42,18 @@ class FrontierExplorer(Node):
         self.declare_parameter('fixed_route_tail_gap_m', 2.5)
         # 车已经站在这个距离以内的路线点直接跳过（零长度首段会让车原地打转）
         self.declare_parameter('route_skip_near_m', 0.6)
+        # 2026-11-12（用户要求）：换航点需要掉头时，用雷达判断左右哪边空旷，往空旷侧转。
+        # 角度超过 prealign_min_turn_deg 才动作；转完再派发这一段。
+        # 2026-11-12：单点终点离车太近时 Nav2 会立刻判"已到达"（xy_goal_tolerance 0.4），
+        # 现场表现"点开始导航 → 立刻任务结束"。这里设一个最小距离门槛，直接拒绝并说明原因。
+        self.declare_parameter('min_fixed_goal_distance_m', 0.5)
+        # 2026-11-12：掉头对准（按雷达选空旷侧）暂时**默认关闭**。
+        # 实测它与面板"任务未进入运行状态 6 s"流程/运动门时序互相打架，
+        # 会出现"点了开始→任务立刻结束"（导航比这个功能重要）。
+        # 需要时用 /frontier_explorer 参数 prealign_enabled:=true 再试。
+        self.declare_parameter('prealign_enabled', False)
+        self.declare_parameter('prealign_min_turn_deg', 90.0)
+        self.declare_parameter('prealign_timeout_s', 10.0)
         # 2026-11-04（用户："掉头撞到门框后停了很久"）：碰撞监控触发 stop 后，
         # stop_pub_timeout=18s 会让它**继续发零**很久（实测一段连续 15.3 秒，
         # 期间扫描里停车框早就是空的）。这里自己判"监控持续压零"，
@@ -83,6 +98,21 @@ class FrontierExplorer(Node):
         self._last_map_xy = None
         self._last_odom_xy = None
         self._client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
+        self._turn_client = ActionClient(self, TurnRelative, 'turn_relative')
+        # 掉头前自己确保底盘运动门是开的（面板的"任务未进入运行"超时可能已经把门关掉）
+        self._base_param_client = self.create_client(SetParameters,
+                                                     '/base_bridge/set_parameters')
+        self._prealign_gate_at = 0.0
+        self._left_min = float('inf')
+        self._right_min = float('inf')
+        self._prealign_leg = -1
+        self._prealign_pending = False
+        self._prealign_started = 0.0
+        self._prealign_attempts = 0
+        self._prealign_retry_at = 0.0
+        self._prealign_attempt_leg = -1
+        self._prealign_target_deg = 0.0     # 本次掉头总角度（带符号）
+        self._prealign_done_deg = 0.0       # 已完成的角度
         # 2026-11-03 多点导航：一次规划穿过所有点（途经点不停车）
         self._through_client = ActionClient(
             self, NavigateThroughPoses, 'navigate_through_poses')
@@ -154,6 +184,8 @@ class FrontierExplorer(Node):
                                  self._on_monitor_out, 20)
         self.create_subscription(Bool, '/base/auto_armed', self._on_bridge_arm, 10)
         self.create_subscription(LaserScan, '/scan', self._on_scan, qos_profile_sensor_data)
+        self.create_subscription(
+            LaserScan, '/scan', self._on_scan_sides, qos_profile_sensor_data)
         self.create_subscription(Imu, '/imu/data', self._on_imu, qos_profile_sensor_data)
         self.create_service(Trigger, '/explore/start', self._start)
         self.create_service(StartFixedGoal, '/explore/start_fixed_goal', self._start_fixed_goal)
@@ -254,6 +286,26 @@ class FrontierExplorer(Node):
     def _on_scan(self, msg):
         if self._stamp_fresh(msg, .25):
             self._scan_at = time.monotonic()
+
+    def _on_scan_sides(self, msg):
+        """记录车头左侧/右侧最近障碍距离（用于掉头方向选择）。
+
+        雷达倒装：车头对应 scan 角 ±π。车体左 = y>0 = sin(a)<0 → a ∈ (-π, 0)。
+        忽略 0.20 m 以内的读数（车体自身，内切半径 0.18~0.215）。
+        """
+        left = float('inf')
+        right = float('inf')
+        for i, r in enumerate(msg.ranges):
+            if not (0.20 < r < 8.0) or not math.isfinite(r):
+                continue
+            a = msg.angle_min + i * msg.angle_increment
+            deg = math.degrees(a)
+            if -135.0 <= deg <= -45.0:
+                left = min(left, r)
+            elif 45.0 <= deg <= 135.0:
+                right = min(right, r)
+        self._left_min = left
+        self._right_min = right
 
     def _on_imu(self, msg):
         if self._stamp_fresh(msg, .25):
@@ -432,8 +484,23 @@ class FrontierExplorer(Node):
             response.accepted = False
             response.reason = 'map-to-odom transform unavailable'
             return response
+        cur_x = mapped.pose.pose.position.x
+        cur_y = mapped.pose.pose.position.y
+        dist = math.hypot(request.x - cur_x, request.y - cur_y)
+        min_dist = float(self.get_parameter('min_fixed_goal_distance_m').value)
+        if dist < min_dist:
+            # 不派发：否则 Nav2 的 goal checker（xy_goal_tolerance 0.4）会立刻判到达，
+            # 面板显示"开始导航 → 任务已结束"，看起来像 bug。
+            self.get_logger().warn(
+                '单点目标距车仅 %.2f m（< %.2f m）→ 拒绝派发：请求点 (%.2f,%.2f) 车 (%.2f,%.2f)' % (
+                    dist, min_dist, request.x, request.y, cur_x, cur_y))
+            response.accepted = False
+            response.reason = ('终点 (%.2f, %.2f) 离车仅 %.2f m（小于 %.2f m），'
+                               '导航会立刻判"已到达"；请选 %.1f m 以外的点' % (
+                                   request.x, request.y, dist, min_dist, min_dist))
+            return response
         ok, reason = validate_fixed_goal(
-            self._map, mapped.pose.pose.position.x, mapped.pose.pose.position.y,
+            self._map, cur_x, cur_y,
             request.x, request.y, request.yaw,
             float(self.get_parameter('max_fixed_goal_distance_m').value))
         response.accepted, response.reason = ok, reason
@@ -552,6 +619,9 @@ class FrontierExplorer(Node):
             return response
         rx = mapped.pose.pose.position.x
         ry = mapped.pose.pose.position.y
+        self.get_logger().info(
+            '多点请求: 车(%.2f,%.2f) 点=%s' % (
+                rx, ry, ' '.join('(%.2f,%.2f)' % (x, y) for x, y in zip(xs, ys))))
         pts = []
         for index, (gx, gy) in enumerate(zip(xs, ys)):
             # 朝向：指向下一个点；最后一个点沿用前一段的朝向。
@@ -580,8 +650,40 @@ class FrontierExplorer(Node):
         # 2026-11-07 修正：**绝不能剔除终点**。操作者常把终点选在车当前位置附近，
         # 原来连终点一起剔除 → 路线少一个点 → "停在终点前一个航点、终点标记也没了"。
         # 只剔除"除终点以外"的、车已经站在上面的点（那才是零长度首段问题的来源）。
-        kept = [p_ for i, p_ in enumerate(pts)
-                if i == len(pts) - 1 or math.hypot(p_[0] - rx, p_[1] - ry) > skip_r]
+        # 2026-11-12：只允许剔除**第一个点**（操作者常把"起点=当前位置"点在车身上，
+        # 它会变成零长度首段 → Nav2 立刻判到达）。中间的途经点即使离车近也必须保留，
+        # 否则会出现"点选了途经点却直奔终点"（现场反馈）。
+        kept = list(pts)
+        if len(kept) >= 2 and math.hypot(kept[0][0] - rx, kept[0][1] - ry) <= skip_r:
+            kept = kept[1:]
+        if len(kept) < 2 and len(pts) >= 2:
+            # 2026-11-12：除终点外全都贴在车身上（例如操作者把"起点=这里"点在当前位姿）。
+            # 原来这里条件不满足就直接沿用原列表 → 第一段零长度 → Nav2 立刻判到达 →
+            # 面板显示"开始导航 → 任务已结束"（本次现场日志：legs=2，0.6 s succeed）。
+            # 正确做法：退化成"单点任务"，直接去终点；终点也太近就明确拒绝。
+            last = pts[-1]
+            dist_last = math.hypot(last[0] - rx, last[1] - ry)
+            min_d = float(self.get_parameter('min_fixed_goal_distance_m').value)
+            self.get_logger().info(
+                '路线退化检查: 车(%.2f,%.2f) 目的地(%.2f,%.2f) 距离 %.2f m（阈值 %.2f）' % (
+                    rx, ry, last[0], last[1], dist_last, min_d))
+            if dist_last < min_d:
+                self.get_logger().warn(
+                    '路线除终点外都贴在车身上，且终点距车仅 %.2f m → 拒绝派发' % dist_last)
+                response.accepted = False
+                response.reason = ('起点/终点都离车太近（终点 %.2f m < %.2f m），'
+                                   '导航会立刻判"已到达"；请选更远的点' % (dist_last, min_d))
+                return response
+            self.get_logger().warn(
+                '路线除终点外都贴在车身上 → 退化为单点任务：(%.2f,%.2f)' % (last[0], last[1]))
+            self._fixed_goals = [last]
+            self._fixed_goal = last
+            self._multi_points = None
+            self._stuck_retries = 0
+            self._sm.start_fixed(legs=1)
+            response.accepted = True
+            response.reason = 'ok: 单点（%.2f,%.2f），其余点都在车身上' % (last[0], last[1])
+            return response
         if len(kept) >= 2 and len(kept) != len(pts):
             self.get_logger().warn(
                 '剔除 %d 个"车已站在上面"的路线点（<%.1f m，终点始终保留）：%s' % (
@@ -597,6 +699,28 @@ class FrontierExplorer(Node):
         # 所以终点离车近**或**离起点近，都必须改逐段执行。
         loop_gap = math.hypot(pts[-1][0] - pts[0][0], pts[-1][1] - pts[0][1])
         tail_limit = float(self.get_parameter('fixed_route_tail_gap_m').value)
+        # 2026-11-12：路线里如果有大角度换向（需要掉头），一次穿过模式没有"派发下一段"的
+        # 时刻 → 掉头对准逻辑永远不触发（现场：掉头对准 0 次）。这种路线强制逐段执行。
+        if bool(self.get_parameter('prealign_enabled').value) and len(pts) >= 2:
+            need_deg = float(self.get_parameter('prealign_min_turn_deg').value)
+            worst = 0.0
+            for i in range(len(pts) - 1):
+                h1 = math.atan2(pts[i + 1][1] - pts[i][1], pts[i + 1][0] - pts[i][0])
+                if i + 2 < len(pts):
+                    h2 = math.atan2(pts[i + 2][1] - pts[i + 1][1], pts[i + 2][0] - pts[i + 1][0])
+                    d = math.degrees(abs(math.atan2(math.sin(h2 - h1), math.cos(h2 - h1))))
+                    worst = max(worst, d)
+            if worst >= need_deg:
+                self._multi_points = None
+                self._fixed_goals = pts
+                self._fixed_goal = pts[0]
+                self._sm.start_fixed(legs=len(pts))
+                self.get_logger().warn(
+                    '路线含 %.0f° 换向（≥ %.0f°）→ 改为逐段执行，才能按雷达选掉头方向' % (
+                        worst, need_deg))
+                response.accepted = True
+                response.reason = f'ok: {len(pts)} points (sequential, u-turn {worst:.0f} deg)'
+                return response
         self.get_logger().info(
             '多点路线 %d 个点: %s  终点距车 %.2f m / 距起点 %.2f m（阈值 %.1f）' % (
                 len(pts), ' → '.join('(%.2f,%.2f)' % (x, y) for x, y, _ in pts),
@@ -639,6 +763,13 @@ class FrontierExplorer(Node):
             response.success = False
             response.message = '底盘有故障，先恢复再继续'
             return response
+        # 2026-11-12：任务已经成功到达终点时点"继续导航"，原来会把状态机重新打开，
+        # 下一个 tick 立刻发现"所有段都派发过了"→ 马上停 → 现场"点了继续但车不动"。
+        # 这里明确告诉操作者：已到达，没有可继续的段。
+        if self._status == 'succeeded':
+            response.success = False
+            response.message = '任务已完成（已到达终点），没有可继续的段；如需再走请重新选点'
+            return response
         if not self._sm.resume_fixed():
             response.success = False
             response.message = '状态机无法恢复'
@@ -646,6 +777,12 @@ class FrontierExplorer(Node):
         if self._multi_points and not self._fixed_goals:
             # 一次穿过模式：legs=1，必须把派发计数归零才能重新派发整条路线
             self._sm.reset_dispatched()
+        elif self._fixed_goals:
+            # 2026-11-12：逐段模式失败/取消后继续时，最后一段已经计过"已派发"，
+            # 不清零会被判定"全部走完"→ 立刻停（现场："继续后不动"）。
+            # 把它退一格，让这一段重新派发。
+            if self._sm._fixed_dispatched >= len(self._fixed_goals):
+                self._sm._fixed_dispatched = len(self._fixed_goals) - 1
         self._mission_suspended = False
         self._retry_pending = False
         self._status = 'idle'
@@ -991,6 +1128,106 @@ class FrontierExplorer(Node):
         t = tf.transform.translation
         return self._track.transformed(self._map.header.frame_id, t.x, t.y, yaw)
 
+    def _pose_yaw(self):
+        mapped = self._odom_in_map(self._odom) if self._odom is not None else None
+        if mapped is None:
+            return None
+        q = mapped.pose.pose.orientation
+        return math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
+
+    def _choose_turn_side(self) -> int:
+        """左右哪边更空旷：+1 左转（逆时针），-1 右转。"""
+        left, right = self._left_min, self._right_min
+        if not (math.isfinite(left) or math.isfinite(right)):
+            return 1
+        return 1 if left >= right else -1
+
+    def _prealign_goal_response(self, future):
+        gh = future.result()
+        if gh is None or not gh.accepted:
+            self._prealign_pending = False
+            # 2026-11-12 现场：掉头对准被拒（多半是上一段的目标状态还没终结，
+            # base_bridge 的 _turn_goal 要求"没有导航目标在跑"）→ 直接派发，
+            # 结果 Nav2 自己按最短转角转了反方向。这里改成稍后重试。
+            if self._prealign_attempts < 3:
+                self._prealign_retry_at = time.monotonic() + 0.6
+                self.get_logger().warn(
+                    '掉头对准目标被拒 → 0.6 s 后重试（第 %d 次）' % self._prealign_attempts)
+            else:
+                self._prealign_leg = self._sm.fixed_leg_index
+                self.get_logger().warn('掉头对准连续被拒 3 次 → 放弃，直接派发本段')
+                self._dispatch()
+            return
+        gh.get_result_async().add_done_callback(self._prealign_done)
+
+    def _prealign_done(self, future):
+        self._prealign_pending = False
+        try:
+            r = future.result()
+            ok = bool(r and r.result and r.result.success)
+            why = r.result.reason if r and r.result else ''
+            actual = (r.result.actual_angle_deg if r and r.result else 0.0)
+        except Exception as exc:      # noqa: BLE001
+            ok, why, actual = False, str(exc), 0.0
+        if ok:
+            self._prealign_done_deg += actual if abs(actual) > 1e-6 else 90.0
+            self._send_turn_chunk()      # 继续下一段（180° 掉头要分两次）
+            return
+        self._prealign_leg = self._sm.fixed_leg_index
+        self.get_logger().warn('掉头分段失败：%s → 直接派发本段' % why)
+
+    def _start_prealign(self, err_rad: float) -> None:
+        """按雷达空旷侧原地转，转到朝向下一个航点。
+
+        注意：base_bridge 的 TurnController 只接受 2~90° 的单次请求，
+        所以 180° 掉头要拆成多段（例如 90° + 89°）依次执行。
+        """
+        side = self._choose_turn_side()
+        total = abs(math.degrees(err_rad))
+        # 最多 180°；方向由空旷侧决定，而不是"最短转角"
+        self._prealign_target_deg = side * min(total, 180.0)
+        self._prealign_done_deg = 0.0
+        self._prealign_attempts = 0
+        # 先确保运动门打开（否则 _execute_turn 立刻以 motion_disabled 失败）
+        if self._base_param_client is not None and self._base_param_client.service_is_ready():
+            from rcl_interfaces.msg import ParameterValue as _PV, ParameterType as _PT
+            req = SetParameters.Request()
+            pm = ParamMsg()
+            pm.name = 'motion_enabled'
+            pv = _PV(); pv.type = _PT.PARAMETER_BOOL; pv.bool_value = True
+            pm.value = pv
+            req.parameters.append(pm)
+            self._base_param_client.call_async(req)
+            self._prealign_gate_at = time.monotonic() + 0.4
+            self._prealign_pending = True
+        self.get_logger().warn(
+            '掉头对准：左 %.2f m / 右 %.2f m → %s转 %.0f°（分 %d 段执行）' % (
+                self._left_min, self._right_min,
+                '左' if side > 0 else '右', abs(self._prealign_target_deg),
+                int(abs(self._prealign_target_deg) / 90) + 1))
+        if self._prealign_gate_at <= 0.0:
+            self._send_turn_chunk()
+
+    def _send_turn_chunk(self) -> None:
+        remaining = self._prealign_target_deg - self._prealign_done_deg
+        if abs(remaining) < 2.0:
+            self._prealign_pending = False
+            self._prealign_leg = self._sm.fixed_leg_index
+            self.get_logger().info(
+                '掉头对准完成：共转 %.0f°（目标 %.0f°）' % (
+                    self._prealign_done_deg, self._prealign_target_deg))
+            self._dispatch()
+            return
+        chunk = math.copysign(min(abs(remaining), 90.0), remaining)
+        goal = TurnRelative.Goal()
+        goal.angle_deg = float(chunk)
+        goal.mode = TurnRelative.Goal.PIVOT
+        self._prealign_pending = True
+        self._prealign_started = time.monotonic()
+        self.get_logger().warn('掉头分段：请求 %.0f°（剩余 %.0f°）' % (chunk, remaining))
+        fut = self._turn_client.send_goal_async(goal)
+        fut.add_done_callback(self._prealign_goal_response)
+
     def _dispatch(self):
         if self._map is None or self._odom is None or not self._client.server_is_ready():
             return
@@ -1051,6 +1288,44 @@ class FrontierExplorer(Node):
                     f'Fixed goal leg rejected at dispatch: sensors/arm={fixed_ready} {reason}')
                 self._sm.stop()
                 return
+            # 2026-11-12：换段需要大角度转向时，先用雷达选空旷侧原地对准，
+            # 再派发这一段（Nav2 的 RotationShim 只会走"最短转角"，可能往墙那边转）。
+            if bool(self.get_parameter('prealign_enabled').value):
+                timeout = float(self.get_parameter('prealign_timeout_s').value)
+                if (self._prealign_pending
+                        and time.monotonic() - self._prealign_started > timeout):
+                    self._prealign_pending = False
+                    self._prealign_leg = self._sm.fixed_leg_index
+                    self.get_logger().warn('掉头对准超时 → 放弃，直接派发本段')
+                if self._prealign_leg != self._sm.fixed_leg_index:
+                    if self._prealign_attempt_leg != self._sm.fixed_leg_index:
+                        # 新的一段：重试计数清零（原来越段累加，第一次被拒就误判"连续3次"）
+                        self._prealign_attempt_leg = self._sm.fixed_leg_index
+                        self._prealign_attempts = 0
+                        self._prealign_retry_at = 0.0
+                    if self._prealign_pending:
+                        if (self._prealign_gate_at > 0.0
+                                and time.monotonic() >= self._prealign_gate_at):
+                            self._prealign_gate_at = 0.0
+                            self._send_turn_chunk()
+                        return                      # 正在转/开门，转完再派发
+                    if (self._prealign_attempts and
+                            time.monotonic() < self._prealign_retry_at):
+                        return                      # 等重试窗口
+                    yaw_now = self._pose_yaw()
+                    if yaw_now is None:
+                        self.get_logger().warn('掉头对准跳过：当前朝向不可用')
+                    else:
+                        err = math.atan2(goal_y - xy[1], goal_x - xy[0]) - yaw_now
+                        err = math.atan2(math.sin(err), math.cos(err))
+                        need = float(self.get_parameter('prealign_min_turn_deg').value)
+                        if abs(math.degrees(err)) >= need:
+                            self._start_prealign(err)
+                            return
+                        self.get_logger().info(
+                            '掉头对准跳过：夹角 %.0f° < %.0f°' % (abs(math.degrees(err)), need))
+                    self._prealign_leg = self._sm.fixed_leg_index
+                    self._prealign_attempts = 0
             self.get_logger().info(
                 f'Fixed goal leg {self._sm.fixed_leg_index + 1}/{len(self._fixed_goals)}: '
                 f'x={goal_x:.2f} y={goal_y:.2f}')

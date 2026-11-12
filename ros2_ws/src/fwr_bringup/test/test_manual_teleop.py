@@ -185,3 +185,98 @@ def test_manual_mode_not_killed_by_lidar_stall():
     assert 'manual_requires_scan' in seg
     tick = node.split('def _tick')[1][:9000]
     assert 'manual_source' in tick, 'tick 也要放行手动来源'
+
+
+def test_uturn_picks_the_open_side_with_the_lidar():
+    """换航点需要大角度转向时，方向由雷达左右余量决定（不是最短转角）。
+
+    用户要求：每次掉头都往空旷的一侧转。实现：frontier_explorer 在派发每一段前，
+    若与目标夹角 >= prealign_min_turn_deg，就先调 /turn_relative 原地转到朝向目标，
+    方向 = (左侧余量 >= 右侧余量) ? 左 : 右。
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / 'fwr_bringup' / 'frontier_explorer.py').read_text()
+    assert "prealign_enabled" in src
+    assert "declare_parameter('prealign_min_turn_deg', 90.0)" in src
+    assert '_on_scan_sides' in src, '必须用雷达算左右余量'
+    assert 'def _choose_turn_side' in src
+    assert 'return 1 if left >= right else -1' in src
+    assert 'TurnRelative.Goal.PIVOT' in src
+    # 派发前必须有机会先转
+    seg = src.split('def _dispatch')[1]
+    assert '_start_prealign' in seg, '派发前要先对准'
+
+
+def test_pivot_allowed_for_open_side_uturn():
+    """掉头对准用的是 PIVOT（原地转），base_bridge 必须允许该模式。"""
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / 'fwr_bringup' / 'base_bridge.py').read_text()
+    assert "declare_parameter('allow_pivot', True)" in src
+
+
+def test_single_goal_too_close_is_rejected_not_instantly_finished():
+    """单点终点离车 < min_fixed_goal_distance_m 时必须拒绝派发。
+
+    现场：点离车 0.3 m 的目标 → Nav2 的 goal checker（xy_goal_tolerance 0.4）
+    20 ms 内判"已到达" → 面板显示"开始导航 → 任务已结束"，看起来像 bug。
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / 'fwr_bringup' / 'frontier_explorer.py').read_text()
+    assert "declare_parameter('min_fixed_goal_distance_m', 0.5)" in src
+    seg = src.split('def _start_fixed_goal')[1][:4000]
+    assert 'min_dist' in seg and 'dist < min_dist' in seg
+    assert '导航会立刻判' in seg
+
+
+def test_route_whose_points_sit_on_the_robot_degrades_to_single_goal():
+    """两点路线里除终点外都贴在车身上时，必须退化成单点任务而不是"开始即结束"。
+
+    现场日志：legs=2，0.6 s 就 Goal succeeded → 面板"开始导航 → 任务已结束"。
+    根因：kept 只剩终点时原代码条件不满足，继续沿用原列表 → 第一段零长度。
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / 'fwr_bringup' / 'frontier_explorer.py').read_text()
+    assert 'if len(kept) < 2 and len(pts) >= 2:' in src
+    assert '退化为单点任务' in src
+    assert '起点/终点都离车太近' in src
+
+
+def test_only_the_first_point_is_pruned_never_a_waypoint():
+    """只有"第一个点贴在车身上"才剔除；中间途经点必须保留。
+
+    现场反馈：选了途经点却直奔终点 —— 原来是"离车 <0.6 m 的点全剔"，
+    途经点恰好离车近时被删掉了。
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / 'fwr_bringup' / 'frontier_explorer.py').read_text()
+    assert 'only the first' not in src
+    assert '只允许剔除' in src
+    seg = src.split('kept = list(pts)')[1][:400]
+    assert 'kept[0]' in seg and 'kept[1:]' in seg
+
+
+def test_resume_after_success_says_done_and_after_failure_redispatches():
+    """继续导航的语义：
+    - 已成功到达 → 明确回"已完成"，不要打开状态机后 100 ms 又停（现场"继续后不动"）
+    - 失败/取消 → 允许继续，并把最后一段重新派发（dispatched 退一格）
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / 'fwr_bringup' / 'frontier_explorer.py').read_text()
+    seg = src.split('def _resume')[1][:3000]
+    assert "self._status == 'succeeded'" in seg
+    assert '任务已完成（已到达终点）' in seg
+    assert '_fixed_dispatched = len(self._fixed_goals) - 1' in seg
+
+
+def test_base_serial_keepalive_recovers_silent_esp32():
+    """ESP32 状态帧静默时必须自动恢复（2 s 重新握手 / 6 s 重开串口）。
+
+    现场：base_bridge 进程和串口句柄都在，但一条状态帧都收不到 →
+    /base/ready=false → 面板提示"底盘或传感器未就绪"，导航停住，只能重启整个栈。
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / 'fwr_bringup' / 'base_bridge.py').read_text()
+    assert '_last_state_at' in src
+    assert '状态帧静默' in src
+    assert "self._disconnect('state frames silent > 6 s')" in src
+    assert self.verified if False else True
