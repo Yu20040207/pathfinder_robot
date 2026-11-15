@@ -20,7 +20,11 @@ amcl:
     recovery_alpha_fast: 0.0
     update_min_d: 0.10
     update_min_a: 0.10
-    transform_tolerance: 0.5
+    # 2026-11-15：0.5 → 1.0。EKF 偶发掉帧 + 空闲时 AMCL 更新稀疏，
+    # 规划器会在"取目标位姿"时偶发
+    # "Extrapolation Error looking up target frame" → 规划失败 → 任务提前结束。
+    # AMCL 会把 map→odom 的时间戳打在 now + transform_tolerance，调大即覆盖更久。
+    transform_tolerance: 1.0
     set_initial_pose: false
 
 map_server:

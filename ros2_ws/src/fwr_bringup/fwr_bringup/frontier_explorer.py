@@ -47,6 +47,11 @@ class FrontierExplorer(Node):
         # 2026-11-12：单点终点离车太近时 Nav2 会立刻判"已到达"（xy_goal_tolerance 0.4），
         # 现场表现"点开始导航 → 立刻任务结束"。这里设一个最小距离门槛，直接拒绝并说明原因。
         self.declare_parameter('min_fixed_goal_distance_m', 0.5)
+        # 2026-11-15（用户要求）：多点路线**默认逐段执行**。
+        # 原因：一次穿过（NavigateThroughPoses）把整条路线当成一个 goal，
+        # 暂停/继续时只能整条重发 → 车会退回第 1 个航点（现场反复出现）。
+        # 逐段执行时每个航点都是一个真实 goal，暂停/继续能精确续上当前段。
+        self.declare_parameter('multi_point_sequential', True)
         # 2026-11-12：掉头对准（按雷达选空旷侧）暂时**默认关闭**。
         # 实测它与面板"任务未进入运行状态 6 s"流程/运动门时序互相打架，
         # 会出现"点了开始→任务立刻结束"（导航比这个功能重要）。
@@ -86,6 +91,10 @@ class FrontierExplorer(Node):
         # 2026-11-12：雷达驱动会阻塞 8~15 s（futex 死锁），8 s 宽限太短会把任务中止。
         # 放宽到 20 s：这期间机器人本来就是停的（授权丢了），恢复后自动继续。
         self.declare_parameter('arm_loss_grace_s', 20.0)
+        # 2026-11-15：雷达断流（最长见过 15.5 s）会让规划器 TF 外推失败、行为树 Goal failed。
+        # 这种"断流导致的失败"不该记失败/中止整条任务：暂停任务等传感器恢复，再重派本段。
+        self.declare_parameter('sensor_loss_pause_s', 25.0)
+        self.declare_parameter('sensor_gap_s', 0.5)
         self.declare_parameter('static_map', False)
         self._static_map = bool(self.get_parameter('static_map').value)
         self._trial_started = None
@@ -137,6 +146,13 @@ class FrontierExplorer(Node):
         self._fixed_goal = None
         self._fixed_goals = None
         self._handle = None
+        self._handle_set_at = 0.0
+        # 2026-11-15：每次派发一个序号；被取消旧目标的 result 回调晚到，
+        # 按序号丢弃，避免把新目标误判成"已完成"而跳段。
+        self._dispatch_seq = 0
+        # 2026-11-15（用户要求）：记住"当前正在前往的那个点"。
+        # 暂停/继续时若还没到达，就继续这个点（不依赖任何计数推算）。
+        self._active_target = None
         # 2026-11-04：监控压零检测（stuck_cancel_s 用）
         self._gate_nz_at = None
         self._fwd_nz_at = None
@@ -151,6 +167,7 @@ class FrontierExplorer(Node):
         self._reverse_episodes = 0
         self._mission_suspended = False
         self._paused_for_sensor = False
+        self._sensor_gap_at = 0.0        # 最近一次"雷达断流后恢复"的时刻
         self._sensor_pause_deadline = 0.0
         self._cancel_after_accept = False
         self._cancel_future = None
@@ -285,7 +302,14 @@ class FrontierExplorer(Node):
 
     def _on_scan(self, msg):
         if self._stamp_fresh(msg, .25):
-            self._scan_at = time.monotonic()
+            now = time.monotonic()
+            gap_s = float(self.get_parameter('sensor_gap_s').value)
+            if self._scan_at is not None and now - self._scan_at > gap_s:
+                self._sensor_gap_at = now
+                self.get_logger().warn(
+                    '雷达断流 %.1f s 后恢复（这段时间内的导航失败按"断流导致"处理）' % (
+                        now - self._scan_at))
+            self._scan_at = now
 
     def _on_scan_sides(self, msg):
         """记录车头左侧/右侧最近障碍距离（用于掉头方向选择）。
@@ -402,6 +426,9 @@ class FrontierExplorer(Node):
         was = self._bridge_armed
         self._bridge_armed = msg.data
         require = bool(self.get_parameter('require_bridge_arm').value)
+        if not msg.data and self._sm.enabled and require and self._mission_suspended:
+            # 暂停期间门是关的 → 授权必然丢失，这属于预期，不当作故障。
+            return
         if not msg.data and self._sm.enabled and require:
             # 2026-11-12：雷达断流 → 底盘 0.5 s 后撤授权 → 以前这里直接中止整条路线。
             # 看门狗 2~3 s 能把雷达拉回来，所以先**暂停**等恢复；超时才放弃。
@@ -489,16 +516,12 @@ class FrontierExplorer(Node):
         dist = math.hypot(request.x - cur_x, request.y - cur_y)
         min_dist = float(self.get_parameter('min_fixed_goal_distance_m').value)
         if dist < min_dist:
-            # 不派发：否则 Nav2 的 goal checker（xy_goal_tolerance 0.4）会立刻判到达，
-            # 面板显示"开始导航 → 任务已结束"，看起来像 bug。
+            # 2026-11-15（用户要求）：允许把终点选在车附近（"让车回到终点"）。
+            # 只有一点要注意：它落在 Nav2 的 xy_goal_tolerance(0.4 m) 内时会被立刻判到达，
+            # 这是预期行为，不再是错误。这里只记一条日志，不再拒绝。
             self.get_logger().warn(
-                '单点目标距车仅 %.2f m（< %.2f m）→ 拒绝派发：请求点 (%.2f,%.2f) 车 (%.2f,%.2f)' % (
-                    dist, min_dist, request.x, request.y, cur_x, cur_y))
-            response.accepted = False
-            response.reason = ('终点 (%.2f, %.2f) 离车仅 %.2f m（小于 %.2f m），'
-                               '导航会立刻判"已到达"；请选 %.1f m 以外的点' % (
-                                   request.x, request.y, dist, min_dist, min_dist))
-            return response
+                '单点目标距车仅 %.2f m（< %.2f m）：会立刻判"已到达"（允许，按用户要求）' % (
+                    dist, min_dist))
         ok, reason = validate_fixed_goal(
             self._map, cur_x, cur_y,
             request.x, request.y, request.yaw,
@@ -622,6 +645,32 @@ class FrontierExplorer(Node):
         self.get_logger().info(
             '多点请求: 车(%.2f,%.2f) 点=%s' % (
                 rx, ry, ' '.join('(%.2f,%.2f)' % (x, y) for x, y in zip(xs, ys))))
+        # 2026-11-15：面板"继续导航"在 /explore/resume 失败时会整条路线重发。
+        # 如果重发的路线与本节点保留的路线**完全一致**，不能当成新任务（否则从第 1 点
+        # 重走 —— 现场："继续后去的不是该走的下一个航点"）。
+        # 这种情况下恢复原来的段进度，继续走本该走的那一段。
+        incoming = list(zip(xs, ys))
+        if (self._fixed_goals and len(incoming) == len(self._fixed_goals)
+                and all(abs(a[0] - g[0]) < 0.05 and abs(a[1] - g[1]) < 0.05
+                        for a, g in zip(incoming, self._fixed_goals))):
+            prev = self._sm._fixed_dispatched
+            self._sm.start_fixed(legs=len(self._fixed_goals))
+            # 注意：状态机在"决定派发"时会自己 +1（exploration_core.update），
+            # 所以这里要写 0-based 的"该走的那一段"，否则会跳过正在走的这一段。
+            idx_target = max(0, min(prev, len(self._fixed_goals)) - 1)
+            self._sm._fixed_dispatched = idx_target
+            self._mission_suspended = False
+            self._status = 'idle'
+            self._trial_started = now
+            self._sm.enabled = True
+            idx_now = self._sm.fixed_leg_index
+            self.get_logger().warn(
+                '同一条路线重发 → 按进度继续（第 %d/%d 段），不从头走' % (
+                    idx_now + 1, len(self._fixed_goals)))
+            response.accepted = True
+            response.reason = 'resume: 继续第 %d/%d 段' % (
+                idx_now + 1, len(self._fixed_goals))
+            return response
         pts = []
         for index, (gx, gy) in enumerate(zip(xs, ys)):
             # 朝向：指向下一个点；最后一个点沿用前一段的朝向。
@@ -639,6 +688,18 @@ class FrontierExplorer(Node):
         self._goal = None
         self._status = 'idle'
         self._trial_started = now
+        if bool(self.get_parameter('multi_point_sequential').value):
+            # 逐段执行：每个航点一个 goal，暂停/继续按段续走（见参数注释）
+            self._multi_points = None
+            self._fixed_goals = list(pts)
+            self._fixed_goal = pts[0]
+            self._stuck_retries = 0
+            self._sm.start_fixed(legs=len(pts))
+            self.get_logger().warn(
+                '多点路线 %d 点 → 逐段执行（暂停/继续可精确续段）' % len(pts))
+            response.accepted = True
+            response.reason = 'ok: %d points (sequential)' % len(pts)
+            return response
         # 2026-11-03（现场："一开始就结束"）：Nav2 的 goal checker 只看**最后一个点**。
         # 如果最后一个点就在车身上（闭环路线很常见），它 20 ms 内就判"已到达"，
         # 整条路线被跳过。这种情况下改成逐段执行（每段都是真实目标），
@@ -668,12 +729,9 @@ class FrontierExplorer(Node):
                 '路线退化检查: 车(%.2f,%.2f) 目的地(%.2f,%.2f) 距离 %.2f m（阈值 %.2f）' % (
                     rx, ry, last[0], last[1], dist_last, min_d))
             if dist_last < min_d:
+                # 允许：终点就在车附近（用户明确要求"选在车附近就是让车回到终点"）
                 self.get_logger().warn(
-                    '路线除终点外都贴在车身上，且终点距车仅 %.2f m → 拒绝派发' % dist_last)
-                response.accepted = False
-                response.reason = ('起点/终点都离车太近（终点 %.2f m < %.2f m），'
-                                   '导航会立刻判"已到达"；请选更远的点' % (dist_last, min_d))
-                return response
+                    '路线除终点外都贴在车身上，终点距车 %.2f m：交给 Nav2 判到达' % dist_last)
             self.get_logger().warn(
                 '路线除终点外都贴在车身上 → 退化为单点任务：(%.2f,%.2f)' % (last[0], last[1]))
             self._fixed_goals = [last]
@@ -778,17 +836,24 @@ class FrontierExplorer(Node):
             # 一次穿过模式：legs=1，必须把派发计数归零才能重新派发整条路线
             self._sm.reset_dispatched()
         elif self._fixed_goals:
-            # 2026-11-12：逐段模式失败/取消后继续时，最后一段已经计过"已派发"，
-            # 不清零会被判定"全部走完"→ 立刻停（现场："继续后不动"）。
-            # 把它退一格，让这一段重新派发。
-            if self._sm._fixed_dispatched >= len(self._fixed_goals):
-                self._sm._fixed_dispatched = len(self._fixed_goals) - 1
+            # 按"当前正在前往的那个点"恢复（用户明确要求）：
+            # 暂停时还没到达它，就继续去这个点，不再用计数反推。
+            if self._active_target is not None:
+                self._resume_leg = int(self._active_target['idx'])
+            else:
+                self._resume_leg = min(self._sm.fixed_leg_index, len(self._fixed_goals) - 1)
+            self._resume_leg = max(0, min(self._resume_leg, len(self._fixed_goals) - 1))
+            self._sm._fixed_dispatched = self._resume_leg
         self._mission_suspended = False
         self._retry_pending = False
+        # 暂停期间监控一直在发零速，计时器会累计；不清掉会在继续后 0.2 s 内
+        # 立刻误判"卡住"→取消目标→重规划（现场：继续后马上被取消、来回跳点）。
+        self._fwd_nz_at = None
+        self._gate_nz_at = None
         self._status = 'idle'
         self._trial_started = time.monotonic()
         if self._fixed_goals:
-            idx = min(self._sm.fixed_leg_index, len(self._fixed_goals) - 1)
+            idx = min(getattr(self, '_resume_leg', 0), len(self._fixed_goals) - 1)
             response.message = '继续第 %d/%d 段 (%.2f, %.2f)' % (
                 idx + 1, len(self._fixed_goals),
                 self._fixed_goals[idx][0], self._fixed_goals[idx][1])
@@ -831,12 +896,20 @@ class FrontierExplorer(Node):
             # 让位后退期间不推进任务（不派发、不取消、不判失败）
             return
         if self._paused_for_sensor:
-            # 授权丢失（雷达断流等）期间冻结任务；超过宽限才放弃
+            # 授权丢失/雷达断流期间冻结任务；超过宽限才放弃。
+            # 2026-11-15：授权可能一直没丢（只是雷达断流），所以这里自己判断恢复。
             if now <= self._sensor_pause_deadline:
+                scan_ok = self._scan_at is not None and now - self._scan_at < 0.5
+                arm_ok = (not bool(self.get_parameter('require_bridge_arm').value)
+                          or self._bridge_armed)
+                if scan_ok and arm_ok:
+                    self._paused_for_sensor = False
+                    self._status = 'idle'
+                    self.get_logger().warn('传感器已恢复 → 继续任务（重派本段）')
                 return
             self._paused_for_sensor = False
-            self._trip('授权丢失超过 %.0f s 未恢复' % float(
-                self.get_parameter('arm_loss_grace_s').value))
+            self._trip('传感器断流超过 %.0f s 未恢复' % float(
+                self.get_parameter('sensor_loss_pause_s').value))
             self._sm.stop()
             self._end_recovery(False)
             return
@@ -1084,6 +1157,11 @@ class FrontierExplorer(Node):
             self._sm.start_fixed(legs=1)
         elif self._fixed_goals:
             self._sm.start_fixed(legs=len(self._fixed_goals))
+            # 2026-11-15：重试必须回到"正在走的那一段"。start_fixed 会把派发计数清 0，
+            # 原来因此从第 1 个点重来（现场："卡住后跑回第一个航点"）。
+            if self._active_target is not None:
+                self._sm._fixed_dispatched = max(
+                    0, min(int(self._active_target['idx']), len(self._fixed_goals) - 1))
         else:
             self._sm.start()
         self.get_logger().warn(
@@ -1267,13 +1345,21 @@ class FrontierExplorer(Node):
                    goal.poses[-1].pose.position.y))
             self._goal_pub.publish(goal.poses[-1])
             self._status = 'sending'
-            self._through_client.send_goal_async(goal).add_done_callback(self._accepted)
+            self._dispatch_seq += 1
+            _seq = self._dispatch_seq
+            self._through_client.send_goal_async(goal).add_done_callback(
+                lambda f, _s=_seq: self._accepted(f, _s))
             return
         if self._sm.fixed_goal:
             if not self._fixed_goals or self._sm.fixed_leg_index >= len(self._fixed_goals):
                 self._sm.stop()
                 return
-            goal_x, goal_y, goal_yaw = self._fixed_goals[self._sm.fixed_leg_index]
+            _leg_idx = self._sm.fixed_leg_index
+            goal_x, goal_y, goal_yaw = self._fixed_goals[_leg_idx]
+            self._active_target = {'idx': _leg_idx, 'x': goal_x, 'y': goal_y,
+                                   'yaw': goal_yaw}
+            self._fwd_nz_at = None
+            self._gate_nz_at = None
             now = time.monotonic()
             fixed_ready = (self._scan_at is not None and now - self._scan_at < .25
                            and self._imu_at is not None and now - self._imu_at < .25
@@ -1349,9 +1435,14 @@ class FrontierExplorer(Node):
         request.pose.pose.orientation.w = math.cos(goal_yaw / 2)
         self._goal_pub.publish(request.pose)
         self._status = 'sending'
-        self._client.send_goal_async(request).add_done_callback(self._accepted)
+        self._dispatch_seq += 1
+        _seq = self._dispatch_seq
+        self._client.send_goal_async(request).add_done_callback(
+            lambda f, _s=_seq: self._accepted(f, _s))
 
-    def _accepted(self, future):
+    def _accepted(self, future, seq=None):
+        if seq is not None and seq != self._dispatch_seq:
+            return          # 旧目标的回调，丢弃
         try:
             self._handle = future.result()
             self._handle_set_at = time.monotonic()
@@ -1360,7 +1451,8 @@ class FrontierExplorer(Node):
                 self._cancel_after_accept = False
                 self._status = 'failed'
                 return
-            self._handle.get_result_async().add_done_callback(self._finished)
+            self._handle.get_result_async().add_done_callback(
+                lambda f, _s=seq: self._finished(f, _s))
             if self._cancel_after_accept or not self._sm.enabled:
                 self._cancel_after_accept = False
                 self._cancel_goal()
@@ -1370,7 +1462,20 @@ class FrontierExplorer(Node):
             self._status = 'failed'
             self._sm.stop()
 
-    def _finished(self, future):
+    def _sensor_loss_recent(self, now: float) -> bool:
+        """最近 8 s 内出现过雷达断流，或当前授权/扫描仍不可用。"""
+        if now - self._sensor_gap_at < 8.0:
+            return True
+        if self._scan_at is None or now - self._scan_at > 0.5:
+            return True
+        if (bool(self.get_parameter('require_bridge_arm').value)
+                and not self._bridge_armed):
+            return True
+        return False
+
+    def _finished(self, future, seq=None):
+        if seq is not None and seq != self._dispatch_seq:
+            return          # 旧目标的 result 晚到 → 不能改写新目标的状态
         try:
             status = future.result().status
             self._status = ('succeeded' if status == GoalStatus.STATUS_SUCCEEDED else
@@ -1378,6 +1483,21 @@ class FrontierExplorer(Node):
         except Exception:
             self._status = 'failed'
         if self._status == 'failed':
+            now = time.monotonic()
+            if self._sm.enabled and self._sensor_loss_recent(now):
+                # 断流导致的失败：冻结任务等传感器恢复，恢复后重派同一段。
+                # 不计入 max_stuck_retries / 连续失败次数，避免"卡顿一次就把任务做完"。
+                self._paused_for_sensor = True
+                self._sensor_pause_deadline = now + float(
+                    self.get_parameter('sensor_loss_pause_s').value)
+                self._status = 'idle'
+                self._handle = None
+                self._cancel_future = None
+                self._cancel_after_accept = False
+                self.get_logger().warn(
+                    '导航失败但属于传感器断流（雷达/授权）→ 暂停任务并等待恢复，'
+                    '恢复后重派同一段（不计失败次数）')
+                return
             self._consecutive_failures += 1
             limit = int(self.get_parameter('clear_costmap_after_failures').value)
             if limit > 0 and self._consecutive_failures >= limit:

@@ -456,6 +456,14 @@ protected:
       }
       points_.clear();
       ++selection_revision_;
+      // 2026-11-15 现场："清除选择 → 重新选点 → 开始"后仍跑旧路线。
+      // 原因是 has_resume_goal_/resume_* 还留着，空格/继续会续跑旧任务。
+      // 清空选择时必须把"可继续的任务"一起作废。
+      has_resume_goal_ = false;
+      resume_mode_ = false;
+      resume_two_point_ = false;
+      resume_multi_ = false;
+      ready_retry_ = 0;
       preview_ready_ = false;
       preview_button_->setEnabled(false);
       start_button_->setEnabled(false);
@@ -685,6 +693,11 @@ private:
           return;
         }
         points_.clear();
+        has_resume_goal_ = false;
+        resume_mode_ = false;
+        resume_two_point_ = false;
+        resume_multi_ = false;
+        ready_retry_ = 0;
         preview_ready_ = false;
         start_button_->setEnabled(false);
         preview_button_->setEnabled(false);
@@ -1257,9 +1270,31 @@ private:
       if (!gate_client_->service_is_ready() || !arm_client_->service_is_ready() ||
         !goal_service_ready)
       {
+        // 2026-11-15：DDS 发现偶发慢一拍（尤其 WiFi），点一次就报"尚未就绪"
+        // 很烦人。这里自动重试 3 次（1.5 s 一次），期间不改变选点。
+        if (ready_retry_ < 6) {
+          ++ready_retry_;
+          QStringList missing;
+          if (!gate_client_->service_is_ready()) {missing << "运动门(/base_bridge)";}
+          if (!arm_client_->service_is_ready()) {missing << "授权(/base/arm_auto)";}
+          if (!goal_service_ready) {
+            missing << (points_.single() ? "单点目标服务" : "多点/两点目标服务");
+          }
+          status_label_->setText(
+            QString("正在等待服务就绪（缺少：%1）… 第 %2/6 次")
+            .arg(missing.join("、")).arg(ready_retry_));
+          const auto rev = selection_revision_;
+          const bool resume_flag = resume;
+          QTimer::singleShot(2000, this, [this, rev, resume_flag]() {
+              if (rev == selection_revision_) {begin_task(resume_flag);}
+            });
+          return;
+        }
+        ready_retry_ = 0;
         status_label_->setText("底盘参数、授权或实车导航服务尚未就绪");
         return;
       }
+      ready_retry_ = 0;
       if (!flow_.begin()) {return;}
       start_button_->setEnabled(false);
       base_ready_ = false;
@@ -1352,8 +1387,15 @@ private:
               .arg(QString::fromStdString(response->message)));
             return;
           }
-          status_label_->setText(QString("继续失败：%1，正在按路线重发…")
-            .arg(QString::fromStdString(response->message)));
+          const QString why = QString::fromStdString(response->message);
+          if (why.contains("还在进行中")) {
+            // 任务其实还在跑（例如连续按了两次"继续"）——重发路线会从第 1 点重走，
+            // 这里直接当作"已在运行"处理。
+            status_label_->setText(QString("任务仍在运行：%1").arg(why));
+            real_task_active_ = true;
+            return;
+          }
+          status_label_->setText(QString("继续失败：%1，正在按路线重发…").arg(why));
           send_real_navigation_request(revision, false);   // 回退：按路线重发
         } catch (const std::exception & error) {
           fail_real_start(QString("继续服务失败：%1").arg(error.what()), revision);
@@ -1361,22 +1403,20 @@ private:
       });
       return;
     }
-    if (resume_mode_ && resume_multi_ && points_.size() >= 3) {
+    // 2026-11-15：只要当前选点 ≥3 个，"继续"也必须重发整条路线。
+    // 原来还要求 resume_multi_（上一次任务是多点）→ 否则掉进下面的单点分支，
+    // 只发最后一个点（它常在车附近）→ 被近目标保护拒绝/立刻到达。
+    if (resume_mode_ && points_.size() >= 3) {
       if (!multi_nav_client_ || !multi_nav_client_->service_is_ready()) {
         fail_real_start("实车多点导航服务尚未就绪，已关闭运动门", revision);
         return;
       }
-      const auto current = wait_map_pose();
       const auto & pts = points_.points();
-      std::size_t first = 0;
-      if (current) {
-        double best = 1e18;
-        for (std::size_t i = 0; i < pts.size(); ++i) {
-          const double d = std::hypot(pts[i].x - current->x, pts[i].y - current->y);
-          if (d < best) {best = d; first = i;}
-        }
-      }
-      if (pts.size() >= 2 && pts.size() - first < 2) {first = pts.size() - 2;}
+      // 2026-11-15：这里原来用"离车最近的点"当起点，会**静默跳过前面的航点**
+      // （现场：4 点路线只发了最后 2 点 → 车直奔倒数第二个点再回终点）。
+      // 继续服务失败后的回退 = 按完整路线重发，绝不跳点；真正的"从哪段接着走"
+      // 由 frontier_explorer 自己的进度状态机负责。
+      const std::size_t first = 0;
       auto request = std::make_shared<MultiRealGoal::Request>();
       for (std::size_t i = first; i < pts.size(); ++i) {
         request->xs.push_back(pts[i].x);
@@ -1432,8 +1472,25 @@ private:
         return;
       }
       auto request = std::make_shared<RealSingleGoal::Request>();
-      request->x = resume_goal_x_;
-      request->y = resume_goal_y_;
+      // 2026-11-12：现场出现"面板显示新终点、服务却收到旧终点"——
+      // 继续导航用的是 remembered goal，操作者重选点后仍发旧点，
+      // 于是被判"终点离车仅 0.29 m"而拒绝。这里以**当前选点**为准：
+      // 只要当前选点与记住的终点差 > 0.1 m，就用当前选点。
+      double goal_x = resume_goal_x_;
+      double goal_y = resume_goal_y_;
+      if (points_.has_goal()) {
+        const auto selected = points_.goal();   // std::optional<Point>
+        if (selected.has_value() &&
+          std::hypot(selected->x - goal_x, selected->y - goal_y) > 0.10)
+        {
+          goal_x = selected->x;
+          goal_y = selected->y;
+          resume_goal_x_ = goal_x;
+          resume_goal_y_ = goal_y;
+        }
+      }
+      request->x = goal_x;
+      request->y = goal_y;
       request->yaw = std::atan2(request->y - current->y, request->x - current->x);
       status_label_->setText("正在从当前位置继续前往原终点…");
       real_single_goal_client_->async_send_request(request, [this, revision](
@@ -1643,6 +1700,7 @@ private:
   bool real_task_active_ = false;
   QPushButton * resume_button_ = nullptr;
   bool resume_mode_ = false;
+  int ready_retry_ = 0;   // 服务就绪检查的自动重试计数
   // 2026-11-02：中止的若是**两点任务**，继续时必须重发两点服务（先去起点再到终点）。
   // 原实现只要 resume 就走单点客户端，直接奔终点，把"先去起点"这一腿丢了。
   bool resume_two_point_ = false;

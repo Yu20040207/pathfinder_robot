@@ -352,14 +352,26 @@ class BaseBridgeCore:
         return True
 
     def ready(self, now_s: float) -> bool:
-        return (self.connected and self.verified and self.fault == 0 and
+        # 2026-11-15：不再要求 verified。ESP32 重启后握手横幅可能漏收（'?' 不一定
+        # 重放横幅），而状态帧一直在来 —— 那时遥测/里程计正常、只有 ready() 为 False，
+        # 面板就报"底盘授权失败：serial not ready"。握手只用来把里程计"重新起算"。
+        return (self.connected and self.fault == 0 and
                 self._last_state_at is not None and
                 0 <= now_s - self._last_state_at <= .25)
 
     def step(self, state: BaseState | None, now_s: float) -> BridgeOutput:
         sample = None
-        if state is not None and self.connected and self.verified:
+        if state is not None and self.connected:
+            # 2026-11-15：状态帧新鲜度与"握手"解耦。
+            # 原来 _last_state_at 只在 verified 时才更新 → 固件重启/漏收
+            # "BASE_CONTROL_V2" 横幅后 verified 永远为 False，遥测正常但 ready()=False，
+            # 面板报"底盘授权失败：serial not ready"。
+            # 现在：有状态帧就算链路新鲜（让 ready()/授权可用），
+            # 里程计与故障处理仍等握手完成（避免重启后的计数跳变）。
             self._last_state_at = now_s
+            if not self.verified:
+                state = None
+        if state is not None and self.connected:
             if state.fault:
                 self.fault = state.fault
             elif self._fault_clear_pending:

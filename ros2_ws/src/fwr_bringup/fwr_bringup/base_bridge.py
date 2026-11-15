@@ -57,6 +57,9 @@ class BaseBridgeNode(Node):
         # 同时缩放 v 和 ω，转弯半径不变。
         # 2026-11-09 固件按 100:1 电机重标速度环（100 mm/s 跟踪 102.8），
         # 不再需要软件补偿，故改回 1.0；0.66 只适用于旧固件。
+        # 2026-11-15（用户要求）：改回 1.0。0.66 时导航明显变慢（相当于把指令打 6.6 折）。
+        # 注意：如果 ESP32 还是未重新标定的旧固件，1.0 下实际速度 ≈ 指令×1.5，
+        # 若再出现堵转/超速 fault，再考虑 0.8 附近的折中值。
         self.declare_parameter('wheel_speed_scale', 1.0)
         self._device = str(self.get_parameter('device').value)
         self._core = BaseBridgeCore()
@@ -197,6 +200,18 @@ class BaseBridgeNode(Node):
         self._auto_armed = False
         response.success = False
         response.message = reason
+        # 2026-11-15：授权失败时把各项判据打出来，便于现场定位（哪一项不满足）。
+        age = (None if self._core._last_state_at is None
+               else round(time.monotonic() - self._core._last_state_at, 3))
+        self.get_logger().warn(
+            'arm 失败：reason=%s core.ready=%s state_age=%s verified=%s '
+            'sensors=%s scan_age=%s imu_age=%s manual=%s' % (
+                reason, self._core.ready(time.monotonic()), age, self._core.verified,
+                self._sensors_ready(time.monotonic()),
+                (None if self._scan_at is None else round(time.monotonic() - self._scan_at, 2)),
+                (None if self._last_imu_at is None
+                 else round(time.monotonic() - self._last_imu_at, 2)),
+                bool(self.get_parameter('manual_enabled').value)))
         return response
 
     def _clear_fault(self, _, response):

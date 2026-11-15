@@ -6111,3 +6111,134 @@ max_goal_distance_m=6.0 chain_watchdog=false max_runtime_s=0.0`
 - 地面验证：穿门余量、近目标提示、暂停/继续、途经点顺序
 - 掉头选边按面板侧方案重做
 - 观察串口保活是否触发，以及"间歇停车"是否复发
+
+## 2026-11-15 14:35 · 新主控迁移收尾 + 手机远程控制 v1.0
+
+### 会话目标
+换新主控（MOREFINE M1 i5-13500H）后把底盘重新标定到可用，并做出手机端
+（手动遥控 + 地图点选导航）的 v1.0；顺带排查雷达偶发卡死。
+
+### 仓库改动
+- 固件 `firmware/esp32s3_base_control/main/control.c`：pivot（原地转向）占空比按
+  100:1 新电机重标（旧 0.56 会让 27 mm/s 指令跑出 195 mm/s），已烧录验证。
+- `ros2_ws/src/fwr_bringup/fwr_bringup/base_bridge_core.py`：`track_m 0.317`、
+  `circumference_m 0.314159`、`counts_per_rev 6400`。
+- `base_bridge.py`：`wheel_speed_scale=1.0`；`manual_max_speed_mps=0.30`（手动包络）。
+- 新增 `fwr_bringup/mqtt_bridge.py` + `test/test_mqtt_bridge.py`：手机控制入口
+  （速度、目标、预览、导航指令、状态/激光/路径上报）。
+- 新增 `fwr_bringup/battery_modbus.py` + 测试：JSY-MK-1031 电池计量（待接线）。
+- 新增 `scripts/start_navigation_headless.sh`、`scripts/rviz_remote.sh`、
+  `scripts/arm_remote.sh`（一键开门，`--watch` 守护）。
+- 新增 `cloud/api/app.py`（FastAPI 账号/设备/WS/地图）、`cloud/web/car.html`（手机页面）。
+- 新增 `tools/lidar_watchdog.py`（多线程，/scan 断流 2s 重启雷达）。
+- 新增 `docs/remote-control-v1.0.md`（本版本的架构/参数/接口/限制）。
+
+### 已在实机验证
+- 里程计：3 米直行三次（3.0026 / 3.0106 / 3.0025 m），旋转标定 轮里程计/IMU = 1.012。
+- 固件 pivot：指令 ±27.1 mm/s → 实测 ±27（修复前 ±195）。
+- 手机手动：20 Hz 遥控、松手 0.5s 停车、斜推边走边转、速度上限 0.30 m/s。
+- 手机导航：点航点出预览（86 点）、多点预览（3 点 → 118 点）、
+  开始导航后全局路径（75 点/5s 一条）与进度提示正常。
+- 云端：注册/登录/绑定/地图上传（gzip 后 26 KB）/WS 推送（state 10 Hz、scan 3.6 Hz）。
+- 测试：开发机 341 项全部通过。
+
+### 未验证 / 遗留
+- 电池模块接线与标定未做（节点已写好，等 JSY-MK-1031 接线）。
+- 域名 `jccontrol.xyz` 未 ICP 备案，只能用 `http://8.163.69.109:8080/car.html`。
+- EMQX 仍匿名（船的控制台依赖），dashboard 18083 对公网开放。
+- 视频未接入（SRS 容器在跑，后续 WebRTC）。
+- 雷达 sllidar 偶发静默卡死（进程在、CPU/IO 冻结），看门狗兜底。
+
+### 当前运行状态
+- 车：`fwr-mqtt-bridge.service` 运行；导航栈 `run_navigation.launch.py`
+  （1A_map_door2，headless）运行。
+- 云：`jc-api.service`（8444）+ EMQX + nginx + boat-web（8080）。
+- 手机入口：`http://8.163.69.109:8080/car.html`（绑定码 123456，设备 car-001）。
+
+### 下一步
+- 接 JSY-MK-1031：L/N 串在电池正极、TTL 接 USB 转串口，`battery_modbus` 标定。
+- 备案完成后切 `https://jccontrol.xyz/car/` 并给 EMQX 加认证。
+- 视频：HP60C 只有 ~10.7 fps，建议加 UVC/IP 相机走 SRS/WebRTC。
+
+## 2026-11-15 15:40 · JSY-MK-1031 电池计量接入（含一个关键坑）
+
+### 会话目标
+把到货的 JSY-MK-1031 交直流计量模块接到车上，让手机能看到电压/电流/电量。
+
+### 接线（最终确认，与官方视频一致）
+- 电池 P+ → 模块 L（输入粗焊盘）；模块输出粗焊盘 → 驱动板 P+
+- 电池 P− → 驱动板 P−，并单独引一根到模块 **N 细针**（电压采样，不走电流）
+- 模块 VCC/GND/TX/RX → USB-TTL（隔离，不与电池共地）
+
+### 关键坑：切换直流要写 0x0005 = **2**
+- 手册写“写入 0x0001 后自动切换”，实测写 1 只回 OK，型号仍是 0x0105（交流），电压恒 0
+- 写 **2** → 型号变 0x0205（直流），电压立刻正确（22.18 V）
+- 切换后模块会重启约 0.7 秒，紧接着读会超时
+
+### 设备名冲突
+两个 CH340（超声波 + 电池模块）ID 完全相同，by-id 只剩一个。改用 udev 按物理端口：
+`/etc/udev/rules.d/99-fwr-serial.rules` →
+`3-1.1 → /dev/jsy_meter`、`3-1.3 → /dev/ultrasonic`。
+
+### 仓库改动
+- `battery_modbus.py`：直流切换值 2、重试 3 次、切换后延时 0.7s、每次事务前清缓冲、补 `import time`
+- 新增 `fwr-battery.service`（systemd，开机自启，`-p device:=/dev/jsy_meter`）
+- `docs/remote-control-v1.0.md` 增加电池章节
+
+### 已验证
+- 模块型号 0x0205（直流），电压 22.18 V / 电流 0.47 A / 功率 10.4 W
+- 云端状态实时包含 `voltage/current/percentage`（39%）
+- 服务重启后自动完成直流切换
+
+### 遗留
+- 百分比用的是 6S 锂电电压曲线，未做电流积分（库仑计）
+- 满电 25.2 V 时需复核百分比曲线
+
+## 2026-11-15 17:10 · v1.9：多点逐段执行 + 暂停/继续按当前目标点恢复 + 串口/授权修复
+
+### 会话目标
+导航多点路线：暂停/继续必须继续"当前正在前往的那个点"；顺带修串口授权、近目标、
+RViz 迁移与雷达断流韧性。
+
+### 仓库改动
+- `frontier_explorer.py`
+  - **多点路线默认逐段执行**（`multi_point_sequential=True`）：一次穿过模式暂停/继续
+    只能整条重发 → 车退回第 1 点；逐段执行才能精确续段。
+  - **暂停/继续按"当前目标点"恢复**：派发时记录 `_active_target=(段号,x,y,yaw)`，
+    `_resume` 直接用它，不再用计数反推。
+  - 继续时清零"监控压零"计时（否则暂停期间累计，继续后 0.2 s 误判卡住 → 取消 → 重规划）。
+  - 卡住重试恢复到当前段（原来 `start_fixed()` 清零 → 回第 1 点）。
+  - 暂停期间底盘授权丢失不再 trip（门是我们自己关的）。
+  - 派发序号 `_dispatch_seq`：丢弃被取消旧目标晚到的 result 回调（避免误判"已完成"跳段）。
+  - 同路线重发时按进度继续；终点选在车附近不再拒绝（用户要求）。
+- `base_bridge_core.py`：`ready()` 不再要求 `verified`（握手只用于里程计重新起算）；
+  状态帧新鲜度更新与握手解耦。
+- `base_bridge.py`：`wheel_speed_scale` 1.0（用户要求，0.66 太慢）；arm 失败打印全部判据。
+- `two_point_nav_panel.cpp`：清除选择时作废"可继续任务"；服务就绪自动重试 6×2 s 并显示缺哪项；
+  "任务还在进行中"不再整条重发；继续单选路径改用当前选点；resume ≥3 点走多点服务。
+- `config/real_nav2.yaml`：代价地图 `transform_tolerance 0.6`；`inflation_radius` 恢复 0.48。
+- `config/real_localization.yaml`：AMCL `transform_tolerance 1.0`（规划器外推报错）。
+
+### 仓库外改动
+- 主控新增 systemd 用户服务 `fwr-nav.service`（`systemctl --user start/restart fwr-nav`），
+  解决 SSH 会话结束把导航栈带走的问题。
+- 开发机 `sudo sysctl -w net.core.rmem_max=8388608 net.core.wmem_max=8388608`。
+- 开发机 WiFi 关闭省电（`wifi.powersave 2`）——DDS 组播丢包导致 RViz 收不到 TF 的根因。
+- `/tmp/stall_capture.py`：雷达断流现场抓取（dmesg/线程栈），下次卡顿可定位。
+
+### 已验证
+- 多点逐段执行：日志 `多点路线 N 点 → 逐段执行`。
+- 继续后重派的段号=暂停时的段号（修复前会 +1 或回 1）。
+- 架空轮速测试（fault 清零后）：L=80.5 / R=79.9 mm/s、PWM 0.22/0.23 → 编码器与电机对称；
+  之前的 L=0/Lpwm=0.87 是左轮被卡住触发堵转保护。
+- 测试：开发机 348 项、主控 340 项通过。
+
+### 未验证 / 遗留
+- 门口"停下并转 360°"：日志是 `GridBased: failed to create plan, no valid path found`
+  → 行为树跑恢复（清代价地图 + Spin 原地转），不是定位/AMCL 在转圈。
+- 雷达断流仍偶发（今天 17 次），已换 USB 口、挂抓取器；根因未定（USB/驱动/供电）。
+- 电压监测模块接入后底盘偶发 fault=1；未能确认与干扰的关系。
+
+### 当前运行状态
+- 主控：`fwr-nav.service` active，55 节点；`/scan` 10 Hz、`/imu` 100 Hz、`/odom` 30 Hz。
+- 开发机：RViz（`./scripts/rviz_remote.sh`），DDS 数据正常。

@@ -214,18 +214,16 @@ def test_pivot_allowed_for_open_side_uturn():
     assert "declare_parameter('allow_pivot', True)" in src
 
 
-def test_single_goal_too_close_is_rejected_not_instantly_finished():
-    """单点终点离车 < min_fixed_goal_distance_m 时必须拒绝派发。
-
-    现场：点离车 0.3 m 的目标 → Nav2 的 goal checker（xy_goal_tolerance 0.4）
-    20 ms 内判"已到达" → 面板显示"开始导航 → 任务已结束"，看起来像 bug。
-    """
+def test_single_goal_near_the_robot_is_allowed_with_warning():
+    """终点选在车附近必须**允许**（用户要求："选在车附近就是让车回到终点"）。
+    只记一条告警，不再拒绝派发。"""
     from pathlib import Path
     src = (Path(__file__).resolve().parents[1] / 'fwr_bringup' / 'frontier_explorer.py').read_text()
     assert "declare_parameter('min_fixed_goal_distance_m', 0.5)" in src
     seg = src.split('def _start_fixed_goal')[1][:4000]
-    assert 'min_dist' in seg and 'dist < min_dist' in seg
-    assert '导航会立刻判' in seg
+    assert 'dist < min_dist' in seg
+    assert '不再拒绝' in seg or '允许' in seg
+    assert 'response.accepted = False' not in seg.split('dist < min_dist')[1][:400]
 
 
 def test_route_whose_points_sit_on_the_robot_degrades_to_single_goal():
@@ -238,7 +236,8 @@ def test_route_whose_points_sit_on_the_robot_degrades_to_single_goal():
     src = (Path(__file__).resolve().parents[1] / 'fwr_bringup' / 'frontier_explorer.py').read_text()
     assert 'if len(kept) < 2 and len(pts) >= 2:' in src
     assert '退化为单点任务' in src
-    assert '起点/终点都离车太近' in src
+    # 2026-11-15：终点落在车附近不再拒绝（用户要求），只告警并交给 Nav2 判到达
+    assert '交给 Nav2 判到达' in src
 
 
 def test_only_the_first_point_is_pruned_never_a_waypoint():
@@ -265,7 +264,7 @@ def test_resume_after_success_says_done_and_after_failure_redispatches():
     seg = src.split('def _resume')[1][:3000]
     assert "self._status == 'succeeded'" in seg
     assert '任务已完成（已到达终点）' in seg
-    assert '_fixed_dispatched = len(self._fixed_goals) - 1' in seg
+    assert 'self._sm._fixed_dispatched = self._resume_leg' in seg
 
 
 def test_base_serial_keepalive_recovers_silent_esp32():
@@ -280,3 +279,116 @@ def test_base_serial_keepalive_recovers_silent_esp32():
     assert '状态帧静默' in src
     assert "self._disconnect('state frames silent > 6 s')" in src
     assert self.verified if False else True
+
+
+def test_lidar_gap_failure_pauses_and_retries_instead_of_aborting():
+    """雷达断流导致的导航失败必须"暂停等恢复再重派本段"，而不是记失败/中止任务。
+
+    现场（2026-11-15）：雷达卡了 15.5 s → 规划器 TF 外推失败 → 行为树 Goal failed →
+    整条 4 点路线直接结束；恢复后车停在原地不动。
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / 'fwr_bringup' / 'frontier_explorer.py').read_text()
+    assert "declare_parameter('sensor_loss_pause_s', 25.0)" in src
+    assert "_sensor_gap_at" in src
+    assert '导航失败但属于传感器断流' in src
+    # 暂停中的自查恢复：scan 新鲜 + 授权在 → 继续任务
+    tick = src.split('if self._paused_for_sensor:')[1][:900]
+    assert 'scan_ok' in tick and '继续任务（重派本段）' in tick
+
+
+def test_valid_state_frame_marks_link_verified_after_firmware_reboot():
+    """固件重启/漏收握手横幅后，收到合法状态帧必须自动把 verified 置回 True。
+
+    现场：ESP32 重启后遥测与里程计都正常，但 ready()=False，
+    面板报"底盘授权失败：serial not ready"，只能重启整个栈。
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / 'fwr_bringup' / 'base_bridge_core.py').read_text()
+    seg = src.split('def step(')[1][:800]
+    assert 'self._last_state_at = now_s' in seg
+    assert 'if not self.verified:' in seg
+    # 里程计仍要等握手，避免固件重启后计数跳变（见 test_encoder_forward_and_reboot_rebaseline）
+
+
+def test_resent_identical_route_resumes_instead_of_restarting_from_first_point():
+    """面板"继续"重发同一条路线时，必须按已记录进度继续，不能从第 1 点重走。
+
+    现场：导航中按空格停止 → 继续 → 车去了不是"该走的下一个航点"。
+    根因：/explore/resume 失败后面板会整条路线重发，而多点入口把它当新任务
+    （_fixed_dispatched 归零）→ 从第 1 点开始。
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / 'fwr_bringup' / 'frontier_explorer.py').read_text()
+    seg = src.split('def _start_multi_point_goal')[1][:8000]
+    assert '同一条路线重发' in seg
+    assert 'idx_target = max(0, min(prev, len(self._fixed_goals)) - 1)' in seg
+    assert 'resume: 继续第' in seg
+
+
+def test_multi_point_routes_are_sequential_by_default_so_resume_works():
+    """多点路线默认逐段执行：一次穿过模式暂停/继续时只能整条重发 →
+    车会退回第 1 个航点（现场反复出现）。逐段执行才能按段续走。
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / 'fwr_bringup' / 'frontier_explorer.py').read_text()
+    assert "declare_parameter('multi_point_sequential', True)" in src
+    seg = src.split('def _start_multi_point_goal')[1][:9000]
+    assert 'multi_point_sequential' in seg
+    assert '多点路线 %d 点 → 逐段执行' in seg
+
+
+def test_stale_goal_result_is_ignored_after_redispatched_leg():
+    """暂停/继续重派同一段后，旧目标的 result 回调必须被丢弃。
+
+    现场：继续第 2/5 段 → 正确重发第 2 段；紧接着又派第 3 段、然后回第 1 段。
+    原因：被取消的旧目标 result 晚到，把新目标的状态改成 canceled/succeeded，
+    状态机据此推进。
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / 'fwr_bringup' / 'frontier_explorer.py').read_text()
+    assert 'self._dispatch_seq += 1' in src
+    assert 'def _accepted(self, future, seq=None):' in src
+    assert 'def _finished(self, future, seq=None):' in src
+    assert 'seq != self._dispatch_seq' in src
+
+
+def test_dispatch_sequence_is_initialized_in_constructor():
+    """_dispatch_seq 必须在 __init__ 里初始化。
+
+    2026-11-15 现场：只在派发处 +=、忘了初始化 → 第一次派发 AttributeError，
+    frontier_explorer 直接退出，面板报"服务尚未就绪"（节点都没了）。
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / 'fwr_bringup' / 'frontier_explorer.py').read_text()
+    init = src.split('def __init__')[1].split('def ')[0]
+    assert 'self._dispatch_seq = 0' in init
+
+
+def test_resume_uses_remembered_active_target_and_ignores_arm_loss_while_paused():
+    """暂停/继续按"当前正在前往的那个点"恢复；暂停期间授权丢失不 trip。
+
+    用户要求（2026-11-15）：直接记住当前目标坐标，暂停后没到达就继续这个点。
+    另外暂停时门是关的，底盘会撤授权 —— 那是预期，不能触发"授权丢失中止任务"。
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / 'fwr_bringup' / 'frontier_explorer.py').read_text()
+    assert "self._active_target = {'idx'" in src
+    resume = src.split('def _resume')[1][:4000]
+    assert "self._active_target['idx']" in resume
+    arm = src.split('def _on_bridge_arm')[1][:1200]
+    assert 'self._mission_suspended' in arm
+
+
+def test_resume_resets_stuck_timer_and_stuck_retry_keeps_current_leg():
+    """继续时清零"监控压零"计时；卡住重试必须回到当前段，不能回第 1 段。
+
+    现场：继续后 0.2 s 就报"监控已持续 3.5 秒只发零速"→取消→重规划→跑到第 1 个航点。
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / 'fwr_bringup' / 'frontier_explorer.py').read_text()
+    resume = src.split('def _resume')[1][:4000]
+    assert 'self._fwd_nz_at = None' in resume
+    retry = src.split('def _retry_after_stuck')[1][:1200]
+    assert "_active_target['idx']" in retry
+    assert 'start_fixed(legs=len(self._fixed_goals))' in retry
