@@ -291,10 +291,11 @@ def test_lidar_gap_failure_pauses_and_retries_instead_of_aborting():
     src = (Path(__file__).resolve().parents[1] / 'fwr_bringup' / 'frontier_explorer.py').read_text()
     assert "declare_parameter('sensor_loss_pause_s', 25.0)" in src
     assert "_sensor_gap_at" in src
-    assert '导航失败但属于传感器断流' in src
-    # 暂停中的自查恢复：scan 新鲜 + 授权在 → 继续任务
-    tick = src.split('if self._paused_for_sensor:')[1][:900]
-    assert 'scan_ok' in tick and '继续任务（重派本段）' in tick
+    # 2026-11-16：暂停/恢复都会发 /explore/notice（面板状态栏显示），恢复后自动继续
+    assert "/explore/notice" in src
+    assert '已暂停任务，恢复后自动继续' in src
+    tick = src.split('if self._paused_for_sensor:')[1][:1200]
+    assert 'scan_ok' in tick and '已自动继续导航' in tick
 
 
 def test_valid_state_frame_marks_link_verified_after_firmware_reboot():

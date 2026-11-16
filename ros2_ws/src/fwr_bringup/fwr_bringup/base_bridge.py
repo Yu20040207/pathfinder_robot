@@ -87,6 +87,9 @@ class BaseBridgeNode(Node):
         self._last_sent_command = None
         # 串口保活：记录最后一次收到状态帧的时间（ESP32 只在这条链路上报状态）
         self._last_state_at = 0.0
+        # 2026-11-16（用户要求）：雷达断流导致撤授权后，恢复时自动重新授权，
+        # 这样任务可以自动继续，不用人再点一次"开始导航"。
+        self._arm_requested = False
         self._last_link_poke = 0.0
         self._imu_yaw = None
         self._imu_yaw_rate = 0.0
@@ -205,10 +208,10 @@ class BaseBridgeNode(Node):
                else round(time.monotonic() - self._core._last_state_at, 3))
         self.get_logger().warn(
             'arm 失败：reason=%s core.ready=%s state_age=%s verified=%s '
-            'sensors=%s scan_age=%s imu_age=%s manual=%s' % (
+            'sensors=%s scan_ok=%s imu_age=%s manual=%s' % (
                 reason, self._core.ready(time.monotonic()), age, self._core.verified,
                 self._sensors_ready(time.monotonic()),
-                (None if self._scan_at is None else round(time.monotonic() - self._scan_at, 2)),
+                self._scan.ready(time.monotonic()),
                 (None if self._last_imu_at is None
                  else round(time.monotonic() - self._last_imu_at, 2)),
                 bool(self.get_parameter('manual_enabled').value)))
@@ -765,6 +768,10 @@ class BaseBridgeNode(Node):
                                      not bool(self.get_parameter(
                                          'manual_requires_scan').value))
                     if self._sensors_ready(now, require_scan=not manual_source):
+                        if (self._arm_requested and not self._auto_armed
+                                and not bool(self.get_parameter('manual_enabled').value)):
+                            self._auto_armed = True
+                            print('[base] 传感器恢复 → 自动重新授权', flush=True)
                         command = output.command
                         age = (None if self._core._last_cmd_at is None
                                else round(now - self._core._last_cmd_at, 3))

@@ -174,6 +174,8 @@ class FrontierExplorer(Node):
         self._status = 'idle'
         self._last_xy = None
         self._state_pub = self.create_publisher(String, '/explore/state', 10)
+        # 2026-11-16（用户要求）：断流/暂停这类状态要在面板状态栏显示，恢复后自动继续。
+        self._notice_pub = self.create_publisher(String, '/explore/notice', 10)
         self._goal_pub = self.create_publisher(PoseStamped, '/explore/goal', 10)
         map_qos = (QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
                    if self._static_map else 10)
@@ -225,6 +227,11 @@ class FrontierExplorer(Node):
         if msg.header.frame_id == 'map' and accept_map_message(self._static_map, stamp > 0, age):
             self._map = msg
             self._map_at = time.monotonic()
+
+    def _notice(self, text: str) -> None:
+        """既写日志又发到 /explore/notice（面板状态栏显示）。"""
+        self.get_logger().warn(text)
+        self._notice_pub.publish(String(data=text))
 
     def _map_ready(self, now, timeout=1.):
         return map_available(self._static_map, self._map is not None,
@@ -437,8 +444,8 @@ class FrontierExplorer(Node):
                 if not self._paused_for_sensor:
                     self._paused_for_sensor = True
                     self._sensor_pause_deadline = time.monotonic() + grace
-                    self.get_logger().warn(
-                        '底盘授权丢失 → 暂停任务（等传感器恢复，最多 %.0f s）' % grace)
+                    self._notice('底盘授权丢失（传感器断流）→ 已暂停任务，'
+                                '恢复后自动继续（最多等待 %.0f s）' % grace)
                 return
             self._trip('底盘自动授权丢失（/base/auto_armed=False）')
             self._sm.stop()
@@ -905,7 +912,7 @@ class FrontierExplorer(Node):
                 if scan_ok and arm_ok:
                     self._paused_for_sensor = False
                     self._status = 'idle'
-                    self.get_logger().warn('传感器已恢复 → 继续任务（重派本段）')
+                    self._notice('传感器已恢复 → 已自动继续导航')
                 return
             self._paused_for_sensor = False
             self._trip('传感器断流超过 %.0f s 未恢复' % float(
@@ -1464,7 +1471,7 @@ class FrontierExplorer(Node):
 
     def _sensor_loss_recent(self, now: float) -> bool:
         """最近 8 s 内出现过雷达断流，或当前授权/扫描仍不可用。"""
-        if now - self._sensor_gap_at < 8.0:
+        if now - self._sensor_gap_at < 15.0:
             return True
         if self._scan_at is None or now - self._scan_at > 0.5:
             return True
@@ -1494,9 +1501,7 @@ class FrontierExplorer(Node):
                 self._handle = None
                 self._cancel_future = None
                 self._cancel_after_accept = False
-                self.get_logger().warn(
-                    '导航失败但属于传感器断流（雷达/授权）→ 暂停任务并等待恢复，'
-                    '恢复后重派同一段（不计失败次数）')
+                self._notice('雷达断流/授权丢失 → 已暂停任务，恢复后自动继续')
                 return
             self._consecutive_failures += 1
             limit = int(self.get_parameter('clear_costmap_after_failures').value)

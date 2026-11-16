@@ -362,8 +362,17 @@ protected:
           speed_client_->async_send_request(request);
           status_label_->setText(QString("速度倍率 ×%1").arg(scales[index]));
         });
+      notice_sub_ = node_->create_subscription<std_msgs::msg::String>(
+        "/explore/notice", 10, [this](const std_msgs::msg::String::SharedPtr msg) {
+          const QString text = QString::fromStdString(msg->data);
+          status_label_->setText(text);
+          // 断流/授权丢失暂停：保持运动门打开，恢复后由主控自动继续
+          if (text.contains("暂停")) {sensor_pause_ = true;}
+          if (text.contains("恢复") || text.contains("继续导航")) {sensor_pause_ = false;}
+        });
       state_sub_ = node_->create_subscription<std_msgs::msg::String>(
         "/explore/state", 10, [this](const std_msgs::msg::String::SharedPtr msg) {
+          if (sensor_pause_) {return;}   // 断流暂停中：主控会自己恢复，不关门
           if (real_task_active_ && flow_.explore_state(msg->data == "stopped")) {
             // 任务结束的原因要看得见：带上当前故障码，操作者不用去翻日志。
             if (base_fault_ != 0) {
@@ -1361,6 +1370,13 @@ private:
       // "任务未进入运行状态"并关门（现场表现为"点了开始没反应"）。
       // 放宽到 6 s。
       QTimer::singleShot(6000, this, [this, revision]() {
+      if (revision == selection_revision_ && sensor_pause_) {
+        // 断流暂停期间任务必然"没在运行"，顺延检查，等主控恢复后自动继续
+        QTimer::singleShot(6000, this, [this, revision]() {
+            if (revision == selection_revision_ && sensor_pause_) {return;}
+          });
+        return;
+      }
       if (revision == selection_revision_ && real_task_active_ &&
         !flow_.saw_running_state())
       {
@@ -1694,6 +1710,8 @@ private:
   QPushButton * save_map_button_ = nullptr;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr ready_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr state_sub_;
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr notice_sub_;
+  bool sensor_pause_ = false;   // 主控报告"断流暂停"期间为 true
   PointSelection points_;
   RealNavStartFlow flow_;
   bool guarded_ = false;

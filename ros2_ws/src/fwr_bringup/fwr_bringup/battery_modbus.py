@@ -27,6 +27,7 @@
 import math
 import struct
 import threading
+import time
 
 import rclpy
 from rclpy.executors import ExternalShutdownException
@@ -47,7 +48,7 @@ LIPO_CURVE = (
     (3.40, 8.0), (3.30, 3.0), (3.20, 0.0),
 )
 
-REG_MODE = 0x0005          # 写 1 = 切换直流模式
+REG_MODE = 0x0005          # 信号源切换：实测写 2 = 直流（写 1 无效）
 REG_MODEL = 0x0001         # 高字节 02H = 直流模块
 REG_DATA = 0x0048
 DATA_COUNT = 9
@@ -123,7 +124,10 @@ class BatteryModbus(Node):
         self.declare_parameter('warn_v_per_cell', 3.40)
         self.declare_parameter('critical_v_per_cell', 3.30)
         self.declare_parameter('mock', False)
-        self.declare_parameter('timeout_s', 0.3)
+        self.declare_parameter('timeout_s', 0.5)
+        self.declare_parameter('charging_voltage', 24.0)
+        self.declare_parameter('min_voltage', 5.0)
+        self.declare_parameter('max_voltage', 30.0)
 
         self._device = str(self.get_parameter('device').value)
         self._baud = int(self.get_parameter('baudrate').value)
@@ -143,6 +147,8 @@ class BatteryModbus(Node):
         self.create_service(Trigger, '/base/battery_clear_energy',
                             self._on_clear_energy)
 
+        self._zero_count = 0
+        self._v_history = []
         if not self._mock:
             self._open()
         period = 1.0 / max(0.1, float(self.get_parameter('poll_hz').value))
@@ -179,6 +185,7 @@ class BatteryModbus(Node):
         with self._lock:
             if self._ser is None:
                 raise RuntimeError('serial not open')
+            self._ser.reset_input_buffer()
             self._ser.write(frame)
             data = self._ser.read(expected)
         if len(data) != expected:
@@ -190,16 +197,26 @@ class BatteryModbus(Node):
         return data
 
     def _switch_dc_mode(self) -> None:
-        """模块默认交流；写 0x0005=1 切换直流。"""
-        try:
-            self._transact(write_frame(self._addr, REG_MODE, 1), 8)
-            model = self._transact(
-                read_frame(self._addr, REG_MODEL, 1), 7)
-            dc = (model[3] << 8 | model[4]) >> 8 == 0x02
-            self.get_logger().info(
-                '已切换直流模式' if dc else '警告：模块型号仍非直流（02H）')
-        except Exception as exc:                 # noqa: BLE001
-            self.get_logger().warn(f'切换直流模式失败: {exc}')
+        """模块默认交流；实测写 0x0005=2 才会切到直流（手册说写 1，但固件 V01.05 是 2）。"""
+        last = None
+        for attempt in range(3):
+            try:
+                self._transact(write_frame(self._addr, REG_MODE, 2), 8)
+                time.sleep(0.7)      # 切换后模块会短暂重启，等一下再读
+                model = self._transact(
+                    read_frame(self._addr, REG_MODEL, 1), 7)
+                dc = (model[3] << 8 | model[4]) >> 8 == 0x02
+                if dc:
+                    self.get_logger().info('已切换直流模式（0x0205）')
+                else:
+                    self.get_logger().warn('模块型号仍非直流（02H），重试')
+                    time.sleep(0.2)
+                    continue
+                return
+            except Exception as exc:             # noqa: BLE001
+                last = exc
+                time.sleep(0.2)
+        self.get_logger().warn(f'切换直流模式失败: {last}')
 
     def _read_data(self):
         resp = self._transact(
@@ -222,6 +239,25 @@ class BatteryModbus(Node):
             self.get_logger().warn(f'读取失败: {exc}', throttle_duration_sec=5.0)
             self._close()
             return
+        vmin = float(self.get_parameter('min_voltage').value)
+        vmax = float(self.get_parameter('max_voltage').value)
+        if not (vmin <= voltage <= vmax):
+            # 模块偶发返回全 0（切回交流/通讯抖动）：丢弃这次采样并尝试恢复
+            self._zero_count += 1
+            self.get_logger().warn(
+                f'电压异常 {voltage:.2f}V，丢弃本次采样（第 {self._zero_count} 次）',
+                throttle_duration_sec=2.0)
+            if self._zero_count >= 3:
+                self._zero_count = 0
+                self.get_logger().warn('连续异常，重新切换直流模式')
+                try:
+                    self._close()
+                    self._open()
+                    self._switch_dc_mode()
+                except Exception as exc:         # noqa: BLE001
+                    self.get_logger().warn(f'恢复失败: {exc}')
+            return
+        self._zero_count = 0
         self._publish(voltage, current, power, energy)
 
     def _publish_mock(self) -> None:
@@ -243,7 +279,23 @@ class BatteryModbus(Node):
         msg.capacity = float('nan')
         msg.design_capacity = float('nan')
         msg.percentage = percent_from_pack(voltage, self._cells)
-        msg.power_supply_status = BatteryState.POWER_SUPPLY_STATUS_DISCHARGING
+        charging_v = float(self.get_parameter('charging_voltage').value)
+        # 趋势判定：5 分钟内电压上升 >0.1V 也视为充电
+        now_s = time.monotonic()
+        self._v_history.append((now_s, float(voltage)))
+        while self._v_history and now_s - self._v_history[0][0] > 300:
+            self._v_history.pop(0)
+        # 趋势判定要求电压已接近充电区间，避免 19.0→19.2 这种跳变误判
+        rising = (len(self._v_history) > 1 and
+                  voltage >= 23.0 and
+                  voltage - self._v_history[0][1] >= 0.2)
+        # 拔掉充电器后电压会从峰值回落：低于 5 分钟峰值 0.15V 以上就不算充电
+        peak = max(v for _t, v in self._v_history) if self._v_history else voltage
+        falling = voltage <= peak - 0.15
+        if voltage >= charging_v and not falling and (rising or True):
+            msg.power_supply_status = BatteryState.POWER_SUPPLY_STATUS_CHARGING
+        else:
+            msg.power_supply_status = BatteryState.POWER_SUPPLY_STATUS_DISCHARGING
         msg.power_supply_health = BatteryState.POWER_SUPPLY_HEALTH_GOOD
         msg.power_supply_technology = BatteryState.POWER_SUPPLY_TECHNOLOGY_LION
         msg.present = True

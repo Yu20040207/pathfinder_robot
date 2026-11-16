@@ -6242,3 +6242,111 @@ RViz 迁移与雷达断流韧性。
 ### 当前运行状态
 - 主控：`fwr-nav.service` active，55 节点；`/scan` 10 Hz、`/imu` 100 Hz、`/odom` 30 Hz。
 - 开发机：RViz（`./scripts/rviz_remote.sh`），DDS 数据正常。
+
+## 2026-11-16 11:05 · 手机端建图模式 + 地图管理（v1.0 增补）
+
+### 会话目标
+在手机页面上加建图模式（摇杆建图、保存/重建/急停），并补齐导航的地图选择、
+电池显示、状态提示等体验问题。
+
+### 仓库改动
+- `cloud/web/car.html`：
+  - 模式下拉增加「建图模式」；建图模式=上方 SLAM 地图+雷达，下方摇杆+按钮
+  - 建图按钮：授权 / 保存地图（弹框输入名字）/ 重新建图 / 急停（沿用导航栏样式）
+  - 导航模式「选择地图」弹层（列出车端 maps 目录所有 yaml，切换=重启导航栈）
+  - 状态栏显示当前导航地图名；建图模式不显示地图名
+  - 视角切换（建图模式，替代 📍）：固定地图 / 车头朝上（地图随车转 + 车始终居中）
+  - 登录页重做为「明添科技」玻璃卡片风格（纯 CSS 背景）
+  - 手动模式新增「手动授权」状态卡 + 授权按钮（不再自动开门）
+  - 低电量警告：<20% 红条、<10% 闪烁
+  - 地图旋转按钮、缩放按钮、📍 定位图标化
+- `cloud/api/app.py`：nav 指令透传 `name`/`map` 字段；`online` 纯文本消息单独处理；
+  订阅 `live_map`/`maps`/`preview_path`。
+- `fwr_bringup/mqtt_bridge.py`：
+  - 建图模式：`/slam_map` 订阅 → `live_map` 上传（1 Hz，gzip+base64），
+    只在 `fwr-map` 服务运行且过了 25 秒宽限期时上传
+  - 建图动作：mapping_start / mapping_stop / mapping_restart / mapping_save / list_maps / set_map
+  - 建图模式位姿改用 TF `map→base_link`（AMCL 不在跑）
+  - 激光点屏蔽车尾 ±50°（`rear_mask_deg` 参数），与 RViz `/scan_mapping` 一致
+  - 保存地图名经 `/tmp/fwr_map_save_name.txt` 传递；服务动作完成后回执
+  - 手动授权状态：每 2 秒读 `/base_bridge` 的 `manual_enabled` 放进 state
+- `fwr_bringup/slam_map_save.py`：保存时读临时文件里的名字；直接订阅地图
+  写 PGM/YAML（不再依赖 `map_saver_cli`，它读不到 `/slam_map`）。
+- `launch/real_mapping.launch.py`：新增 `slam_map_topic` 参数（slam_toolbox
+  的 `/map` 重映射到 `/slam_map`），并把该话题传给 `slam_map_save`。
+- 系统服务（车端，非仓库）：新增 `fwr-map.service`（建图栈，开机自启）；
+  `fwr-nav.service`（导航栈）；`fwr-battery.service`；三个服务统一
+  `FASTRTPS_DEFAULT_PROFILES_FILE=fastdds_udp_only.xml`（否则互相发现不了）。
+- udev：`/etc/udev/rules.d/99-fwr-serial.rules` → `/dev/jsy_meter`、`/dev/ultrasonic`。
+
+### 已验证
+- 建图模式切换：`fwr-map` active / `fwr-nav` inactive；`/slam_map` 1 个发布者；
+  `live_map` 6~7 条/8s，尺寸纯 SLAM（120×170~229×130），无 928×605 导航图。
+- 建图位姿：TF 回退生效，云端 state 有 `x/y/yaw`。
+- 保存地图：`final_save_20261116_110102.pgm`（229×130）+ `.yaml`
+  （resolution 0.05，origin [-1.315,-3.571]）+ `.posegraph/.data`；
+  返回信息标明已设为下次导航地图。
+- 选择地图：写入 `~/.config/fwr/last_navigation_map` 后重启导航栈，
+  `fwr-nav active`、`fwr-map inactive`。
+- 电池：JSY-MK-1031 直流模式（写 0x0005=2），电压 21.3V / 电流 0.7A。
+- `python3 -m py_compile` 全部通过；页面脚本 `node --check` 通过。
+
+### 血泪教训（本轮）
+1. **rsync 目标目录写错会静默成功**：`mqtt_bridge.py`/`real_mapping.launch.py`
+   被放到 `src/fwr_bringup/` 根目录，补丁"部署了"但从未生效。
+   以后多文件部署必须逐个指定目标目录并 `grep` 核对。
+2. **`str.replace` 不匹配时静默失败**：多处补丁因此没上（API 透传 name、
+   launch 重映射、页面建图控件 HTML）。补丁必须加 `assert old in s`。
+3. **一个变量名在文件里出现两次**：`self._scan_dirty = False` 同时出现在
+   `__init__` 和 `_publish_scan`，替换把实时地图缓冲每 0.2 秒清一次，
+   导致 `live_map` 永远发不出去。
+4. **`/map` 上有多个发布者**：除 slam_toolbox 外还有外部（RViz Map Edit 类）
+   节点在重发导航地图 → 建图模式"闪出导航地图"。用独立 `/slam_map` 解决。
+5. **混合 DDS 配置会互相发现不了**：导航栈用 udp_only、桥接/电池用默认配置，
+   重启后桥接调不到 `/base_bridge` 服务 → 授权无反应、手动/导航全失效。
+   现在全车统一 udp_only。
+
+### 当前运行状态
+- 车：`fwr-map`（建图栈）运行中；`fwr-nav` inactive；`fwr-battery`、`fwr-mqtt-bridge` active。
+- 云端：`jc-api`（8444）、EMQX、nginx、boat-web（8080）正常。
+- 当前导航地图：`final_save_20261116_110102.yaml`。
+- 电池 19.8%（低电量警告会显示）。
+
+### 下一步
+- 实测手机端建图（摇杆、地图生长、保存/重建）
+- 实机验证「车头朝上」视角与车体居中
+- 低电量（19.8%）提醒用户充电
+- 导航模式下用新保存的地图做一次完整导航回归
+
+## 2026-11-16 11:35 · 手机切地图"显示成功但地图没变"（三个叠加原因）
+
+### 现象
+手机端选择地图 → 提示切换成功 → 但导航仍是原地图。
+
+### 根因（三个叠加）
+1. **`fwr-nav.service` 以 root 运行**（建服务时漏了 `User=`）→ 读的是
+   `/root/.config/fwr/last_navigation_map`，而手机/桥接写的是
+   manbaout 的 `~/.config/fwr/last_navigation_map` → 重启导航栈永远加载旧地图。
+2. **保存的地图名里有隐形字符**：手机输入法写出的 `test 1` 中那"空格"
+   实际是 U+2006（六分之一全角空格），文件名被这样保存；重命名文件后
+   **yaml 里的 `image:` 仍指向旧文件名** → map_server/桥接都找不到 pgm。
+3. **页面缓存静态地图图片**：`loadMap()` 发现 `mapImg` 已存在就直接返回；
+   云端 API 的地图缓存也只在桥接启动时上传一次，切图后不刷新。
+
+### 修复
+- `fwr-nav.service` 增加 `User=manbaout` + `Environment=HOME=/home/manbaout`
+- `slam_map_save`：地图名过滤为 `[0-9A-Za-z_-]`，其它字符一律转 `_`
+- 已存在的地图文件：U+2006 文件名改为 `_`，并修正 yaml 里的 `image:` 引用
+  （脚本 `/tmp/repair_map_yaml.py`，通用修复所有 image 指向不存在文件的情况）
+- 桥接：`nav_restart` / `mapping_stop` 完成后重新上传地图（`_publish_map`）
+- 页面：检测到状态里的地图名变化 → 丢弃缓存的 mapImg 并重新 `loadMap()`
+
+### 已验证
+- `bash scripts/run_navigation.sh --print-map` → test_1_20261116_111709.yaml
+- `fwr-nav` 重启后 launch 参数为 test_1_20261116_111709.yaml
+- 桥接日志：`地图已上传：test_1_20261116_111709.pgm 460x423`
+
+### 教训
+- **systemd 服务一定要写 `User=`**，否则 root 的 `~` 和业务用户的 `~` 不是同一个
+- **文件名里的不可见字符**（U+2006/U+00A0）比空格更隐蔽，必须做白名单过滤
+- 重命名地图文件时**必须同步改 yaml 里的 `image:`**

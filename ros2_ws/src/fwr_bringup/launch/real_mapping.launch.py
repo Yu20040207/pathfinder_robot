@@ -26,6 +26,8 @@ def generate_launch_description():
         # 避免 launch 与看门狗同时开串口 → sllidar_node 死锁在 futex 上、/scan 断流。
         DeclareLaunchArgument('start_lidar', default_value='true'),
         DeclareLaunchArgument('slam_executable', default_value='async_slam_toolbox_node'),
+        DeclareLaunchArgument('slam_map_topic', default_value='/map',
+                              description='SLAM 地图话题（手机建图用 /slam_map 避免混入其它节点的 /map）'),
         DeclareLaunchArgument('slam_params',
                               default_value=str(share / 'config' / 'real_slam.yaml')),
         Node(package='fwr_bringup', executable='base_bridge', name='base_bridge',
@@ -57,13 +59,15 @@ def generate_launch_description():
              parameters=[str(share / 'config' / 'real_ekf.yaml')]),
         Node(package='slam_toolbox', executable=LaunchConfiguration('slam_executable'),
              name='slam_toolbox', output='screen',
+             remappings=[('/map', LaunchConfiguration('slam_map_topic'))],
              condition=IfCondition(LaunchConfiguration('start_slam')),
              parameters=[LaunchConfiguration('slam_params')]),
         # RViz「保存地图」按钮的服务：一次保存 .posegraph/.data + .pgm/.yaml。
         # 目录默认取 FWR_MAP_DIR（start_manual_mapping.sh 会设为源码 maps/），
         # 未设置时保存到 ~/robot_maps。
         Node(package='fwr_bringup', executable='slam_map_save',
-             name='slam_map_save', output='screen'),
+             name='slam_map_save', output='screen',
+             parameters=[{'map_topic': LaunchConfiguration('slam_map_topic')}]),
         # 后向四路 A22 超声（DYP-E08 / RS485）：发布 4 路 Range
         Node(package='fwr_bringup', executable='ultrasonic_rear',
              name='ultrasonic_rear', output='screen',
