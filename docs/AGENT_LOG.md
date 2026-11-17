@@ -6350,3 +6350,46 @@ RViz 迁移与雷达断流韧性。
 - **systemd 服务一定要写 `User=`**，否则 root 的 `~` 和业务用户的 `~` 不是同一个
 - **文件名里的不可见字符**（U+2006/U+00A0）比空格更隐蔽，必须做白名单过滤
 - 重命名地图文件时**必须同步改 yaml 里的 `image:`**
+
+## 2026-11-17 14:14 · 手机远程控制体验修复（航点进度/切图/离线/温度/充电）
+
+### 会话目标
+修复手机端导航/建图/电池的一系列现场问题。
+
+### 仓库改动
+- `cloud/web/car.html`：
+  - 航点进度按实线路径推算（回退到上一版逻辑）；路径只画车头前方
+  - 切图时清空旧路径/航点，并按目标地图名重试加载直到云端更新
+  - 关机页「设备已关机」+ 离线 15 秒去抖 + 状态值显示 `---`
+  - 手机切手动模式不再触发导航栈重启
+  - 设备面板显示 CPU/SSD/WiFi 温度
+- `ros2_ws/src/fwr_bringup/fwr_bringup/frontier_explorer.py`：
+  - 新增 `/explore/progress`（JSON leg/total），优先用 `_active_target` 的 idx
+- `ros2_ws/src/fwr_bringup/fwr_bringup/mqtt_bridge.py`：
+  - 订阅 `/explore/progress` 并在状态里透传 leg/legs
+  - 新增 `read_temps()`（读 thermal_zone/hwmon），状态里带 `temps`
+  - `_set_gate` 改为 `wait_for_service` + 重排队，授权不再静默失败
+- `ros2_ws/src/fwr_bringup/fwr_bringup/battery_modbus.py`：
+  - 充电判定改为「相对近 10 分钟峰值的升降」（+0.15 升为充电，-0.20 降为不充电）
+
+### 仓库外改动
+- `fwr-map.service` 设为 **disabled**（开机只起 fwr-nav，避免两个互斥服务抢启动）
+- 曾安装 `fwr-chain-watchdog.service`，因与 lifecycle_manager 冲突导致导航栈
+  节点被关（AMCL 无数据），已 stop + disable
+- `ros2_ws/build/fwr_bringup/maps/` 里的 U+2006 残留文件已清理（曾导致 colcon build 一直失败）
+
+### 已验证
+- 定位：`ros2 service call /localization/reseed` → 定位成功 (0.24,-0.89,93°) 残差 0.053 m
+- 授权：MQTT 发 `{"action":"manual"}` → 云端状态 `manual=True ready=True`
+- 温度：云端状态 `temps: {board:27.8, wifi:62, cpu:51, ssd:37.9}`
+- 充电：不充电时 `charging=false`（电压 25.0V 满电静置）
+- 单元测试：`test_mqtt_bridge.py` 9 项通过
+- `/explore/progress` 空闲时报 `{"leg":0,"total":0}`
+
+### 未验证 / 遗留
+- 航点编号仍有个别场景偏差（一次穿过模式无精确段号，页面用路径推算）
+- 看门狗已禁用，collision_monitor 卡死时仍需手动 `ros2 lifecycle set ... activate`
+
+### 当前运行状态
+- `fwr-nav` active、`fwr-map` inactive(disabled)、`fwr-mqtt-bridge` active、`fwr-battery` active
+- 提交：`0faf9a2` 已推送 `codex/real-nav2-imu-turn`
