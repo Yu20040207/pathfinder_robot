@@ -105,6 +105,7 @@
   #devPanel .status { grid-template-columns: repeat(2, 1fr) !important; }
   #devPanel .card b { font-size: 20px; white-space: nowrap; }
   #devPanel .card span { font-size: 12px; }
+  .tempRow { text-align: center; font-size: 12px; color: #8b949e; margin: 2px 0 4px; }
   #mapPicker, #askDialog { position: fixed; inset: 0; background: rgba(0,0,0,.66);
                             display: flex; align-items: center; justify-content: center; }
   #mapPicker { z-index: 30; }
@@ -330,7 +331,7 @@
     <div class="askTitle">设置</div>
     <button id="bindBtn" class="setBtn">绑定设备</button>
     <button id="pwdBtn" class="setBtn">更改密码</button>
-    <button id="switchProdBtn" class="setBtn" style="border-color:#30363d;color:#e6edf3">切换产品</button>
+    <button id="switchProdBtn" class="setBtn" style="border-color:#30363d;color:#e6edf3">返回主界面</button>
     <button id="logoutBtn" class="setBtn" style="border-color:#f85149;color:#ff7b72">退出登录</button>
     <div class="panelClose" id="accountPanelClose">✕</div>
   </div>
@@ -352,8 +353,8 @@
 <div id="shutdownView" class="hidden">
   <div class="shutdownCard">
     <div class="shutdownIcon">⏻</div>
-    <div class="shutdownTitle">设备已关机</div>
-    <div class="shutdownHint">主控已关闭，请按电源键开机；开机后会自动恢复连接。</div>
+    <div class="shutdownTitle" id="offlineTitle">设备已关机</div>
+    <div class="shutdownHint" id="offlineHint">主控已关闭，请按电源键开机；开机后会自动恢复连接。</div>
     <button id="shutdownBack">返回产品</button>
   </div>
 </div>
@@ -365,6 +366,7 @@
       <div class="card"><span>电量</span><b id="pct">--</b></div>
       <div class="card"><span id="voltLabel">电压</span><b id="volt">--</b></div>
     </div>
+    <div class="tempRow" id="tempRow">CPU -- · SSD -- · WiFi --</div>
     <div class="askRow">
       <button id="rebootBtn" style="border-color:#d29922;color:#d29922">重启主控</button>
       <button id="shutdownBtn" style="border-color:#f85149;color:#ff7b72">关机</button>
@@ -463,6 +465,7 @@ let previewPoints = [];
 let navWaypoints = [];
 let lastNavState = '';
 let lastNavMovingAt = 0;
+let navWpIdx = 0;
 let userStopped = false;
 
 /* ---------------- 登录 / 连接 ---------------- */
@@ -487,7 +490,21 @@ $('prodLogout').onclick = () => {
 };
 
 let lastOnlineOk = true;
+
+function offlineTick() {
+  if (!robotOfflineSince || shutdownPending) return;
+  if (wsReady && robotOnline !== false) { robotOfflineSince = 0; return; }
+  if (Date.now() - robotOfflineSince < 15000) return;
+  // 持续离线 15 秒：清空数值并显示离线页
+  clearStatusValues();
+  const t = $('offlineTitle'), h = $('offlineHint');
+  if (t) t.textContent = '设备离线';
+  if (h) h.textContent = '主控未连接，请检查电源或网络；恢复后会自动重连。';
+  if ($('shutdownView')) $('shutdownView').classList.remove('hidden');
+}
+setInterval(offlineTick, 1000);
 let shutdownPending = false;
+let robotOfflineSince = 0;
 function clearStatusValues() {
   ['pct', 'volt', 'pose', 'spd', 'armState', 'hdrPct'].forEach((id) => {
     const el = $(id);
@@ -512,7 +529,15 @@ function updateLinkBadge() {
   }
   const el = $('connState');
   if (el) { el.textContent = label; el.style.color = color; }
-  if (!ok && lastOnlineOk) clearStatusValues();
+  if (!ok && lastOnlineOk) {
+    robotOfflineSince = Date.now();     // 开始计时，15 秒后才判定为离线
+  }
+  if (ok) robotOfflineSince = 0;
+  if (ok) {
+    const t = $('offlineTitle'), h = $('offlineHint');
+    if (t) t.textContent = '设备已关机';
+    if (h) h.textContent = '主控已关闭，请按电源键开机；开机后会自动恢复连接。';
+  }
   if (ok && shutdownPending) {
     shutdownPending = false;
   }
@@ -724,6 +749,16 @@ function updateStatus(s) {
     if (voltEl && typeof s.voltage === 'number') {
       voltEl.textContent = s.voltage.toFixed(1) + 'V';
     }
+    if (s.temps) {
+      const t = s.temps;
+      const f = (v) => (typeof v === 'number' ? v.toFixed(0) + '°C' : '--');
+      const tr = $('tempRow');
+      if (tr) {
+        tr.textContent = `CPU ${f(t.cpu)} · SSD ${f(t.ssd)} · WiFi ${f(t.wifi)}`;
+        const hot = (t.cpu || 0) >= 85;
+        tr.style.color = hot ? '#ff7b72' : '#8b949e';
+      }
+    }
     const voltLabel = $('voltLabel');
     if (voltLabel) {
       voltLabel.textContent = s.charging ? '电压 ⚡充电中' : '电压';
@@ -774,13 +809,41 @@ function updateNavProgress() {
   const nav = robotState.nav || '';
   const now = Date.now();
   if (nav === 'navigating' && navWaypoints.length && poseDisp) {
-    let best = 0, bestD = Infinity;
-    navWaypoints.forEach((w, i) => {
+    // 1) 以实线路径为准（实时）：沿路径向前找第一个航点
+    if (pathPoints.length > 1) {
+      let startIdx = 0, bestD = Infinity;
+      pathPoints.forEach((pt, i) => {
+        const d = (pt[0] - poseDisp.x) ** 2 + (pt[1] - poseDisp.y) ** 2;
+        if (d < bestD) { bestD = d; startIdx = i; }
+      });
+      const ahead = pathPoints.slice(startIdx);
+      for (let wi = 0; wi < navWaypoints.length; wi += 1) {
+        const w = navWaypoints[wi];
+        if (ahead.some((pt) => Math.hypot(pt[0] - w.x, pt[1] - w.y) < 0.6)) {
+          navWpIdx = wi;
+          $('navInfo').textContent =
+            `导航中：正在前往 ${wi + 1}/${navWaypoints.length} 号航点`;
+          lastNavMovingAt = now;
+          return;
+        }
+      }
+    }
+    // 2) 车端探索器上报的段号
+    if (robotState.legs > 1 && robotState.leg > 0) {
+      $('navInfo').textContent =
+        `导航中：正在前往 ${robotState.leg}/${robotState.legs} 号航点`;
+      lastNavMovingAt = now;
+      return;
+    }
+    // 3) 兜底：单调前进
+    while (navWpIdx < navWaypoints.length - 1) {
+      const w = navWaypoints[navWpIdx];
       const d = Math.hypot(w.x - poseDisp.x, w.y - poseDisp.y);
-      if (d < bestD) { bestD = d; best = i; }
-    });
+      if (d < 0.5) navWpIdx += 1;
+      else break;
+    }
     $('navInfo').textContent =
-      `导航中：正在前往 ${best + 1}/${navWaypoints.length} 号航点`;
+      `导航中：正在前往 ${navWpIdx + 1}/${navWaypoints.length} 号航点`;
     lastNavMovingAt = now;
   } else if (navWaypoints.length && nav !== 'navigating' &&
              lastNavMovingAt > 0 && (now - lastNavMovingAt) > 2500) {
@@ -878,7 +941,13 @@ function updateNavStatus() {
     if (changed && lastMode === 'nav') {
       mapImg = null;
       mapMeta = null;
-      setTimeout(() => loadMap(), 1200);
+      pathPoints = [];
+      localPlan = [];
+      waypoints = [];
+      previewPoints = [];
+      renderDirty = true;
+      mapLoadRetry = 0;
+      setTimeout(() => loadMap(r.map + '.yaml'), 1200);
     }
   }
 }
@@ -1135,6 +1204,14 @@ headerEl.insertBefore(hdrRefresh, modeSelect);   // 刷新在“手动模式”�
 let lastAppliedMode = 'manual';
 modeSelect.onchange = async () => {
   const target = modeSelect.value;
+  // 设备离线时不允许进入导航/建图模式
+  if ((target === 'nav' || target === 'map') &&
+      (!wsReady || robotOnline === false)) {
+    showToast('设备离线，请先开机', false);
+    modeSelect.value = lastAppliedMode;
+    $('shutdownView').classList.remove('hidden');
+    return;
+  }
   const crossing = (lastAppliedMode === 'nav' && target === 'map') ||
                    (lastAppliedMode === 'map' && target === 'nav');
   if (crossing) {
@@ -1280,9 +1357,17 @@ function renderMapList(maps) {
       if (wsReady) {
         ws.send(JSON.stringify({type: 'nav', action: 'set_map', map: m.path}));
         pendingMapName = m.name;
+        pathPoints = [];
+        localPlan = [];
+        previewPoints = [];
+        waypoints = [];
+        renderDirty = true;
+        render();
         $('navInfo').textContent =
           `正在切换到地图 ${m.name}（约 1~2 分钟，完成后自动提示）…`;
         startProgress(`正在切换地图：${m.name}（重启导航栈）…`, 120000);
+        mapLoadRetry = 0;
+        setTimeout(() => loadMap(m.name + '.yaml'), 20000);
         clearTimeout(mapSwitchTimer);
         mapSwitchTimer = setTimeout(() => {
           if (!pendingMapName) return;
@@ -1433,11 +1518,22 @@ async function applyLiveMap(m) {
   }
 }
 
-async function loadMap() {
-  if (mapImg) { resizeCanvas(); return; }
+let mapLoadRetry = 0;
+async function loadMap(expectYaml) {
+  if (mapImg && !expectYaml) { resizeCanvas(); return; }
   $('navInfo').textContent = '正在加载地图…';
   try {
     const data = await api(`/api/devices/${DEVICE}/map?v=${Date.now()}`);
+    if (expectYaml && data.yaml && data.yaml !== expectYaml) {
+      // 云端还是旧地图，等车端重新上传
+      mapLoadRetry += 1;
+      if (mapLoadRetry <= 12) {
+        $('navInfo').textContent = '等待云端地图更新…';
+        setTimeout(() => loadMap(expectYaml), 2500);
+        return;
+      }
+      mapLoadRetry = 0;
+    }
     mapMeta = data;
     const raw = Uint8Array.from(atob(data.pgm), c => c.charCodeAt(0));
     let bytes;
@@ -1564,17 +1660,30 @@ function render() {
     ctx.stroke();
     ctx.setLineDash([]);
   }
-  // 规划路径
+  // 规划路径：只画车头前方（已走过的部分立即消失）
   if (pathPoints.length > 1) {
-    ctx.beginPath();
-    ctx.strokeStyle = '#58a6ff';
-    ctx.lineWidth = 3 * dpr;
-    pathPoints.forEach((pt, i) => {
-      const ip = worldToImg(pt[0], pt[1]);
-      const sp = imgToScreen(ip.x, ip.y);
-      if (i === 0) ctx.moveTo(sp.x, sp.y); else ctx.lineTo(sp.x, sp.y);
-    });
-    ctx.stroke();
+    let startIdx = 0;
+    if (poseDisp) {
+      let bestD = Infinity;
+      pathPoints.forEach((pt, i) => {
+        const dx = pt[0] - poseDisp.x, dy = pt[1] - poseDisp.y;
+        const d = dx * dx + dy * dy;
+        if (d < bestD) { bestD = d; startIdx = i; }
+      });
+    }
+    const drawFrom = Math.min(pathPoints.length - 2, startIdx + 2);
+    const drawPts = pathPoints.slice(drawFrom);
+    if (drawPts.length > 1) {
+      ctx.beginPath();
+      ctx.strokeStyle = '#58a6ff';
+      ctx.lineWidth = 3 * dpr;
+      drawPts.forEach((pt, i) => {
+        const ip = worldToImg(pt[0], pt[1]);
+        const sp = imgToScreen(ip.x, ip.y);
+        if (i === 0) ctx.moveTo(sp.x, sp.y); else ctx.lineTo(sp.x, sp.y);
+      });
+      ctx.stroke();
+    }
   }
   // 航点
   waypoints.forEach((wp, i) => {
@@ -1811,6 +1920,15 @@ function sendGoal(list) {
   if (!wsReady) { $('navInfo').textContent = '未连接'; return; }
   const points = list.map(w => [+w.x.toFixed(3), +w.y.toFixed(3)]);
   navWaypoints = points.map(p => ({x: p[0], y: p[1]}));
+  // 从离车最近的航点开始编号（继续导航时不会跳回 1 号）
+  navWpIdx = 0;
+  if (poseDisp) {
+    let bestD = Infinity;
+    navWaypoints.forEach((w, i) => {
+      const d = Math.hypot(w.x - poseDisp.x, w.y - poseDisp.y);
+      if (d < bestD) { bestD = d; navWpIdx = i; }
+    });
+  }
   lastNavMovingAt = Date.now();   // 避免刚下发就被误判为“已停止”
   ws.send(JSON.stringify({type: 'goal', points}));
   $('navInfo').textContent = `已发送 ${points.length} 个航点，等待车端确认…`;

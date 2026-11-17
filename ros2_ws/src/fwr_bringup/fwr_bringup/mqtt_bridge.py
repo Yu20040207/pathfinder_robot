@@ -87,8 +87,49 @@ def parse_command(payload: bytes, max_linear: float, max_angular: float):
     }
 
 
+TEMP_PATHS = {
+    'cpu': '/sys/class/thermal/thermal_zone0/temp',
+    'wifi': '/sys/class/thermal/thermal_zone2/temp',
+}
+
+
+def read_temps():
+    """读主控温度（CPU / WiFi / NVMe，单位 °C，读不到返回 None）。"""
+    out = {}
+    try:
+        types = {}
+        for i in range(8):
+            t = f'/sys/class/thermal/thermal_zone{i}'
+            try:
+                with open(f'{t}/type', encoding='utf-8') as fh:
+                    types[i] = fh.read().strip()
+            except OSError:
+                continue
+        want = {'x86_pkg_temp': 'cpu', 'iwlwifi_1': 'wifi', 'acpitz': 'board'}
+        for i, name in types.items():
+            key = want.get(name)
+            if key is None:
+                continue
+            with open(f'/sys/class/thermal/thermal_zone{i}/temp') as fh:
+                out[key] = round(int(fh.read().strip()) / 1000.0, 1)
+        for h in range(8):
+            base = f'/sys/class/hwmon/hwmon{h}'
+            try:
+                with open(f'{base}/name', encoding='utf-8') as fh:
+                    nm = fh.read().strip()
+                if nm == 'nvme':
+                    with open(f'{base}/temp1_input') as fh:
+                        out['ssd'] = round(int(fh.read().strip()) / 1000.0, 1)
+            except OSError:
+                continue
+    except Exception:                            # noqa: BLE001
+        pass
+    return out
+
+
 def build_state_payload(battery, pose, nav_state, fault, armed, ready=False,
-                       manual=False, map_name='', speed=0.0, yaw_rate=0.0):
+                       manual=False, map_name='', speed=0.0, yaw_rate=0.0,
+                       leg=0, legs=0):
     """组装上行状态；缺失字段用 None，云端按需处理。"""
     payload = {'ts': time.time()}
     if battery is not None:
@@ -107,7 +148,13 @@ def build_state_payload(battery, pose, nav_state, fault, armed, ready=False,
     payload['ready'] = bool(ready)
     payload['manual'] = bool(manual)
     payload['speed'] = round(float(speed), 3)
+    temps = read_temps()
+    if temps:
+        payload['temps'] = temps
     payload['yaw_rate'] = round(float(yaw_rate), 3)
+    if legs:
+        payload['leg'] = int(leg)
+        payload['legs'] = int(legs)
     if map_name:
         payload['map'] = str(map_name)
     return json.dumps(payload, separators=(',', ':')).encode('utf-8')
@@ -216,6 +263,8 @@ class MqttBridge(Node):
         self._map_name = ''
         self._map_name_at = 0.0
         self._mapping_mode = False
+        self._leg = 0
+        self._legs = 0
         self._slam_map_seen = False
         self._mapping_grace_until = 0.0
         self._mapping_suppress_until = 0.0
@@ -249,6 +298,7 @@ class MqttBridge(Node):
             GetParameters, '/base_bridge/get_parameters')
         self.create_timer(2.0, self._poll_manual_flag)
         self.create_subscription(String, '/explore/state', self._on_nav, 10)
+        self.create_subscription(String, '/explore/progress', self._on_progress, 10)
 
         if mqtt is None:
             raise RuntimeError('缺少 paho-mqtt，请 pip install paho-mqtt')
@@ -386,6 +436,14 @@ class MqttBridge(Node):
                 self._manual = bool(res.values[0].bool_value)
         except Exception:                        # noqa: BLE001
             pass
+
+    def _on_progress(self, msg):
+        try:
+            data = json.loads(msg.data)
+            self._leg = int(data.get('leg', 0))
+            self._legs = int(data.get('total', 0))
+        except (ValueError, TypeError, AttributeError):
+            return
 
     def _on_nav(self, msg):
         self._nav = msg.data
@@ -1124,7 +1182,8 @@ class MqttBridge(Node):
                                       self._nav, self._fault, self._armed,
                                       self._ready, self._manual,
                                       self._current_map_name(),
-                                      self._speed, self._yaw_rate)
+                                      self._speed, self._yaw_rate,
+                                      self._leg, self._legs)
         self._client.publish(self._topic_state, payload, qos=0)
 
     def _publish_event(self, kind: str, data: dict):

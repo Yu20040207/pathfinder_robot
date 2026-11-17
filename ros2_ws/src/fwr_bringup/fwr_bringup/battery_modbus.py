@@ -149,6 +149,7 @@ class BatteryModbus(Node):
 
         self._zero_count = 0
         self._v_history = []
+        self._charging = False
         if not self._mock:
             self._open()
         period = 1.0 / max(0.1, float(self.get_parameter('poll_hz').value))
@@ -279,20 +280,20 @@ class BatteryModbus(Node):
         msg.capacity = float('nan')
         msg.design_capacity = float('nan')
         msg.percentage = percent_from_pack(voltage, self._cells)
-        charging_v = float(self.get_parameter('charging_voltage').value)
-        # 趋势判定：5 分钟内电压上升 >0.1V 也视为充电
+        # 充电判定：只看"电压相对近 10 分钟峰值的变化"，避免满电静置被误判
         now_s = time.monotonic()
         self._v_history.append((now_s, float(voltage)))
-        while self._v_history and now_s - self._v_history[0][0] > 300:
+        while self._v_history and now_s - self._v_history[0][0] > 600:
             self._v_history.pop(0)
-        # 趋势判定要求电压已接近充电区间，避免 19.0→19.2 这种跳变误判
-        rising = (len(self._v_history) > 1 and
-                  voltage >= 23.0 and
-                  voltage - self._v_history[0][1] >= 0.2)
-        # 拔掉充电器后电压会从峰值回落：低于 5 分钟峰值 0.15V 以上就不算充电
-        peak = max(v for _t, v in self._v_history) if self._v_history else voltage
-        falling = voltage <= peak - 0.15
-        if voltage >= charging_v and not falling and (rising or True):
+        prev_peak = (max(v for _t, v in self._v_history[:-1])
+                     if len(self._v_history) > 1 else voltage)
+        if voltage >= prev_peak + 0.15:
+            # 电压被抬高（充电器接入）
+            self._charging = True
+        elif voltage <= prev_peak - 0.20:
+            # 电压回落（拔掉充电器 / 负载拉低）
+            self._charging = False
+        if self._charging:
             msg.power_supply_status = BatteryState.POWER_SUPPLY_STATUS_CHARGING
         else:
             msg.power_supply_status = BatteryState.POWER_SUPPLY_STATUS_DISCHARGING

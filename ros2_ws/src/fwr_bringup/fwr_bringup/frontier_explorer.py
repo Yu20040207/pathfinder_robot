@@ -1,4 +1,5 @@
 """Explicitly started Nav2 frontier client. It never owns the motor link."""
+import json
 import math
 import time
 
@@ -174,6 +175,9 @@ class FrontierExplorer(Node):
         self._status = 'idle'
         self._last_xy = None
         self._state_pub = self.create_publisher(String, '/explore/state', 10)
+        self._progress_pub = self.create_publisher(String, '/explore/progress', 10)
+        self._last_progress = ''
+        self._progress_at = 0.0
         # 2026-11-16（用户要求）：断流/暂停这类状态要在面板状态栏显示，恢复后自动继续。
         self._notice_pub = self.create_publisher(String, '/explore/notice', 10)
         self._goal_pub = self.create_publisher(PoseStamped, '/explore/goal', 10)
@@ -270,6 +274,32 @@ class FrontierExplorer(Node):
         """监控最后一次放行非零指令的时刻。"""
         if abs(msg.linear.x) > 1e-3 or abs(msg.angular.z) > 1e-3:
             self._fwd_nz_at = time.monotonic()
+
+    def _publish_progress(self) -> None:
+        """发布当前航点进度（手机端显示"正在前往第 N/M 个航点"）。"""
+        try:
+            total = int(getattr(self._sm, 'fixed_legs', 0) or 0)
+            raw_idx = int(getattr(self._sm, 'fixed_leg_index', 0) or 0)
+        except (AttributeError, TypeError):
+            return
+        if not self._fixed_goals or total <= 1:
+            body = json.dumps({'leg': 0, 'total': 0})
+        else:
+            # 优先用"当前正在前往的目标"编号（暂停恢复后也准确）
+            idx = raw_idx
+            target = getattr(self, '_active_target', None)
+            if isinstance(target, dict) and 'idx' in target:
+                try:
+                    idx = int(target['idx'])
+                except (TypeError, ValueError):
+                    pass
+            leg = min(total, max(0, idx) + 1)
+            body = json.dumps({'leg': leg, 'total': total})
+        now = time.monotonic()
+        if body != self._last_progress or now - self._progress_at > 0.5:
+            self._last_progress = body
+            self._progress_at = now
+            self._progress_pub.publish(String(data=body))
 
     def _trip(self, reason: str) -> None:
         """记录"任务为什么停下"（2026-11-05 用户要求：静默中止全部打日志）。
@@ -998,6 +1028,7 @@ class FrontierExplorer(Node):
         state = String()
         state.data = decision.state
         self._state_pub.publish(state)
+        self._publish_progress()
         if decision.action == 'cancel':
             if self._handle:
                 self._cancel_goal()
