@@ -91,7 +91,8 @@ def reverse_steering(x: float, y: float, yaw: float,
 def should_start(*, blocked_for_s: float, side_left_m: float, side_right_m: float,
                  rear_blocked: bool, trail_len_m: float, since_last_s: float,
                  blocked_s: float = 1.0, side_tight_m: float = 0.5,
-                 min_trail_m: float = 0.5, cooldown_s: float = 5.0) -> tuple[bool, str]:
+                 min_trail_m: float = 0.5, cooldown_s: float = 5.0,
+                 turn_tight: bool = False) -> tuple[bool, str]:
     """是否该开始后退让位。返回 (是否触发, 原因)。
 
     2026-11-05 修正判定方向：要求**左右两侧都窄**（用 max 比），
@@ -101,9 +102,16 @@ def should_start(*, blocked_for_s: float, side_left_m: float, side_right_m: floa
     """
     if rear_blocked:
         return False, 'rear-blocked'
-    if max(side_left_m, side_right_m) >= side_tight_m:
+    if turn_tight:
+        # 2026-11-18：转弯净空不足是**独立**触发条件。
+        # 原来只认"左右两侧都 <0.5 m"，但现场两侧 0.6~0.8 m、车头还有 0.20 m 时，
+        # 原地/大角度转弯照样把车角蹭到墙 —— 车角扫掠半径 0.35 m 比侧向净空还大。
+        # turn_tight 由调用方按"角速度够大 + 侧向净空 < 阈值"累计判定，
+        # 持续时间也由调用方把关，所以这里跳过 blocked/side 两道检查。
+        pass
+    elif max(side_left_m, side_right_m) >= side_tight_m:
         return False, 'side-clear'
-    if blocked_for_s < blocked_s:
+    elif blocked_for_s < blocked_s:
         return False, 'not-blocked-long-enough'
     if trail_len_m < min_trail_m:
         return False, 'trail-too-short'

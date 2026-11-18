@@ -201,3 +201,33 @@ def test_blocked_time_decays_when_clear():
     assert acc == 0.0, '连续 1 s 畅通应当衰减到 0'
     acc = accumulate_blocked(0.0, 100.0, True, unblocked_s=0.0)
     assert acc == 5.0, '必须有上限，避免长时间累加后一直触发'
+
+
+def test_turn_tight_bypasses_side_clear_requirement():
+    """转弯净空不足时，即使两侧不是"都窄"也要允许沿轨迹倒车。
+
+    2026-11-18 现场：两侧 0.6~0.8 m（不满足"都 <0.5 m"），车头还有 0.20 m，
+    可是原地大角度转弯照样把车角蹭到墙（车角扫掠半径 0.35 m）。
+    """
+    from fwr_bringup.trail_reverser_core import should_start
+    base = dict(side_left_m=0.8, side_right_m=0.7, rear_blocked=False,
+                trail_len_m=3.0, since_last_s=99.0, blocked_for_s=0.0)
+    ok, why = should_start(**base)
+    assert not ok and why == 'side-clear', '两侧开阔时不该退'
+    ok, why = should_start(**base, turn_tight=True)
+    assert ok, f'转弯净空不足必须能触发倒车，实际 {why}'
+    # 车尾被堵时依然禁止
+    ok, why = should_start(**{**base, 'rear_blocked': True}, turn_tight=True)
+    assert not ok and why == 'rear-blocked'
+
+
+def test_turn_guard_requires_turning_and_tight_sides():
+    """守卫必须同时满足"在转弯"和"侧向窄"，直行过门不能误触发。"""
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / 'fwr_bringup' /
+           'trail_reverser.py').read_text()
+    i = src.index('def _tight_turn_guard')
+    block = src[i:i + 1800]
+    assert 'angular.z) >= radps' in block, '必须要求角速度够大'
+    assert '_lateral_clearance() < need' in block, '必须要求侧向净空不足'
+    assert 'turn_max_attempts' in block, '必须有次数上限，防止反复退'

@@ -47,6 +47,14 @@ class TrailReverser(Node):
         # 2026-11-18：转弯让位（要转大角度但车头贴太近 → 直线后退一点腾空间）
         self.declare_parameter('turn_backup_enabled', True)
         self.declare_parameter('turn_blocked_s', 0.5)
+        # 2026-11-18（用户批准方案 A）：转弯净空守卫。
+        # 现场两次都是"转弯时车角蹭墙"：front_stop 内边缘 0.40 m > 车角半径 0.35 m，
+        # 多边形只覆盖正前 ±28.8°，转弯时角部完全没保护；把半宽加到 0.24 又会
+        # 过门误停车（42 次实测）。所以改成行为侧拦截：想转但两侧太窄就先退出去。
+        self.declare_parameter('turn_guard_enabled', True)
+        self.declare_parameter('turn_guard_radps', 0.30)    # 角速度超过它算"在转弯"
+        self.declare_parameter('turn_guard_lateral_m', 0.45)  # 侧向净空低于它转不开
+        self.declare_parameter('turn_guard_s', 0.6)         # 持续这么久才动作（防空触发）
         self.declare_parameter('turn_front_close_m', 0.45)
         # 车尾至少要够退「turn_backup_dist_m 的一部分 + 余量」，否则不许起步
         self.declare_parameter('turn_rear_need_m', 0.55)
@@ -104,6 +112,8 @@ class TrailReverser(Node):
         # 不到 0.8 s → 车一直转，2.9 s 后车角才蹭上墙。
         self._blocked_acc = 0.0
         self._unblocked_run = 0.0
+        self._turn_tight_acc = 0.0
+        self._turn_wide_run = 0.0
         self._tick_at = None
         self._rearm_at = None
         self._rearm_tries = 0
@@ -151,6 +161,23 @@ class TrailReverser(Node):
         self._filtered_cmd = msg
 
     # ---------- 工具 ----------
+    def _lateral_clearance(self) -> float:
+        """车身左右两侧（雷达 ±60°~±120°）的最小净空 [m]。
+
+        用来判断"这里转得开吗"：车角扫掠半径 = |(0.30, 0.18)| = 0.35 m，
+        所以侧向净空必须 > 0.35 m + 余量才允许大角度转弯。
+        """
+        if self._scan is None:
+            return float('inf')
+        lo = float('inf')
+        for i, r in enumerate(self._scan.ranges):
+            if not (math.isfinite(r) and r > 0.05):
+                continue
+            a = math.degrees(self._scan.angle_min + i * self._scan.angle_increment)
+            if 60.0 <= abs(a) <= 120.0:
+                lo = min(lo, r)
+        return lo
+
     def _side_clearance(self) -> tuple[float, float]:
         """左右前扇区各自的最小净空（雷达倒装：150~180 左前，-180~-150 右前）。
 
@@ -242,14 +269,17 @@ class TrailReverser(Node):
     def _maybe_start(self, now: float) -> None:
         if self._pose is None or self._scan is None:
             return
+        dt = 0.0 if self._tick_at is None else max(0.0, now - self._tick_at)
+        self._tick_at = now
         raw = self._raw_cmd
         filt = self._filtered_cmd
+        # 转弯净空守卫要在"指令被压零"之前判断（它是在**移动中**转弯时触发）
+        if self._tight_turn_guard(now, raw, dt):
+            return
         wants_motion = bool(raw and abs(raw.linear.x) + abs(raw.angular.z) > 0.02)
         stopped = bool(filt and abs(filt.linear.x) + abs(filt.angular.z) < 0.01)
         # 累计"被挡"时长：挡住时累加，放行时按 2 倍速衰减（不清零）。
         # 这样"停一下/放行一下"的抖动也能攒够 blocked_s，让位能及时启动。
-        dt = 0.0 if self._tick_at is None else max(0.0, now - self._tick_at)
-        self._tick_at = now
         if wants_motion and stopped:
             self._unblocked_run = 0.0
         else:
@@ -294,22 +324,66 @@ class TrailReverser(Node):
             # 沿轨迹倒车不适用 → 再看"短退让位"（两侧开阔时才有意义）
             self._try_turn_backup(now, raw, front_min)
             return
+        self.get_logger().warn(
+            '前方被挡且左右都不足 %.1f m（实测 左 %.2f / 右 %.2f m）→ 开始沿原路后退' % (
+                float(self.get_parameter('side_tight_m').value), left, right))
+        self._begin_trail_reverse(now)
+
+    def _begin_trail_reverse(self, now: float) -> None:
+        """启动"沿原路倒车"（死胡同 / 转弯净空不足共用）。"""
         self._reversing = True
         self._tick_at = None
         self._blocked_acc = 0.0
         self._unblocked_run = 0.0
+        self._turn_tight_acc = 0.0
         self._mode = 'deadend'
         # 记住倒车前的自动授权状态，结束时恢复（否则 Nav2 接不上）
         self._armed_before = self._auto_armed
         self._started_at = now
         self._start_pose = self._pose
         self._reversed_m = 0.0
-        self._blocked_acc = 0.0
         self._set_manual(True)
         self._active_pub.publish(Bool(data=True))
+
+    def _tight_turn_guard(self, now: float, raw, dt: float) -> bool:
+        """转弯净空守卫：想转但两侧太窄 → 别转，先沿原路退出去。
+
+        2026-11-18 现场两次都是"转弯时车角蹭墙"：
+          front_stop 内边缘 0.40 m > 车角扫掠半径 0.35 m → 有 5 cm 盲环；
+          多边形只覆盖正前 ±28.8°，转弯时角部完全没保护。
+        加宽多边形会被门框误触发（半宽 0.24 时实测 42 次停车），所以改为
+        **行为拦截**：角速度够大 + 侧向净空 < 0.45 m 持续 0.6 s → 判定转不开，
+        沿原路后退（退到左右任一侧 >=0.9 m 才停），而不是硬转过去蹭墙。
+        """
+        if not bool(self.get_parameter('turn_guard_enabled').value):
+            return False
+        if self._pose is None or self._scan is None or raw is None:
+            self._turn_tight_acc = 0.0
+            return False
+        radps = float(self.get_parameter('turn_guard_radps').value)
+        need = float(self.get_parameter('turn_guard_lateral_m').value)
+        tight = abs(raw.angular.z) >= radps and self._lateral_clearance() < need
+        self._turn_wide_run = 0.0 if tight else self._turn_wide_run + dt
+        self._turn_tight_acc = tb.accumulate_blocked(
+            self._turn_tight_acc, dt, tight, self._turn_wide_run)
+        if self._turn_tight_acc < float(self.get_parameter('turn_guard_s').value):
+            return False
+        if self._rear_blocked:
+            return False
+        if self._trail.length() < 0.5:
+            return False
+        if now - self._last_end < float(self.get_parameter('cooldown_s').value):
+            return False
+        if self._turn_attempts >= int(self.get_parameter('turn_max_attempts').value):
+            # 同一个点已经让位够多次了，别再退 —— 交给 Nav2 的卡住检测/换目标
+            return False
         self.get_logger().warn(
-            '前方被挡且左右都不足 %.1f m（实测 左 %.2f / 右 %.2f m）→ 开始沿原路后退' % (
-                float(self.get_parameter('side_tight_m').value), left, right))
+            '想转弯但侧向净空仅 %.2f m（< %.2f m，车角扫掠半径 0.35 m）→ '
+            '转不开，先沿原路后退让位' % (
+                self._lateral_clearance(), need))
+        self._turn_attempts += 1
+        self._begin_trail_reverse(now)
+        return True
 
     def _try_turn_backup(self, now: float, raw, front_min: float) -> bool:
         """要转大角度但车头贴太近 → 直线后退一点腾出转弯空间。"""
