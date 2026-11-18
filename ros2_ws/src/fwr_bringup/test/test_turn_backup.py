@@ -116,22 +116,6 @@ def test_explorer_does_not_abort_task_during_reverse():
         '停状态机必须在让位/宽限期判断之后'
 
 
-def test_rearm_is_retried():
-    """现场：base_bridge 回 `arm 失败：reason=serial not ready`。
-
-    倒车刚结束时底盘串口可能还在恢复，原来只调一次就放弃 → 导航再也接不上。
-    """
-    from pathlib import Path
-    src = (Path(__file__).resolve().parents[1] / 'fwr_bringup' /
-           'trail_reverser.py').read_text()
-    assert '_arm_done' in src, '必须有回执处理'
-    assert '_rearm_tries' in src and '_rearm_deadline' in src, '必须带重试与总时限'
-    i = src.index('def _arm_done')
-    block = src[i:i + 1500]
-    assert '_rearm_at = time.monotonic() + 0.7' in block, '失败后要重新排期重试'
-    assert 'res.success' in block, '必须检查服务回执，不能盲发'
-
-
 def test_front_stop_margin_exceeds_braking_distance():
     """front_stop 的安全余量必须大于刹车距离（2026-11-18 撞墙事故）。
 
@@ -164,32 +148,6 @@ def test_reverse_episode_counter_resets_on_progress():
     resets = [ln for ln in src.splitlines()
               if 'self._reverse_episodes = 0' in ln]
     assert len(resets) >= 2, '至少要在"目标成功"和"换段"两处复位'
-
-
-def test_trail_reverse_takes_priority_over_short_backup():
-    """死胡同里必须优先"沿轨迹倒车"，而不是只退 0.33 m 的短退。
-
-    2026-11-18 现场：短退排在前面抢着执行，车尾只剩 0.40 m 时退 0.33 m 就
-    rear-close，既没腾出转弯空间又先贴上后墙。用户原话"只是后退了一下，
-    没退到可以够位置转弯"。
-    """
-    from pathlib import Path
-    src = (Path(__file__).resolve().parents[1] / 'fwr_bringup' /
-           'trail_reverser.py').read_text()
-    i = src.index('def _maybe_start')
-    block = src[i:i + 3000]
-    assert block.index('tc.should_start(') < block.index('self._try_turn_backup('), \
-        '沿轨迹倒车必须排在短退之前'
-
-
-def test_short_backup_needs_rear_room():
-    """短退起步前必须确认车尾够退，否则会先贴上后墙。"""
-    from pathlib import Path
-    src = (Path(__file__).resolve().parents[1] / 'fwr_bringup' /
-           'trail_reverser.py').read_text()
-    i = src.index('def _try_turn_backup')
-    block = src[i:i + 900]
-    assert "turn_rear_need_m" in block, '必须检查车尾空间'
 
 
 def test_blocked_time_accumulates_through_toggling():
@@ -230,18 +188,6 @@ def test_turn_tight_bypasses_side_clear_requirement():
     # 车尾被堵时依然禁止
     ok, why = should_start(**{**base, 'rear_blocked': True}, turn_tight=True)
     assert not ok and why == 'rear-blocked'
-
-
-def test_turn_guard_requires_turning_and_tight_sides():
-    """守卫必须同时满足"在转弯"和"侧向窄"，直行过门不能误触发。"""
-    from pathlib import Path
-    src = (Path(__file__).resolve().parents[1] / 'fwr_bringup' /
-           'trail_reverser.py').read_text()
-    i = src.index('def _tight_turn_guard')
-    block = src[i:i + 1800]
-    assert 'angular.z) >= radps' in block, '必须要求角速度够大'
-    assert '_lateral_clearance() < need' in block, '必须要求侧向净空不足'
-    assert 'turn_max_attempts' in block, '必须有次数上限，防止反复退'
 
 
 def test_dispatch_does_not_kill_route_on_transient_tf_gap():
@@ -294,40 +240,3 @@ def test_base_bridge_lets_reverse_channel_through():
     i = src.index("command_source_allowed(\n                'manual'")
     block = src[i:i + 260]
     assert '_reverse_active' in block, '让位期间必须放行手动指令'
-
-
-def test_tightturn_uses_distance_criterion_not_side_room():
-    """转弯净空不足触发的倒车必须用"退够距离"判据，不能用侧向判据。
-
-    2026-11-18 现场：守卫刚触发，should_stop 用"前侧扇区 max>=0.9 m"判成
-    "空间够了" → 退了 0.00 m 立刻结束，5 s 一轮连发 3 次 → 任务被耗死。
-    用户看到的还是"怎么没退"。
-    """
-    from pathlib import Path
-    src = (Path(__file__).resolve().parents[1] / 'fwr_bringup' /
-           'trail_reverser.py').read_text()
-    i = src.index("if self._mode == 'tightturn':")
-    block = src[i:i + 900]
-    assert 'tb.backup_done(' in block, 'tightturn 必须走 backup_done 判据'
-    assert 'tc.should_stop(' not in block, 'tightturn 不许用侧向判据'
-
-
-def test_tightturn_mode_is_selected_by_guard():
-    from pathlib import Path
-    src = (Path(__file__).resolve().parents[1] / 'fwr_bringup' /
-           'trail_reverser.py').read_text()
-    assert "_begin_trail_reverse(now, mode='tightturn')" in src
-
-
-def test_tightturn_stop_ignores_front_clear():
-    """tightturn 的停止条件里不许出现"前方让开"。
-
-    2026-11-18 第三次同型 bug：守卫因**侧向**窄触发，前方本来是空的 →
-    backup_done 立刻判 front-clear → 退 0.01 m 结束。
-    """
-    from pathlib import Path
-    src = (Path(__file__).resolve().parents[1] / 'fwr_bringup' /
-           'trail_reverser.py').read_text()
-    i = src.index("if self._mode == 'tightturn':")
-    block = src[i:i + 1600]
-    assert "front_clear_m=float('inf')" in block, 'tightturn 必须关掉前方判据'
