@@ -225,3 +225,25 @@ def test_front_clear_keeps_nav_direction():
 def test_both_sides_tight_cannot_turn():
     """两侧都不够宽 → 不允许转（交给后退让位）。"""
     assert choose_rotate_side(True, 0.10, 0.12) is None
+
+
+def test_no_pointless_backup_when_one_side_is_tight():
+    """现场 2026-11-18 17:06：左 1.14 / 右 0.43 → 不该退。
+
+    用户批准的改动：turn_need_m 0.45 → 0.40（车角扫掠 0.35 + 5 cm）。
+    0.45 时这里会退 3 cm、停 2~3 s，纯属白折腾。
+    """
+    ok, why = wants_backup(want_turn=True, blocked_for_s=0.0, front_m=0.90,
+                           lat_left_m=1.14, lat_right_m=0.43,
+                           rear_min_m=2.13, rear_blocked=False,
+                           attempts=0, since_last_s=99.0)
+    assert not ok and why == 'can-turn'
+
+
+def test_still_backs_up_when_both_sides_under_040():
+    """两侧都 <0.40 才是真的转不开 → 必须后退（用户原话）。"""
+    ok, why = wants_backup(want_turn=True, blocked_for_s=0.0, front_m=0.90,
+                           lat_left_m=0.39, lat_right_m=0.36,
+                           rear_min_m=1.20, rear_blocked=False,
+                           attempts=0, since_last_s=99.0)
+    assert ok and why == 'turn-too-tight'

@@ -22,13 +22,13 @@ def lateral_ok(lat_left_m: float, lat_right_m: float, need_m: float) -> bool:
     """左右两侧是否**都**够宽（能就地大角度转）。
 
     车身四角到中心 = |(0.30, 0.18)| = 0.35 m 是原地转的扫掠半径，
-    need_m 默认 0.45 起（0.35 + 10 cm 余量）。
+    need_m 默认 0.40（0.35 + 5 cm 余量；0.45 会白退，见 trail_reverser）。
     """
     return min(lat_left_m, lat_right_m) >= need_m
 
 
 def can_turn(lat_left_m: float, lat_right_m: float, front_m: float,
-             turn_need_m: float = 0.45, front_need_m: float = 0.45) -> bool:
+             turn_need_m: float = 0.40, front_need_m: float = 0.45) -> bool:
     """现在就能就地转吗（不需要先退）。"""
     return (lateral_ok(lat_left_m, lat_right_m, turn_need_m)
             and front_m >= front_need_m)
@@ -38,7 +38,7 @@ def wants_backup(*, want_turn: bool, blocked_for_s: float, front_m: float,
                  lat_left_m: float, lat_right_m: float,
                  rear_min_m: float, rear_blocked: bool,
                  attempts: int, since_last_s: float,
-                 turn_need_m: float = 0.45, front_need_m: float = 0.45,
+                 turn_need_m: float = 0.40, front_need_m: float = 0.45,
                  rear_need_m: float = 0.55, blocked_s: float = 0.5,
                  max_attempts: int = 3,
                  cooldown_s: float = 3.0) -> tuple[bool, str]:
@@ -71,7 +71,7 @@ def wants_backup(*, want_turn: bool, blocked_for_s: float, front_m: float,
 def backup_done(*, backed_m: float, elapsed_s: float,
                 lat_left_m: float, lat_right_m: float, front_m: float,
                 rear_min_m: float, rear_blocked: bool,
-                turn_need_m: float = 0.45, front_need_m: float = 0.45,
+                turn_need_m: float = 0.40, front_need_m: float = 0.45,
                 dist_m: float = 0.80, max_s: float = 12.0,
                 rear_stop_m: float = 0.20) -> tuple[bool, str]:
     """后退该停了吗。返回 (是否结束, 原因)。

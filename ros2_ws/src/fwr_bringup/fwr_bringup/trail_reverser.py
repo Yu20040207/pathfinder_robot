@@ -45,7 +45,11 @@ class TrailReverser(Node):
         self.declare_parameter('max_s', 10.0)             # 安全上限
         self.declare_parameter('cooldown_s', 5.0)
         # ---- 2026-11-18 统一判据（用户："执行前就判断好是后退还是直接转弯"）----
-        self.declare_parameter('turn_need_m', 0.45)     # 两侧都要 >= 它才能就地转
+        self.declare_parameter('turn_need_m', 0.40)     # 两侧都要 >= 它才能就地转
+        # 0.45 → 0.40（2026-11-18 用户批准）：车角扫掠半径实测 0.35 m，
+        # 0.45 多留 10 cm 导致「左 1.14 / 右 0.43」也判成转不开 →
+        # 白退 3 cm、停 2~3 s。0.40 = 0.35 + 5 cm 余量，符合用户
+        # 「任一侧够宽就直接转，只有两侧都不够才后退」的要求。
         self.declare_parameter('front_need_m', 0.45)    # 前方也要 >= 它
         self.declare_parameter('rear_need_m', 0.55)     # 车尾要退得动
         self.declare_parameter('turn_intent_radps', 0.20)  # 多少算"想转弯"
