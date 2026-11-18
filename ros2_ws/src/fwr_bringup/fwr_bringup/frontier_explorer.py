@@ -169,6 +169,7 @@ class FrontierExplorer(Node):
         # 这段宽限期里的 manual_enabled 消息仍属让位，不算人接管。
         self._reverse_grace_until = 0.0
         self._reverse_manual_log_at = 0.0
+        self._tf_gap_log_at = 0.0
         self._reverse_episodes = 0
         self._mission_suspended = False
         self._paused_for_sensor = False
@@ -1383,7 +1384,16 @@ class FrontierExplorer(Node):
             return
         mapped = self._odom_in_map(self._odom)
         if mapped is None:
-            self._sm.stop()
+            # 2026-11-18 现场：让位结束、状态机刚回到 idle 的下一帧，如果这一帧
+            # 恰好拿不到 map→base 的 TF（AMCL 的 map→odom 有重发间隔），原来会
+            # 直接 self._sm.stop() **静默**杀掉整条路线 —— 现象就是
+            # "后退让位结束 → 恢复任务" 0.17 s 后 enabled 变 False、路线没了。
+            # TF 只是这一帧缺失，下一帧就回来了，所以现在只跳过本帧并限流告警。
+            mono = time.monotonic()
+            if mono - self._tf_gap_log_at > 2.0:
+                self._tf_gap_log_at = mono
+                self.get_logger().warn(
+                    '暂时拿不到 map→base 的 TF → 本帧不派发（不结束任务），下一帧再试')
             return
         pose = PoseStamped()
         pose.pose = mapped.pose.pose

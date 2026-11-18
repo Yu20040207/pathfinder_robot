@@ -231,3 +231,28 @@ def test_turn_guard_requires_turning_and_tight_sides():
     assert 'angular.z) >= radps' in block, '必须要求角速度够大'
     assert '_lateral_clearance() < need' in block, '必须要求侧向净空不足'
     assert 'turn_max_attempts' in block, '必须有次数上限，防止反复退'
+
+
+def test_dispatch_does_not_kill_route_on_transient_tf_gap():
+    """一帧拿不到 map→base 的 TF 不能把整条路线停掉（2026-11-18 现场）。
+
+    现象：让位结束"恢复任务"后 0.17 s，enabled 变 False、路线消失 ——
+    因为 _dispatch 里 mapped is None 时直接 self._sm.stop()，而且静默。
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / 'fwr_bringup' /
+           'frontier_explorer.py').read_text()
+    lines = src.splitlines()
+    disp = next(i for i, ln in enumerate(lines)
+                if ln.strip().startswith('def _dispatch'))
+    start = next(i for i in range(disp, len(lines))
+                 if 'if mapped is None:' in lines[i])
+    body = []
+    for ln in lines[start + 1:]:
+        if ln.strip() and len(ln) - len(ln.lstrip()) <= 8:
+            break                      # 缩进回到方法级别 = if 块结束
+        body.append(ln)
+    code = [ln for ln in body if not ln.strip().startswith('#')]
+    block = '\n'.join(code)
+    assert 'self._sm.stop()' not in block, 'TF 缺失时不许停状态机'
+    assert '下一帧再试' in block, '应只跳过本帧并限流告警'
