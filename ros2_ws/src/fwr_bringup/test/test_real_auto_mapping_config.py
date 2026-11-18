@@ -86,10 +86,21 @@ def test_mapping_scan_is_separate_from_raw_safety_scan():
     navigation = (ROOT / 'launch' / 'real_navigation.launch.py').read_text()
     slam = yaml.safe_load((ROOT / 'config' / 'real_slam.yaml').read_text())
     nav = yaml.safe_load((ROOT / 'config' / 'real_nav2.yaml').read_text())
-    assert mapping.count("executable='scan_mapping_filter'") == 1
+    # 2026-11-18 双雷达：车头 + 车尾各一个滤镜实例（共 2 个）。
+    # 护栏的实质不变：建图/代价地图吃**滤波后**的话题，安全链吃**原始** /scan。
+    assert mapping.count("executable='scan_mapping_filter'") == 2
+    assert "'scan_mapping_filter_rear'" in mapping
     assert slam['slam_toolbox']['ros__parameters']['scan_topic'] == '/scan_mapping'
     for key in ('local_costmap', 'global_costmap'):
-        assert nav[key][key]['ros__parameters']['obstacle_layer']['scan']['topic'] == '/scan_mapping'
+        obstacle = nav[key][key]['ros__parameters']['obstacle_layer']
+        assert obstacle['scan']['topic'] == '/scan_mapping'
+        assert obstacle['scan_rear']['topic'] == '/scan_rear_mapping'
+        # 两路都必须是 data_type LaserScan，防止误配成 pointcloud 静默失效
+        assert obstacle['scan']['data_type'] == 'LaserScan'
+        assert obstacle['scan_rear']['data_type'] == 'LaserScan'
+    # 后雷达驱动不能抢 /scan（车头那一路仍供单雷达回退与安全链使用）
+    assert "name='sllidar_node_rear'" in mapping
+    assert "remappings=[('scan', '/scan_rear')]" in mapping
     assert "'scan_topic': '/scan'" in navigation
     assert '/scan_mapping' in (ROOT / 'config' / 'real_mapping.rviz').read_text()
     for direction in ('forward', 'reverse'):

@@ -25,6 +25,10 @@ def generate_launch_description():
         # 2026-11-12：雷达可以由外部看门狗独占（start_lidar:=false），
         # 避免 launch 与看门狗同时开串口 → sllidar_node 死锁在 futex 上、/scan 断流。
         DeclareLaunchArgument('start_lidar', default_value='true'),
+        # 2026-11-18：后雷达（第二只 C1）。start_rear_lidar:=false 可单独关掉，
+        # 便于回退到单雷达方案做 A/B 对比。
+        DeclareLaunchArgument('start_rear_lidar', default_value='true'),
+        DeclareLaunchArgument('lidar_rear_port', default_value='/dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_Controller_14da82d39131f111a0eb945f30d20014-if00-port0'),
         DeclareLaunchArgument('slam_executable', default_value='async_slam_toolbox_node'),
         DeclareLaunchArgument('slam_map_topic', default_value='/map',
                               description='SLAM 地图话题（手机建图用 /slam_map 避免混入其它节点的 /map）'),
@@ -54,6 +58,31 @@ def generate_launch_description():
                           # 现阶段雷达暂放车顶（自击只有 7°），220° 偏保守但更接近最终状态。
                           # 两路各 220°，并集仍完整 360°（重叠 80°）。
                           'rear_half_angle_rad': math.radians(70.0)}]),
+
+        # ---- 2026-11-18 双雷达：后雷达驱动 ----
+        # 与车头那只同型号（C1），frame=laser_rear，话题 remap 到 /scan_rear，
+        # 不占用 /scan（车头那路仍供单雷达回退使用）。
+        Node(package='sllidar_ros2', executable='sllidar_node', name='sllidar_node_rear',
+             condition=IfCondition(LaunchConfiguration('start_rear_lidar')),
+             output='screen', parameters=[{
+                 'channel_type': 'serial',
+                 'serial_port': LaunchConfiguration('lidar_rear_port'),
+                 'serial_baudrate': 460800, 'frame_id': 'laser_rear',
+                 'inverted': False, 'angle_compensate': True,
+                 'scan_mode': 'Standard', 'use_sim_time': use_sim_time,
+             }],
+             remappings=[('scan', '/scan_rear')]),
+        # 第二路遮罩：同一节点换个实例，用绝对名 remap 到后雷达话题。
+        # 遮罩同样 0°±70°（两只雷达的 scan 0 都指向车体内部）。
+        Node(package='fwr_bringup', executable='scan_mapping_filter',
+             name='scan_mapping_filter_rear',
+             condition=IfCondition(LaunchConfiguration('start_rear_lidar')),
+             output='screen',
+             parameters=[{'use_sim_time': use_sim_time,
+                          'rear_half_angle_rad': math.radians(70.0)}],
+             remappings=[('/scan', '/scan_rear'),
+                         ('/scan_mapping', '/scan_rear_mapping'),
+                         ('/scan_mapping/healthy', '/scan_rear_mapping/healthy')]),
         Node(package='robot_state_publisher', executable='robot_state_publisher',
              name='robot_state_publisher', output='screen',
              parameters=[{'robot_description': description, 'use_sim_time': use_sim_time}]),

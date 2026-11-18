@@ -38,6 +38,7 @@ def generate_launch_description():
                         '-configuration_basename', 'fwr_2d.lua'],
              parameters=[{'use_sim_time': use_sim_time}],
              remappings=[('scan', '/scan_mapping'),
+                         ('scan_1', '/scan_rear_mapping'),
                          ('odom', '/odom'),
                          ('imu', '/imu/data_raw')]),
         # 加载 pbstream 续建（两个独立参数，避免被当成一个 argv）
@@ -50,6 +51,7 @@ def generate_launch_description():
                         '-load_state_filename', LaunchConfiguration('load_state')],
              parameters=[{'use_sim_time': use_sim_time}],
              remappings=[('scan', '/scan_mapping'),
+                         ('scan_1', '/scan_rear_mapping'),
                          ('odom', '/odom'),
                          ('imu', '/imu/data_raw')]),
         Node(package='cartographer_ros', executable='cartographer_occupancy_grid_node',

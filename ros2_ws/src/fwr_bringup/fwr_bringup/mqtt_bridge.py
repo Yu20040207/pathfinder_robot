@@ -74,11 +74,11 @@ def parse_command(payload: bytes, max_linear: float, max_angular: float):
     if not (math.isfinite(linear) and math.isfinite(angular)):
         return None
     seq = obj.get('seq')
-    ttl_ms = obj.get('ttl_ms', 300)
+    ttl_ms = obj.get('ttl_ms', 800)
     try:
         ttl_ms = max(0, min(2000, int(ttl_ms)))
     except (TypeError, ValueError):
-        ttl_ms = 300
+        ttl_ms = 800
     return {
         'seq': seq if isinstance(seq, int) else None,
         'linear': clamp(linear, max_linear),

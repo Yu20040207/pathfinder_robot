@@ -21,7 +21,10 @@ options = {
   use_odometry = false,
   use_nav_sat = false,
   use_landmarks = false,
-  num_laser_scans = 1,
+  -- 2026-11-18 双雷达：scan=/scan_mapping（车头），scan_1=/scan_rear_mapping（车尾）。
+-- 用 Cartographer 原生多路而不是 merge 节点：两路各按自身时间戳插入，
+-- 旋转时不会因 0~100 ms 相位差产生重影（100 ms × 0.55 rad/s ≈ 3.15°，2 m 处 110 mm）。
+num_laser_scans = 2,
   num_multi_echo_laser_scans = 0,
   num_subdivisions_per_laser_scan = 1,
   num_point_clouds = 0,
