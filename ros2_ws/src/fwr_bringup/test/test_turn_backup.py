@@ -294,3 +294,25 @@ def test_reverse_active_opens_manual_channel_itself():
     block = src[j:j + 3000]
     assert '_reverse_active)' in block and 'manual_ok' in block
     assert "or self._reverse_active" in block
+
+
+def test_reverse_steering_is_capped():
+    """倒车时必须压小转向，否则 v=-0.08/w=-0.5 变成原地打转、退 0.00 m。
+
+    2026-11-18 现场："左转了一下然后停住"。实测轮速 左 -14.5 / 右 -145.5 mm/s，
+    几乎只是绕车心转，位移始终 0.00 m，12 s 后 timeout。
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / 'fwr_bringup' /
+           'trail_reverser.py').read_text()
+    assert "declare_parameter('reverse_max_w'" in src
+    i = src.index('reverse_steering(x, y, yaw')
+    assert 'min(max_w' in src[i - 400:i + 300], '倒车转向必须限幅'
+
+
+def test_capped_reverse_still_moves_backwards():
+    """限幅后两个轮子都必须是负速度（真的往后退，不是打转）。"""
+    v, w, track = -0.08, -0.15, 0.262
+    left = 1000.0 * (v - w * track / 2.0)
+    right = 1000.0 * (v + w * track / 2.0)
+    assert left < -20 and right < -20, (left, right)

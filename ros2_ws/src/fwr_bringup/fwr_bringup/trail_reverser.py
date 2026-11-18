@@ -37,6 +37,8 @@ class TrailReverser(Node):
     def __init__(self) -> None:
         super().__init__('trail_reverser')
         self.declare_parameter('enabled', True)
+        # 倒车时的最大角速度：太大就变成原地打转（v=-0.08/w=-0.5 实测退 0.00 m）
+        self.declare_parameter('reverse_max_w', 0.15)
         self.declare_parameter('reverse_speed_mps', 0.08)
         self.declare_parameter('blocked_s', 1.0)          # 前方被挡多久才介入
         self.declare_parameter('side_tight_m', 0.5)       # 触发：左右都要小于它
@@ -436,8 +438,15 @@ class TrailReverser(Node):
             float(self.get_parameter('target_back_m').value))
         cmd = Twist()
         cmd.linear.x = -abs(float(self.get_parameter('reverse_speed_mps').value))
-        cmd.angular.z = (0.0 if tgt is None else
-                         tc.reverse_steering(x, y, yaw, tgt[0], tgt[1]))
+        # 2026-11-18 现场（"左转了一下然后停住"）：后退时的转向没有限幅，
+        # reverse_steering 的 max_w 是 0.5 rad/s，航向差 19° 就饱和 ——
+        # v=-0.08 / w=-0.5 算出的轮速是 左 -14.5 / 右 -145.5 mm/s，
+        # 等于**原地打转**，位移始终 0.00 m，最后 timeout 判"退了 0.00 m"。
+        # 倒车要以"真的退出去"为第一目标，转向必须压小。
+        max_w = float(self.get_parameter('reverse_max_w').value)
+        cmd.angular.z = (0.0 if tgt is None else max(
+            -max_w, min(max_w,
+                        tc.reverse_steering(x, y, yaw, tgt[0], tgt[1]))))
         self._cmd.publish(cmd)
         self.get_logger().info(
             f'[reverse] 发布 v={cmd.linear.x:.3f} w={cmd.angular.z:.3f} '
