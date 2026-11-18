@@ -56,6 +56,8 @@ class TrailReverser(Node):
         self.declare_parameter('turn_guard_lateral_m', 0.45)  # 侧向净空低于它转不开
         self.declare_parameter('turn_guard_s', 0.6)         # 持续这么久才动作（防空触发）
         self.declare_parameter('turn_front_close_m', 0.45)
+        # 直行也顶到这么近（雷达原始距离）就算"走不通"，允许后退让位
+        self.declare_parameter('turn_front_panic_m', 0.30)
         # 车尾至少要够退「turn_backup_dist_m 的一部分 + 余量」，否则不许起步
         self.declare_parameter('turn_rear_need_m', 0.55)
         # 退到前方净空 >= turn_backup_clear_m 为止；dist/max_s 只是兜底上限
@@ -406,6 +408,7 @@ class TrailReverser(Node):
             since_last_s=now - self._turn_last_end,
             blocked_s=float(self.get_parameter('turn_blocked_s').value),
             front_close_m=float(self.get_parameter('turn_front_close_m').value),
+            front_panic_m=float(self.get_parameter('turn_front_panic_m').value),
             rear_need_m=float(self.get_parameter('turn_rear_need_m').value),
             max_attempts=int(self.get_parameter('turn_max_attempts').value),
             cooldown_s=float(self.get_parameter('turn_cooldown_s').value))

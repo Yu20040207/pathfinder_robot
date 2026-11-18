@@ -25,6 +25,7 @@ def wants_backup(blocked_for_s: float,
                  blocked_s: float = 0.8,
                  turn_intent_radps: float = 0.15,
                  front_close_m: float = 0.45,
+                 front_panic_m: float = 0.30,
                  rear_need_m: float = 0.35,
                  max_attempts: int = 3,
                  cooldown_s: float = 3.0) -> tuple[bool, str]:
@@ -37,15 +38,21 @@ def wants_backup(blocked_for_s: float,
         return False, 'rear-blocked'
     if rear_min_m < rear_need_m:
         return False, 'rear-tight'
-    # 必须是"想转弯"而不是"想直走"：直走被挡是死胡同那套逻辑管的
-    if abs(raw_angular) < turn_intent_radps:
+    # 2026-11-18（现场"卡住不退"）：原来必须是"想转弯"才退。但现场 Nav2 在发
+    # 直行(ω=0)撞进真实障碍（车头前 0.44 m），而左右只有一侧窄 ——
+    # "沿轨迹倒车"要求两侧都 <0.5 m、"转弯让位"要求有转弯意图，两条都不满足，
+    # 车就顶着墙干等 46 s 直到目标失败。现在直行但已经顶到跟前（<= front_panic_m）
+    # 也算一种"走不通"，允许后退让出空间让 Nav2 重新规划绕行。
+    turning = abs(raw_angular) >= turn_intent_radps
+    panic = front_min_m <= front_panic_m
+    if not (turning or panic):
         return False, 'not-turn-intent'
     if blocked_for_s < blocked_s:
         return False, 'not-blocked-long-enough'
     # 只有**车头确实太近**才值得后退；否则后退也解决不了（可能是侧向被卡）
     if front_min_m > front_close_m:
         return False, 'front-not-close'
-    return True, 'turn-blocked-front-close'
+    return True, 'turn-blocked-front-close' if turning else 'straight-panic'
 
 
 def backup_done(backed_m: float,

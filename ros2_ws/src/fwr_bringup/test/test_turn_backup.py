@@ -15,10 +15,21 @@ def test_backs_up_when_front_close_and_turning():
     assert ok and why == 'turn-blocked-front-close'
 
 
-def test_no_backup_for_straight_motion():
-    """想直走被挡是死胡同那套逻辑管的，这里不能抢。"""
+def test_no_backup_for_straight_motion_when_front_not_panic():
+    """直走被挡、但车头还不算贴脸 → 不抢（死胡同那套逻辑管）。"""
     ok, why = wants_backup(**{**BASE, 'raw_angular': 0.02})
     assert not ok and why == 'not-turn-intent'
+
+
+def test_backs_up_when_straight_and_front_panic():
+    """直行被挡到跟前也要退 —— 2026-11-18 现场"卡住不退"的根因。
+
+    现场：Nav2 发 x=0.2 z=0.0 直行，车头 0.44 m 有真实障碍，一侧空 0.73 m、
+    另侧贴墙 0.17 m、车尾 1.20 m 空旷。沿轨迹倒车要求"两侧都 <0.5 m"不满足，
+    转弯让位要求"有转弯意图"也不满足 → 车顶着墙干等 46 s。
+    """
+    ok, why = wants_backup(**{**BASE, 'raw_angular': 0.0, 'front_min_m': 0.23})
+    assert ok and why == 'straight-panic'
 
 
 def test_no_backup_when_front_is_far():
