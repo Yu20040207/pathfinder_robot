@@ -28,6 +28,8 @@ def generate_launch_description():
         # 2026-11-18：后雷达（第二只 C1）。start_rear_lidar:=false 可单独关掉，
         # 便于回退到单雷达方案做 A/B 对比。
         DeclareLaunchArgument('start_rear_lidar', default_value='true'),
+        # 2026-11-18 用户要求：车尾改用后雷达，超声先不用（可 start_ultrasonic:=true 切回）
+        DeclareLaunchArgument('start_ultrasonic', default_value='false'),
         DeclareLaunchArgument('lidar_rear_port', default_value='/dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_Controller_14da82d39131f111a0eb945f30d20014-if00-port0'),
         DeclareLaunchArgument('slam_executable', default_value='async_slam_toolbox_node'),
         DeclareLaunchArgument('slam_map_topic', default_value='/map',
@@ -137,14 +139,23 @@ def generate_launch_description():
         Node(package='fwr_bringup', executable='slam_map_save',
              name='slam_map_save', output='screen',
              parameters=[{'map_topic': LaunchConfiguration('slam_map_topic')}]),
-        # 后向四路 A22 超声（DYP-E08 / RS485）：发布 4 路 Range
+        # 后向四路 A22 超声（DYP-E08 / RS485）：发布 4 路 Range。
+        # 2026-11-18：车尾已有后雷达（200° 视场、水平面测距、比超声可靠），
+        # 默认不再启动超声；需要时 start_ultrasonic:=true 切回。
         Node(package='fwr_bringup', executable='ultrasonic_rear',
              name='ultrasonic_rear', output='screen',
+             condition=IfCondition(LaunchConfiguration('start_ultrasonic')),
              parameters=[{'use_sim_time': use_sim_time}]),
-        # 车尾超声守卫：近障时禁止后退（不产生任何前进/倒车指令）
+        # 车尾守卫：近障时禁止后退（不产生任何前进/倒车指令）。
+        # 源默认改成后雷达的正后方 ±35° 扇区；source:=ultrasonic 可切回超声。
         Node(package='fwr_bringup', executable='rear_guard',
              name='rear_guard', output='screen',
-             parameters=[{'use_sim_time': use_sim_time}]),
+             parameters=[{'use_sim_time': use_sim_time,
+                          'source': PythonExpression([
+                              "'ultrasonic' if '",
+                              LaunchConfiguration('start_ultrasonic'),
+                              "' == 'true' else 'lidar'"]),
+                          'scan_topic': '/scan_rear_mapping'}]),
         # 四只探头的静态 TF（安装见 docs/hardware/rear-a22-ultrasonic-layout.md）
         Node(package='tf2_ros', executable='static_transform_publisher',
              name='tf_ultrasonic_rear_left_out', output='log',

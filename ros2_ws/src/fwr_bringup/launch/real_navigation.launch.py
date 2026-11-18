@@ -55,7 +55,9 @@ def generate_launch_description():
         DeclareLaunchArgument('start_explorer', default_value='true'),
         # 2026-11-05：后退让位（前方被挡 + 左右都 <0.5 m 时沿原路后退到够转弯）。
         # 默认 false，实车验证通过后再改默认值。
-        DeclareLaunchArgument('trail_reverser', default_value='false'),
+        # 2026-11-18 用户要求：双雷达到位后启用"沿原轨迹倒车"脱困。
+        # 车尾安全由 rear_guard 用后雷达正后方扇区守着（不再是超声）。
+        DeclareLaunchArgument('trail_reverser', default_value='true'),
         # amcl（地图图片）或 slam（slam_toolbox localization + posegraph）
         DeclareLaunchArgument('localizer', default_value='amcl'),
         DeclareLaunchArgument('map', default_value=str(share / 'maps' / 'real_map_merged.yaml')),

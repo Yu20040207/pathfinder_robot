@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""后退近障停车守卫：车尾四路超声低于阈值时，禁止后退。
+"""后退近障停车守卫：车尾近障时禁止后退。
+
+2026-11-18：车尾源从"四路超声"改为"后雷达"（source=lidar，默认）。
+超声路径保留，`source:=ultrasonic` 可切回。
 
 只做"不许后退"，**不产生任何前进/自动倒车指令**（车尾盲区是结构性限制，
 自动倒车许可需要单独验收，见 docs/hardware/rear-a22-ultrasonic-handoff.md）。
@@ -14,12 +17,17 @@
   /base/rear_blocked  (std_msgs/Bool)  true = 禁止后退
   /base/rear_status   (std_msgs/String) 便于现场诊断
 """
+import math
 import statistics
 
 import rclpy
+from sensor_msgs.msg import LaserScan
 from rclpy.node import Node
 from sensor_msgs.msg import Range
+from rclpy.qos import QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Bool, String
+
+from .rear_guard_core import sector_min_range
 
 NAMES = ('left_out', 'left_in', 'right_in', 'right_out')
 
@@ -39,6 +47,10 @@ def update_hits(median_m, stop_m, resume_m, hits, confirm):
 class RearGuard(Node):
     def __init__(self) -> None:
         super().__init__('rear_guard')
+        # 2026-11-18：车尾源。lidar = 后雷达正后方扇区（默认，替代超声）
+        self.declare_parameter('source', 'lidar')
+        self.declare_parameter('scan_topic', '/scan_rear_mapping')
+        self.declare_parameter('sector_half_deg', 35.0)
         self.declare_parameter('stop_m', 0.15)
         self.declare_parameter('resume_m', 0.45)      # 滞后：离开到这么远才解除
         self.declare_parameter('median_window', 5)
@@ -65,21 +77,51 @@ class RearGuard(Node):
         self._active = {n: False for n in NAMES}
         self._outer_blocks = bool(self.get_parameter('outer_blocks').value)
 
-        for name in NAMES:
+        self._source = str(self.get_parameter('source').value)
+        self._scan = None
+        self._scan_at = 0.0
+        if self._source == 'lidar':
+            qos = QoSProfile(depth=5, reliability=ReliabilityPolicy.BEST_EFFORT)
             self.create_subscription(
-                Range, f'/ultrasonic_rear/{name}',
-                lambda msg, n=name: self._on_range(n, msg), 10)
+                LaserScan, str(self.get_parameter('scan_topic').value),
+                self._on_scan, qos)
+        else:
+            for name in NAMES:
+                self.create_subscription(
+                    Range, f'/ultrasonic_rear/{name}',
+                    lambda msg, n=name: self._on_range(n, msg), 10)
         self._pub = self.create_publisher(
             Bool, str(self.get_parameter('blocked_topic').value), 10)
         self._status = self.create_publisher(
             String, str(self.get_parameter('status_topic').value), 10)
         self.create_timer(0.05, self._tick)          # 20 Hz，跟底盘指令同频
         self.get_logger().info(
-            f'后退守卫启动：stop {self._stop:.2f} m / resume {self._resume:.2f} m '
+            f'后退守卫启动：源={self._source} / stop {self._stop:.2f} m / resume {self._resume:.2f} m '
             f'/ 中位 {self._window} 帧 / 连续 {self._confirm} 帧确认')
 
     def _now(self) -> float:
         return self.get_clock().now().nanoseconds * 1e-9
+
+    def _on_scan(self, msg: LaserScan) -> None:
+        self._scan = msg
+        self._scan_at = self._now()
+
+    def _lidar_blocked(self) -> tuple[bool, str]:
+        """后雷达：正后方扇区最近距离 → 是否禁止后退（带滞回 + 过期 fail-safe）。"""
+        now = self._now()
+        fresh = self._scan is not None and (now - self._scan_at) <= self._stale
+        if not fresh:
+            return bool(self.get_parameter('fail_safe_block').value), 'scan=stale'
+        m = self._scan
+        d = sector_min_range(m.ranges, m.angle_min, m.angle_increment,
+                             180.0, float(self.get_parameter('sector_half_deg').value))
+        if not math.isfinite(d):
+            # 扇区内没有回波 = 后方空旷（或全被遮罩）→ 不拦，但记录
+            self._hits['lidar'] = 0 if hasattr(self, '_hits') else 0
+            return False, 'scan=open'
+        self._hits['lidar'], hit = update_hits(
+            d, self._stop, self._resume, self._hits.get('lidar', 0), self._confirm)
+        return hit, f'scan={d:.2f}{"!" if hit else ""}'
 
     def _on_range(self, name: str, msg: Range) -> None:
         self._last[name] = self._now()
@@ -89,6 +131,19 @@ class RearGuard(Node):
             del buf[0]
 
     def _tick(self) -> None:
+        if self._source == 'lidar':
+            blocked, detail = self._lidar_blocked()
+            if blocked != self._blocked:
+                self._blocked = blocked
+                self.get_logger().warn(
+                    '后退被禁止（车尾近障）' if blocked else '后退已解除')
+            msg = Bool()
+            msg.data = self._blocked
+            self._pub.publish(msg)
+            status = String()
+            status.data = ('blocked=' if self._blocked else 'free=') + detail
+            self._status.publish(status)
+            return
         now = self._now()
         blocked = False
         degraded = False

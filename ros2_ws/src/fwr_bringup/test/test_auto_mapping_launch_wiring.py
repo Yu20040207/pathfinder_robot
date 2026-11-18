@@ -158,14 +158,23 @@ def test_stuck_guard_recovers_base_faults_without_motion():
     assert 'Twist' not in src, '守卫节点仍然不得直接发速度指令'
 
 
-def test_trail_reverser_is_wired_and_off_by_default():
-    """后退让位：默认关闭、沿轨迹退、车尾拦截优先。"""
+def test_trail_reverser_is_wired_and_gateable():
+    """后退让位：必须能在启动时关掉、沿轨迹退、车尾拦截优先。
+
+    2026-11-18：默认值从 false 改成 true（用户明确要求启用"胡同脱困"），
+    但护栏要守住的三条安全属性不变：
+      1) 仍然有 launch 开关可以关掉（trail_reverser:=false）
+      2) 倒车走 /cmd_vel_manual（车尾联锁才生效）
+      3) 仍然受 /base/rear_blocked 拦截（现在由后雷达驱动，不再是超声）
+    """
     launch = NAV_LAUNCH.read_text()
-    assert "DeclareLaunchArgument('trail_reverser', default_value='false')" in launch
+    assert "DeclareLaunchArgument('trail_reverser', default_value='true')" in launch
     assert "executable='trail_reverser'" in launch
+    assert "condition=IfCondition(LaunchConfiguration('trail_reverser'))" in launch, \
+        '必须保留启动开关，出事能一键关'
     src = (ROOT / 'fwr_bringup' / 'trail_reverser.py').read_text()
     assert '/cmd_vel_manual' in src, '倒车要走手动通道，车尾联锁才生效'
-    assert "'/base/rear_blocked'" in src, '必须用车尾超声拦截'
+    assert "'/base/rear_blocked'" in src, '必须用车尾拦截（后雷达经 rear_guard 发布）'
     assert 'target_behind' in src, '必须沿原路后退（不是盲目直退）'
     assert 'reverse_speed_mps' in src
 
