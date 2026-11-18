@@ -53,12 +53,12 @@ Visualization Manager:
       Plane Cell Count: 30
       Value: true
     - Class: rviz_default_plugins/Map
-      Name: Live SLAM map
+      Name: Live SLAM map (downsampled)
       Enabled: true
       Alpha: 0.75
       Topic:
-        Value: /map
-        Durability Policy: Transient Local
+        Value: /map_view
+        Durability Policy: Volatile
         Reliability Policy: Best Effort
         History Policy: Keep Last
         Depth: 1

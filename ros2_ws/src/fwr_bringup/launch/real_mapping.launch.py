@@ -111,6 +111,17 @@ def generate_launch_description():
                          {'scan_topic': PythonExpression([
                              "'/scan_merged' if '", LaunchConfiguration('start_rear_lidar'),
                              "' == 'true' else '/scan_mapping'"])}]),
+        # 给 RViz 看的降采样地图：slam_toolbox 的 /map 是 Reliable+TransientLocal、
+        # 一帧 149 KB，RViz 在 WiFi 上做可靠消费者会触发重传风暴（实测放大 23 倍、
+        # 遥控明显卡顿）。这路改成 1/2 降采样 + 0.5 Hz + Best Effort。
+        Node(package='fwr_bringup', executable='map_view', name='map_view',
+             condition=IfCondition(LaunchConfiguration('start_slam')),
+             output='screen',
+             parameters=[{'use_sim_time': use_sim_time,
+                          'in_topic': LaunchConfiguration('slam_map_topic'),
+                          'out_topic': '/map_view',
+                          'downsample_factor': 2,
+                          'period_s': 2.0}]),
         # RViz「保存地图」按钮的服务：一次保存 .posegraph/.data + .pgm/.yaml。
         # 目录默认取 FWR_MAP_DIR（start_manual_mapping.sh 会设为源码 maps/），
         # 未设置时保存到 ~/robot_maps。
