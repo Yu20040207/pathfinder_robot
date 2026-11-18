@@ -14,7 +14,8 @@ from nav_msgs.msg import OccupancyGrid
 from sensor_msgs.msg import LaserScan
 from nav2_msgs.srv import SetInitialPose
 
-from .auto_seed_core import base_pose_from_laser, pose_laser_to_base, find_best_pose, refine_pose
+from .auto_seed_core import (base_pose_from_laser, clearance_mask,
+                             find_best_pose, pose_laser_to_base, refine_pose)
 
 
 class AutoInitialPose(Node):
@@ -60,6 +61,8 @@ class AutoInitialPose(Node):
         self._started = time.monotonic()
         self._seeded = False
         self._manual_pose_seen = False
+        self._used_checkpoint = False
+        self._mask_cache = None
         self._gave_up = False
         self._tf_buffer = tf2_ros.Buffer()
         self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
@@ -71,6 +74,26 @@ class AutoInitialPose(Node):
         if not self._seeded:
             self.get_logger().info(
                 '用户已手动设置位姿 → 自动播种放弃（不再覆盖）')
+
+    def _scan_to_base_tf(self):
+        """返回 (tx, ty, tyaw)：base_footprint ← 扫描坐标系 的平面外参。
+
+        搜索时需要它，才能把"雷达候选位置"换算成"车体位置"再查净空掩码
+        （前雷达装在车头前方 0.21 m，两者不是同一个点）。
+        """
+        frame = 'laser_front'
+        if self._scan is not None:
+            frame = self._scan.header.frame_id or 'laser_front'
+        try:
+            tr = self._tf_buffer.lookup_transform('base_footprint', frame, rclpy.time.Time())
+            t = tr.transform.translation
+            qq = tr.transform.rotation
+            tyaw = math.atan2(2.0 * (qq.w * qq.z + qq.x * qq.y),
+                              1.0 - 2.0 * (qq.y * qq.y + qq.z * qq.z))
+            return (t.x, t.y, tyaw)
+        except Exception:                                   # noqa: BLE001
+            off = float(self.get_parameter('laser_offset_m').value)
+            return (off, 0.0, math.pi)
 
     def _to_base_pose(self, x: float, y: float, yaw: float):
         """匹配位姿（雷达坐标系）→ base 位姿。
@@ -128,6 +151,15 @@ class AutoInitialPose(Node):
         unknown = float((grid[iy[inside], ix[inside]] < 0).mean())
         return on_wall, unknown
 
+    def _clearance(self):
+        """"车能停在这里"的掩码，按地图缓存（地图不变就不用重算）。"""
+        if self._mask_cache is not None:
+            return self._mask_cache
+        m = self._map
+        grid = np.asarray(m.data, dtype=np.int16).reshape(m.info.height, m.info.width)
+        self._mask_cache = clearance_mask(grid, m.info.resolution, 0.10)
+        return self._mask_cache
+
     def _pose_is_sane(self, x, y) -> tuple[bool, str]:
         """拒绝退化匹配：匹配位置必须在地图的**空闲区**且离障碍有净空。
 
@@ -164,12 +196,12 @@ class AutoInitialPose(Node):
             response.message = '还没有地图或激光数据'
             return response
         try:
-            score, x, y, yaw = self._match()
+            score, x, y, yaw, base = self._match_or_global()
         except Exception as exc:                       # noqa: BLE001
             response.success = False
             response.message = '匹配失败: %s' % exc
             return response
-        base_x, base_y, base_yaw = self._to_base_pose(x, y, yaw)
+        base_x, base_y, base_yaw = base
         on_wall, unknown_frac = self._scan_overlap(x, y, yaw)
         sane, why = self._pose_is_sane(base_x, base_y)
         if sane and on_wall < float(self.get_parameter('min_wall_overlap').value):
@@ -243,12 +275,11 @@ class AutoInitialPose(Node):
                     'slam localization mode does not need this node')
                 self._gave_up = True
             return
-        score, x, y, yaw = self._match()
+        score, x, y, yaw, base = self._match_or_global()
         if score > 9.0:
             self.get_logger().error('auto initial pose: global match failed')
             return
-        base_x, base_y, base_yaw = base_pose_from_laser(
-            x, y, yaw, float(self.get_parameter('laser_offset_m').value))
+        base_x, base_y, base_yaw = base
         limit = float(self.get_parameter('max_score_m').value)
         if score > limit:
             # 匹配不可信时不要覆盖 AMCL 位姿（覆盖反而制造 kidnap），
@@ -310,7 +341,7 @@ class AutoInitialPose(Node):
             for i, r in enumerate(scan.ranges)
             if math.isfinite(r) and 0.05 < r < limit])
 
-    def _match(self):
+    def _match(self, force_global: bool = False):
         info = self._map.info
         width, height, resolution = info.width, info.height, info.resolution
         origin_x, origin_y = info.origin.position.x, info.origin.position.y
@@ -320,13 +351,18 @@ class AutoInitialPose(Node):
             self.get_logger().error(f'auto initial pose: only {len(points)} scan points')
             return 9.9, 0.0, 0.0, 0.0
         # 第一级：用上次位姿做局部细化（车没被搬动时最可靠）。
-        prior = self._checkpoint_laser_pose()
+        self._used_checkpoint = False
+        mask = self._clearance()
+        base_tf = self._scan_to_base_tf()
+        prior = None if force_global else self._checkpoint_laser_pose()
         if prior is not None:
             score, x, y, yaw = refine_pose(
-                occupied, resolution, origin_x, origin_y, points, *prior)
+                occupied, resolution, origin_x, origin_y, points, *prior,
+                valid_mask=mask, base_tf=base_tf)
             if score <= float(self.get_parameter('prior_score_m').value):
                 self.get_logger().info(
                     f'auto initial pose: checkpoint refined (score {score:.3f} m)')
+                self._used_checkpoint = True
                 return score, x, y, yaw
             self.get_logger().warn(
                 f'auto initial pose: checkpoint does not fit (score {score:.3f} m); '
@@ -338,8 +374,30 @@ class AutoInitialPose(Node):
             occupied, resolution, origin_x, origin_y, bounds, points,
             coarse_step=float(self.get_parameter('coarse_step_m').value),
             coarse_yaw_deg=float(self.get_parameter('coarse_yaw_deg').value),
+            valid_mask=mask, base_tf=base_tf,
             fine_step=float(self.get_parameter('fine_step_m').value),
             fine_yaw_deg=float(self.get_parameter('fine_yaw_deg').value))
+
+    def _match_or_global(self):
+        """先按 checkpoint 细化；结果不合法就回退**全图搜索**再试一次。
+
+        2026-11-18 现场：checkpoint 细化出残差 0.039 m 的位姿，但换算成车体位姿后
+        落在**地图障碍格**里（跨墙退化匹配 —— 扫描点正好压在墙面上，位置差一格
+        残差几乎不变）。旧的 _match() 在 checkpoint 分数够好时**直接返回**，
+        后续检查拒绝播种却没有回退，于是全图搜索明明能找到合法位姿
+        (10.36,-8.29) 也用不上 → 永远播不了种 → 没有 map→odom →
+        auto_activate_nav 不激活 Nav2 → 整栈停在 unconfigured。
+
+        返回 (score, x, y, yaw, (base_x, base_y, base_yaw))。
+        """
+        score, x, y, yaw = self._match()
+        base = self._to_base_pose(x, y, yaw)
+        if self._used_checkpoint and not self._pose_is_sane(base[0], base[1])[0]:
+            self.get_logger().warn(
+                'checkpoint 位姿不在地图空闲区（退化匹配）→ 回退全图搜索')
+            score, x, y, yaw = self._match(force_global=True)
+            base = self._to_base_pose(x, y, yaw)
+        return score, x, y, yaw, base
 
     def _send(self, x, y, yaw):
         request = SetInitialPose.Request()

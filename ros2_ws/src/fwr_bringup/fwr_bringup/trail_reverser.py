@@ -25,6 +25,7 @@ from rcl_interfaces.srv import SetParameters
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import LaserScan
+from std_srvs.srv import Trigger
 from std_msgs.msg import Bool
 
 from . import trail_reverser_core as tc
@@ -67,6 +68,17 @@ class TrailReverser(Node):
         self._params = self.create_client(SetParameters, '/base_bridge/set_parameters')
         self.create_subscription(Odometry, '/odom', self._on_odom, 20)
         self.create_subscription(LaserScan, '/scan', self._on_scan, qos_profile_sensor_data)
+        # 2026-11-18：倒车会把手动通道打开 → base_bridge 会撤销自动授权
+        # （_on_velocity 里 manual_enabled=True → _auto_armed=False、_permit.abort()）。
+        # 如果不还回去，倒车结束后 Nav2 的指令全被 "not _auto_armed" 拒掉 = 车不动，
+        # 表面看是"倒出来就卡住了"。这里记录倒车前的授权状态，结束时按原样恢复。
+        self.declare_parameter('restore_auto_arm', True)
+        self.declare_parameter('restore_arm_delay_s', 0.6)
+        self._auto_armed = False
+        self._armed_before = False
+        self._rearm_at = None
+        self._arm_client = self.create_client(Trigger, '/base/arm_auto')
+        self.create_subscription(Bool, '/base/auto_armed', self._on_auto_armed, 10)
         self.create_subscription(Bool, '/base/rear_blocked',
                                  lambda m: setattr(self, '_rear_blocked', bool(m.data)), 10)
         self.create_subscription(Twist, '/cmd_vel_auto_unchecked', self._on_raw, 20)
@@ -85,6 +97,9 @@ class TrailReverser(Node):
         p = msg.pose.pose.position
         self._pose = (p.x, p.y, yaw)
         self._trail.append(p.x, p.y)
+
+    def _on_auto_armed(self, msg: Bool) -> None:
+        self._auto_armed = bool(msg.data)
 
     def _on_scan(self, msg: LaserScan) -> None:
         self._scan = msg
@@ -138,7 +153,18 @@ class TrailReverser(Node):
         if self._reversing:
             self._step_reverse(now)
             return
+        if self._rearm_at is not None and now >= self._rearm_at:
+            self._rearm_at = None
+            self._restore_arm()
         self._maybe_start(now)
+
+    def _restore_arm(self) -> None:
+        """把倒车时撤销的自动授权还回去，让 Nav2 能接着跑原来的目标。"""
+        if not self._arm_client.service_is_ready():
+            self.get_logger().warn('倒车结束但 /base/arm_auto 不可用 → 需要手动重新开始导航')
+            return
+        self._arm_client.call_async(Trigger.Request())
+        self.get_logger().info('倒车结束 → 已请求恢复自动授权（Nav2 可继续原目标）')
 
     def _maybe_start(self, now: float) -> None:
         if self._pose is None or self._scan is None:
@@ -166,6 +192,8 @@ class TrailReverser(Node):
         if not ok:
             return
         self._reversing = True
+        # 记住倒车前的自动授权状态，结束时恢复（否则 Nav2 接不上）
+        self._armed_before = self._auto_armed
         self._started_at = now
         self._start_pose = self._pose
         self._reversed_m = 0.0
@@ -203,6 +231,11 @@ class TrailReverser(Node):
     def _finish(self, why: str, side: float) -> None:
         self._stop_cmd()
         self._set_manual(False)
+        # manual_enabled 是异步参数服务，等它落地后再恢复自动授权
+        if (self._armed_before
+                and bool(self.get_parameter('restore_auto_arm').value)):
+            self._rearm_at = time.monotonic() + float(
+                self.get_parameter('restore_arm_delay_s').value)
         self._publish_inactive()
         self._reversing = False
         self._last_end = time.monotonic()

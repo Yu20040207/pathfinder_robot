@@ -32,9 +32,28 @@ def score_pose(distance, resolution, origin_x, origin_y, points, x, y, yaw):
     return float(distance[iy[inside], ix[inside]].mean())
 
 
+def clearance_mask(grid_values, resolution, clearance_m=0.10, free_value=0):
+    """返回"车能停在这里"的布尔掩码（H×W）。
+
+    要求该格及其 ±clearance 邻域**全部是空闲格**，与 ``_pose_is_sane`` 的判定一致
+    （地图边缘也算不合法）。
+
+    2026-11-18 现场：地图上有多处几乎同分的匹配（走廊对称 + 跨墙），
+    全局搜索只取唯一最优，取到了墙里 → 事后检查拒绝 → 没有位姿 → 播不了种。
+    与其事后拒绝，不如**搜索时就不让候选落在停不进去的位置**。
+    """
+    values = np.asarray(grid_values)
+    free = values == free_value
+    k = max(1, int(round(clearance_m / resolution)))
+    from scipy.ndimage import binary_erosion
+    return binary_erosion(free, structure=np.ones((2 * k + 1, 2 * k + 1), dtype=bool),
+                          border_value=0)
+
+
 def find_best_pose(occupied, resolution, origin_x, origin_y, bounds, points,
                    coarse_step=.3, coarse_yaw_deg=10., fine_step=.04,
-                   fine_yaw_deg=1.0, max_points=80):
+                   fine_yaw_deg=1.0, max_points=80, valid_mask=None,
+                   base_tf=(0.0, 0.0, 0.0)):
     """Coarse-to-fine global search. Returns (score, x, y, yaw_rad).
 
     ``bounds`` is (min_x, max_x, min_y, max_y) in map coordinates.
@@ -80,6 +99,18 @@ def find_best_pose(occupied, resolution, origin_x, origin_y, bounds, points,
         iyc = np.clip(iy, 0, height - 1)
         d = np.where(inside, distance[iyc, ixc], 0.0).sum(axis=1) / np.maximum(counts, 1)
         d = np.where(ok, d, 9.9)
+        if valid_mask is not None:
+            # ⚠️ 掩码必须按**车体位置**判断，不能按雷达位置：
+            # 前雷达装在车头前方 0.21 m，雷达"站得下"不等于车"停得下"。
+            # 之前按雷达位置过滤，结果搜索仍给出车体嵌在墙里的位姿。
+            tx, ty, tyaw = base_tf
+            byaw = yaw - tyaw
+            c2, s2 = math.cos(byaw), math.sin(byaw)
+            bxw = wx - (c2 * tx - s2 * ty)
+            byw = wy - (s2 * tx + c2 * ty)
+            mx = np.clip(((bxw - origin_x) / resolution).astype(np.int32), 0, width - 1)
+            my = np.clip(((byw - origin_y) / resolution).astype(np.int32), 0, height - 1)
+            d = np.where(valid_mask[my, mx], d, 9.9)
         k = int(np.argmin(d))
         if d[k] < best[0]:
             best = (float(d[k]), float(wx[k]), float(wy[k]), float(yaw))
@@ -89,7 +120,8 @@ def find_best_pose(occupied, resolution, origin_x, origin_y, bounds, points,
     score, x, y, yaw = refine_pose(occupied, resolution, origin_x, origin_y, points,
                                    best[1], best[2], best[3],
                                    span_m=coarse_step, span_yaw_deg=coarse_yaw_deg,
-                                   step_m=fine_step, step_yaw_deg=fine_yaw_deg)
+                                   step_m=fine_step, step_yaw_deg=fine_yaw_deg,
+                                   valid_mask=valid_mask, base_tf=base_tf)
     return (score, x, y, yaw)
 
 
@@ -125,14 +157,36 @@ def pose_laser_to_base(x, y, yaw, tx, ty, tyaw):
 
 
 def refine_pose(occupied, resolution, origin_x, origin_y, points, x, y, yaw,
-                span_m=.5, span_yaw_deg=15.0, step_m=.04, step_yaw_deg=1.0):
-    """Local refinement around a prior pose (e.g. the last known checkpoint)."""
+                span_m=.5, span_yaw_deg=15.0, step_m=.04, step_yaw_deg=1.0,
+                valid_mask=None, base_tf=(0.0, 0.0, 0.0)):
+    """Local refinement around a prior pose (e.g. the last known checkpoint).
+
+    ``valid_mask`` 给了就**只在车能停进去的位置**上搜索（细化不能把位姿挪进墙里）。
+    """
     distance = distance_field(occupied, resolution)
     best = (9.9, x, y, yaw)
+    height, width = occupied.shape
+
+    tx, ty, tyaw = base_tf
+
+    def _ok(px, py, pyaw):
+        """按该偏航角对应的**车体位置**判断能不能停。"""
+        if valid_mask is None:
+            return True
+        byaw = pyaw - tyaw
+        c2, s2 = math.cos(byaw), math.sin(byaw)
+        bx = px - (c2 * tx - s2 * ty)
+        by = py - (s2 * tx + c2 * ty)
+        ix = int((bx - origin_x) / resolution)
+        iy = int((by - origin_y) / resolution)
+        return 0 <= ix < width and 0 <= iy < height and bool(valid_mask[iy, ix])
+
     yaw_span = math.radians(span_yaw_deg)
     for dx in np.arange(-span_m, span_m + 1e-9, step_m):
         for dy in np.arange(-span_m, span_m + 1e-9, step_m):
             for dth in np.arange(-yaw_span, yaw_span + 1e-9, math.radians(step_yaw_deg)):
+                if not _ok(x + dx, y + dy, yaw + dth):
+                    continue
                 value = score_pose(distance, resolution, origin_x, origin_y,
                                    points, x + dx, y + dy, yaw + dth)
                 if value < best[0]:

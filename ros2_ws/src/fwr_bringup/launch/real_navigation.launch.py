@@ -139,12 +139,16 @@ def generate_launch_description():
         Node(package='fwr_bringup', executable='room_labels', output='screen',
              parameters=[{'use_sim_time': use_sim_time,
                           'rooms_file': str(share / 'maps' / 'rooms.yaml')}]),
+        # 2026-11-18：一键播种固定用**前雷达 200°**（/scan_mapping），不吃 360° 合并扫描。
+        # 原因：1A_map 等老地图是"单前雷达时代"建的，覆盖范围只到前向 200°；
+        # 合并扫描里的后向 200° 会看到地图覆盖范围外的走廊/未知区，那些点落在
+        # unknown 格上被判成"没贴墙"，把贴墙率从 60%+ 压到 57% → 播种被拒
+        # → 没有位姿 → 没有 map→odom → auto_activate_nav 不激活 Nav2 → 整栈不动。
+        # 播种是"地图 vs 扫描"的一次性全局匹配，必须与地图同源；
+        # AMCL 的连续跟踪仍然用 /scan_merged（360°），不受影响。
         Node(package='fwr_bringup', executable='auto_initial_pose', output='screen',
              parameters=[{'use_sim_time': use_sim_time,
-                          'scan_topic': PythonExpression([
-                              "'/scan_merged' if '",
-                              LaunchConfiguration('start_rear_lidar'),
-                              "' == 'true' else '/scan_mapping'"])}]),
+                          'scan_topic': '/scan_mapping'}]),
         Node(package='fwr_bringup', executable='auto_command_gate',
              name='auto_command_gate', output='screen',
              parameters=[{'use_sim_time': use_sim_time}]),
