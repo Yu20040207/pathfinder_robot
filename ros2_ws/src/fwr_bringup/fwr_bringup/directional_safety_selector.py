@@ -294,11 +294,20 @@ class DirectionalSafetySelector(Node):
                 self.get_parameter('near_side_m').value)
             if self._front_min_m >= front_block_m and not still_near:
                 self._escape_active = False          # 前方和侧面都空，交回 Nav2
+            elif not both_ok:
+                # 2026-11-18 现场（"停了一会又前进之后左转，导致左边撞到障碍物"）：
+                # 脱困旋转原来只用 max(左,右) 判"有没有转身空间"，于是一侧
+                # 0.16 m 贴墙、另一侧 0.67 m 时照样原地转 —— 原地转是绕车心转，
+                # 贴墙那侧的**后角**会直接扫进墙里（扫掠半径 0.35 m）。
+                # 两侧都要够宽才许转；不够就停住，交给后退让位。
+                self._escape_active = False
+                linear_x = 0.0
+                angular_z = 0.0
             else:
                 linear_x = 0.0
                 angular_z = self._escape_dir * float(
                     self.get_parameter('escape_turn_rate').value)
-        elif (wants_motion and escape_blocked
+        elif (wants_motion and escape_blocked and both_ok
               and best_side >= clear and self._is_really_stuck(now)):
             self._escape_active = True
             # 2026-11-02（用户反馈"本该右转却左转"）：

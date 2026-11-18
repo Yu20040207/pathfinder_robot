@@ -289,3 +289,18 @@ def test_selector_poll_never_latches():
     assert '_query_at' in block
     # 服务没就绪时不许 observe(False) —— 那会把热身计时器重置
     assert 'observe_monitor(direction, False' not in block
+
+
+def test_escape_rotation_requires_both_sides():
+    """脱困旋转也必须两侧都够宽，不许"哪边宽就硬往那边转"。
+
+    2026-11-18 现场："停了一会又前进之后左转，导致左边撞到障碍物"。
+    右侧只有 0.16 m 时原地转，右侧后角直接扫进墙（扫掠半径 0.35 m）。
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / 'fwr_bringup' /
+           'directional_safety_selector.py').read_text()
+    i = src.index('# ---- 2026-11-01 卡住脱困 ----')
+    block = src[i:i + 3000]
+    assert 'elif not both_ok:' in block, '脱困旋转必须检查两侧'
+    assert 'escape_blocked and both_ok' in block
