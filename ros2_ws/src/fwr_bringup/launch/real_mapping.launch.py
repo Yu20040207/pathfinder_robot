@@ -120,12 +120,16 @@ def generate_launch_description():
              parameters=[{'use_sim_time': use_sim_time,
                           'in_topic': LaunchConfiguration('slam_map_topic'),
                           'out_topic': '/map_view',
-                          # 2026-11-18：不再降采样（factor 2 → 1）。
-                          # 降采样会把墙每边扩一格：50mm 图的 100mm 墙在 100mm 图上
-                          # 变成 200mm，看起来"墙变粗了"（实测确认）。
-                          # 流量问题已由 Best Effort + 0.5 Hz 解决：
-                          # 149 KB × 0.5 Hz = 75 KB/s，远低于原先重传风暴的 7 MB/s。
+                          # 2026-11-18 结论：**整图 + 50mm 全分辨率**是可行的。
+                          # 关键不是裁小，而是不让 RViz 直接连 slam_toolbox 的 /map
+                          # （那是 Reliable+TransientLocal，149 KB 一帧会在 WiFi 上
+                          # 触发重传风暴，实测 7000+ KB/s）；改由本节点以
+                          # Best Effort+Volatile、0.5 Hz 转发后，整图只要 ~230 KB/s。
+                          # 不降采样（factor 1）是为了墙厚真实：降采样按"占用优先"
+                          # 合并会把 50mm 图上的 100mm 墙显示成 200mm（用户反馈"墙变粗"）。
+                          # crop_window_m=0 表示不裁剪，发整张地图。
                           'downsample_factor': 1,
+                          'crop_window_m': 0.0,
                           'period_s': 2.0}]),
         # RViz「保存地图」按钮的服务：一次保存 .posegraph/.data + .pgm/.yaml。
         # 目录默认取 FWR_MAP_DIR（start_manual_mapping.sh 会设为源码 maps/），

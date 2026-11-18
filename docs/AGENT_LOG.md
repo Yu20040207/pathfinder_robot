@@ -6626,3 +6626,84 @@ fwr-mqtt-bridge.service: inactive（已停）
 fwr-lidar-watchdog     : inactive（已停）
 双雷达建图栈           : 运行中 ✅
 ```
+
+## 2026-11-18 11:30 · 双雷达建图：卡顿根因、墙厚虚粗、视场 200°、整图显示
+
+### 会话目标
+双雷达（前后各一只 RPLIDAR C1）建图落地：改回主控算法、优化操控卡顿、按用户要求调整视场。
+
+### 仓库改动（开发机 `feature/dual-lidar`）
+| 提交 | 内容 |
+| --- | --- |
+| `4bc6750` | Cartographer 第 2 路雷达话题是 **`scan_2`** 不是 `scan_1`（两个都 remap）|
+| `8fdc534` | 双雷达建图实机跑通；记录三个 systemd 服务是反复失败的真因 |
+| `f66adbd` | **改用主控原来的 slam_toolbox** + 新增 `scan_merger`（两路 220°→360°）|
+| `b3b209c` | merger 加 `require_both`：等两路都就绪再发布，否则首帧缺半圈 |
+| `7652911` | RViz 双雷达配置；地图显示改 Best Effort |
+| `598c00a` | 遮罩 ±70°→±80°，每路 **200°**，重叠 80°→40° |
+| `22dce52` | 新增 `map_view`（降采样转发）消除 RViz 收地图的卡顿 |
+| `dbddf94` | map_view 改为"保持 50mm + 裁 6m 窗口"（治墙粗）|
+| 本次 | map_view 恢复**整图 + 50mm 全分辨率** |
+
+### 🔑 三个关键结论
+
+**1. 主控一直用的是 slam_toolbox，不是 Cartographer**
+证据：`maps/` 里全是 `.posegraph`（11-16 多次），`~/.carto_maps` 无任何 `.pbstream`。
+slam_toolbox 2.6.10 **只订阅一个 `scan_topic`**，所以双雷达必须合并 →
+新增 `scan_merger`：两路各 200° → 720 格（0.5°/格）合并为一路 360°。
+
+**2. 卡顿根因是 RViz 直接订阅 slam_toolbox 的 `/map`**
+- `/map` 是 Reliable + TransientLocal，一帧 **133~149 KB**
+- WiFi 丢包 → FastDDS 重传 → 机器人发送从 **310 KB/s 放大到 7000+ KB/s**
+- 遥控指令被挤在后面 → 操作卡顿、RViz CPU 46%
+- **解法**：机器人侧 `map_view` 节点本地订阅 `/map`（本地不丢包），
+  以 **Best Effort + Volatile + 0.5 Hz** 转发 `/map_view`，RViz 只看这一路
+- 实测：**7014 → 230 KB/s**，RViz CPU **46% → 27%**
+- ⚠️ **关键洞察**：一开始误以为是"地图太大"，做了 2× 降采样和裁剪，其实**都不需要**。
+  只要 RViz 不直接连 Reliable 的 `/map`，**整张 149 KB 地图也只要 230 KB/s**。
+
+**3. 降采样会让墙"变粗"（用户反馈）**
+2× 降采样按"占用优先"合并 → 每块只要有一个占用格整块就占用 →
+50mm 图上的 100mm 墙在 100mm 图上变成 **200mm**。
+实测：`/map` 墙厚 100mm，降采样版 200mm。
+**最终方案：不降采样（factor=1）、不裁剪（crop_window_m=0）、整图。**
+
+### 视场最终值：**200°/路（遮罩 ±80°）**
+用户从 220°/5°/200° 中选定 200°。调用链：`rear_half_angle_rad: math.radians(80.0)`
+（在 `real_mapping.launch.py` 和 `real_mapping_rtabmap.launch.py` 里各两处）。
+重叠 = 2×200 − 360 = **40°**（原 220° 时 80°）。
+实测：两路 `/scan*_mapping` 均 200°，`/scan_merged` 车头半圆 261 束 / 车尾 305 束。
+
+### 已验证（机器人 fwr-n305）
+```
+/scan 10.0 Hz   /scan_rear 10.1 Hz
+/scan_mapping 200°   /scan_rear_mapping 200°
+/scan_merged 9.0 Hz 536 束   slam_toolbox scan_topic=/scan_merged
+/map_view 281x486 @50mm（14.1x24.3 m, 133 KB）  流量 149~308 KB/s
+地图质量（建完一个房间）：墙厚中位/90% = 100/100 mm，最大 200 mm，
+  双墙窄缝 2.29 m²（单雷达基线 2.63~2.73 m²），空闲 38.5 m²
+测试：365 passed
+```
+
+### 未验证 / 遗留
+1. **`tools/lidar_watchdog.py` 仍会杀后雷达**（`pkill -x sllidar_node`，
+   后雷达 OS 进程名相同）→ 双雷达长期运行前必须改，**否则不能开这个服务**。
+2. 前雷达被反复 SIGKILL 后会静默掉线（无 tty 占用），需物理重插 USB。
+3. 地图生长慢：slam_toolbox `minimum_travel_distance=0.5` /
+   `minimum_travel_heading=0.5` 是防 mapper 崩溃的保守值（上游 issue #642），
+   车不动就不加节点。**这是预期行为**，改小有崩图风险，需用户批准。
+4. `viewpoint_planner.py:263` 仍用 `math.radians(50.0)` 判后方扇区，与 80° 遮罩不一致。
+
+### 当前运行状态
+```
+开发机：rviz2（real_mapping_dual.rviz，整图 /map_view）
+机器人：real_mapping.launch.py（slam_toolbox + 2×sllidar + 2×filter + scan_merger + map_view）
+已停：fwr-nav.service(failed) / fwr-mqtt-bridge.service(inactive) /
+      fwr-lidar-watchdog.service(inactive)   ← 用户要求，等他们说开再开
+motion_enabled / manual_enabled 重启后被重置为 false
+```
+
+### 下一步
+1. 用户手动操控继续建图，验收双雷达地图质量（A/B 对比单雷达）
+2. 改 `lidar_watchdog.py`（不再 `pkill -x`）
+3. 恢复三个 systemd 服务（**需用户明确指示**）
