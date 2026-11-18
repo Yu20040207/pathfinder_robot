@@ -119,3 +119,37 @@ def test_rearm_is_retried():
     block = src[i:i + 1500]
     assert '_rearm_at = time.monotonic() + 0.7' in block, '失败后要重新排期重试'
     assert 'res.success' in block, '必须检查服务回执，不能盲发'
+
+
+def test_front_stop_margin_exceeds_braking_distance():
+    """front_stop 的安全余量必须大于刹车距离（2026-11-18 撞墙事故）。
+
+    现场：车体前缘 0.30 m，front_stop 原来从 0.32 起 → 余量只有 2 cm；
+    而 0.16~0.20 m/s、减速度 0.35 m/s² 的刹车距离是 3.7~5.7 cm，
+    再加 10 Hz 扫描的延迟 —— 物理上必然蹭上。
+    现在要求余量 >= 0.08 m（覆盖 0.20 m/s 的 5.7 cm + 延迟）。
+    """
+    import yaml
+    from pathlib import Path
+    cfg = Path(__file__).resolve().parents[1] / 'config' / 'real_collision_monitor_forward.yaml'
+    fwd = yaml.safe_load(cfg.read_text())['collision_monitor_forward']['ros__parameters']
+    pts = fwd['front_stop']['points']
+    xs = pts[0::2]
+    ys = pts[1::2]
+    margin = min(xs) - 0.30          # 车体前缘在 x=+0.30
+    assert margin >= 0.08, f'front_stop 余量只有 {margin:.2f} m，不足以刹停'
+    assert 0.22 <= max(ys) <= 0.26, '半宽必须保持 0.22（门框不误触发的下限）'
+    assert fwd['front_stop']['action_type'] == 'stop'
+
+
+def test_reverse_episode_counter_resets_on_progress():
+    """让位计数必须会复位，否则累计 3 次后每次让位都直接跳过该段。
+
+    2026-11-18 现场 bug：_reverse_episodes 只有 +=1，从来没有 =0。
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / 'fwr_bringup' /
+           'frontier_explorer.py').read_text()
+    resets = [ln for ln in src.splitlines()
+              if 'self._reverse_episodes = 0' in ln]
+    assert len(resets) >= 2, '至少要在"目标成功"和"换段"两处复位'

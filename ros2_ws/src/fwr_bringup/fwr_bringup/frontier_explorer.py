@@ -168,6 +168,7 @@ class FrontierExplorer(Node):
         # 让位节点关闭手动通道比发 /reverse/active=False 更晚（有个 0.6 s 延时），
         # 这段宽限期里的 manual_enabled 消息仍属让位，不算人接管。
         self._reverse_grace_until = 0.0
+        self._reverse_manual_log_at = 0.0
         self._reverse_episodes = 0
         self._mission_suspended = False
         self._paused_for_sensor = False
@@ -406,6 +407,8 @@ class FrontierExplorer(Node):
         self.get_logger().warn(
             '后退让位结束 → 恢复任务（本点第 %d 次让位，上限 %d）' % (
                 self._reverse_episodes, limit))
+        # 注意：这里**不能**复位计数 —— 复位要等到"真的走出去了"（目标成功/换段），
+        # 否则同一个死胡同里会无限让位。见 _finished / skip_leg。
         if self._reverse_episodes > limit:
             self._skip_current_target(
                 '同一个点连续让位 %d 次（死胡同）' % self._reverse_episodes)
@@ -447,6 +450,7 @@ class FrontierExplorer(Node):
                 self._sm.stop()
                 return
             self._sm.skip_leg()
+            self._reverse_episodes = 0      # 换了新的一段 → 让位计数重新开始
             self.get_logger().warn(
                 '%s → 跳过第 %d 段，继续第 %d/%d 段' % (
                     reason, self._sm.fixed_leg_index,
@@ -470,8 +474,12 @@ class FrontierExplorer(Node):
         # 也会把状态机停掉（让位刚恢复任务的 50 ms 内就踩到了）。
         now = self.get_clock().now().nanoseconds * 1e-9
         if self._reverse_active or now < self._reverse_grace_until:
-            self.get_logger().info(
-                '手动通道由让位节点打开（不是人接管）→ 不停状态机、不中止任务')
+            # base_bridge 在手动通道打开期间会持续重发 /base/manual_enabled（~10 Hz），
+            # 每次都打日志会刷屏（现场一次让位打了十几条）。这里限流。
+            if now - self._reverse_manual_log_at > 2.0:
+                self._reverse_manual_log_at = now
+                self.get_logger().info(
+                    '手动通道由让位节点打开（不是人接管）→ 不停状态机、不中止任务')
             return
         if not was and self._sm.enabled:
             self._trip('manual_enabled 被打开（手动通道接管）')
@@ -1539,6 +1547,12 @@ class FrontierExplorer(Node):
                             'canceled' if status == GoalStatus.STATUS_CANCELED else 'failed')
         except Exception:
             self._status = 'failed'
+        if self._status == 'succeeded':
+            # 2026-11-18 现场 bug：_reverse_episodes 只增不减、从来不复位。
+            # 一次任务里累计让位 3 次之后，后面**每一次**让位都会立刻被判
+            # "同一个点连续让位 3 次（死胡同）" → 跳过该段/结束任务。
+            # 到了目标说明确实走出去了，计数归零。
+            self._reverse_episodes = 0
         if self._status == 'failed':
             now = time.monotonic()
             if self._sm.enabled and self._sensor_loss_recent(now):
