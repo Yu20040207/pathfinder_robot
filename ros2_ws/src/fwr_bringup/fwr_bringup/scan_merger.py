@@ -22,7 +22,7 @@ from rclpy.time import Time
 from sensor_msgs.msg import LaserScan
 from tf2_ros import Buffer, TransformException, TransformListener
 
-from .scan_merger_core import BINS, merge_into_bins
+from .scan_merger_core import choose_sources, BINS, merge_into_bins
 
 
 class ScanMerger(Node):
@@ -41,6 +41,12 @@ class ScanMerger(Node):
         # 原因：slam_toolbox 的 minimum_travel_distance=0.5，车不动时只处理第一帧；
         # 若第一帧只有前雷达（后雷达还在起转），整个地图就永远缺后半圈。
         self.declare_parameter('require_both', True)
+        # 2026-11-18：已经发出过完整 360° 帧之后，若有一路雷达掉线，
+        # 降级用剩下那一路继续发布（单雷达本来就能导航），
+        # 而不是把 /scan_merged 停掉 → AMCL 冻结 → 整个导航瘫痪。
+        self.declare_parameter('fallback_single', True)
+        # 等"完整首帧"的超时：开机就少一路时不能永远等（会冻死定位）
+        self.declare_parameter('wait_first_frame_s', 20.0)
 
         self._target = str(self.get_parameter('target_frame').value)
         self._bins = int(self.get_parameter('bins').value)
@@ -59,6 +65,8 @@ class ScanMerger(Node):
                 LaserScan, topic, lambda m, s=slot: self._on_scan(s, m), qos)
         out_topic = str(self.get_parameter('output_topic').value)
         self._pub = self.create_publisher(LaserScan, out_topic, outs)
+        self._published_full = False
+        self._waiting_since = None
 
         self._tf = Buffer()
         self._tf_listener = TransformListener(self._tf, self)
@@ -96,14 +104,35 @@ class ScanMerger(Node):
                  if s in self._latest and now - self._at.get(s, 0.0) <= self._stale]
         if not fresh:
             return                       # 两路都没数据：不发（避免"全空"误导）
-        if bool(self.get_parameter('require_both').value) and len(fresh) < 2:
-            # 只有一路就绪时先不发布：slam_toolbox 可能只处理第一帧，
-            # 那第一帧必须已经是完整 360°，否则地图会永久缺半圈。
+        if len(fresh) < 2 and self._waiting_since is None:
+            self._waiting_since = now
+        waited = 0.0 if self._waiting_since is None else now - self._waiting_since
+        fresh, mode = choose_sources(
+            fresh, self._published_full,
+            bool(self.get_parameter('require_both').value),
+            bool(self.get_parameter('fallback_single').value),
+            waited, float(self.get_parameter('wait_first_frame_s').value))
+        if mode == 'wait-first-frame':
+            # 还没出过完整帧：slam_toolbox 可能只处理第一帧，那第一帧必须
+            # 已经是完整 360°，否则地图会永久缺半圈。
             if not getattr(self, '_warned_wait', False):
                 self._warned_wait = True
                 self.get_logger().info(
                     f'等待第二路雷达就绪（已有 {fresh}），暂不发布合并扫描')
             return
+        if not fresh:
+            self.get_logger().warn(
+                '合并扫描暂停：可用雷达不足（且不允许单路降级）',
+                throttle_duration_sec=5.0)
+            return
+        if mode == 'degraded':
+            self.get_logger().warn(
+                f'只用 {fresh} 一路雷达（另一路掉线）→ 降级发布单路合并扫描，'
+                '导航可继续但后方覆盖缺失',
+                throttle_duration_sec=5.0)
+        elif self._published_full and getattr(self, '_degraded', False):
+            self.get_logger().info('两路雷达恢复，合并扫描回到完整 360°')
+        self._degraded = (mode == 'degraded')
         pieces = []
         stamps = []
         for slot in fresh:
@@ -128,6 +157,8 @@ class ScanMerger(Node):
         out.range_min = self._rmin
         out.range_max = self._rmax
         out.ranges = merged
+        if len(fresh) >= 2:
+            self._published_full = True
         out.intensities = []
         self._pub.publish(out)
 

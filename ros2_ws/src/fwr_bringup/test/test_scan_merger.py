@@ -69,3 +69,46 @@ def test_two_supplementary_scans_cover_more_than_each():
     one = filled_ratio(merge_into_bins([a], BINS))
     two = filled_ratio(merge_into_bins([a, b], BINS))
     assert two > one
+
+
+# ---------------- 2026-11-18：单路掉线必须降级而不是停发 ----------------
+from fwr_bringup.scan_merger_core import choose_sources
+
+
+def test_full_when_both_fresh():
+    src, mode = choose_sources(['a', 'b'], published_full=True)
+    assert src == ['a', 'b'] and mode == 'full'
+
+
+def test_waits_for_full_first_frame():
+    """启动阶段只来一路时必须等：第一帧不完整会让地图永久缺半圈。"""
+    src, mode = choose_sources(['a'], published_full=False, require_both=True)
+    assert src == [] and mode == 'wait-first-frame'
+
+
+def test_degrades_after_full_frame_published():
+    """现场事故回归：后雷达掉线不能让整个定位跟着死。
+
+    require_both 只在启动阶段有意义；已经出过完整帧后掉一路，
+    必须降级为单路继续发布（单雷达本来就能导航）。
+    """
+    src, mode = choose_sources(['b'], published_full=True, require_both=True)
+    assert src == ['b'], '必须用剩下那一路继续发'
+    assert mode == 'degraded'
+
+
+def test_no_fallback_when_disabled():
+    src, mode = choose_sources(['b'], published_full=True, fallback_single=False)
+    assert src == [] and mode == 'wait-both'
+
+
+def test_first_frame_wait_times_out():
+    """开机就少一路时不能无限等（否则定位永远冻结 → 整车瘫痪）。"""
+    src, mode = choose_sources(['b'], published_full=False, require_both=True,
+                               waited_s=25.0)
+    assert src == ['b'] and mode == 'degraded'
+
+
+def test_no_sources_at_all():
+    src, mode = choose_sources([], published_full=True)
+    assert src == [] and mode == 'none'

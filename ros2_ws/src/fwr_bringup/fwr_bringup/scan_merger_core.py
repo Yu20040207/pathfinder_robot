@@ -88,3 +88,38 @@ def filled_ratio(merged: Iterable[float]) -> float:
     if not values:
         return 0.0
     return sum(1 for v in values if math.isfinite(v)) / len(values)
+
+
+def choose_sources(fresh, published_full, require_both=True, fallback_single=True,
+                   waited_s=0.0, wait_first_frame_s=20.0):
+    """决定这一帧用哪几路扫描，以及当前处于什么模式。
+
+    2026-11-18 现场事故：后雷达 USB 掉线 → 合并节点按 ``require_both`` 停止发布
+    → AMCL 收不到扫描就不再更新、不再发 map→odom → 代价地图拿不到车位置
+    → 规划器报 "Starting point in lethal space" → 行为树进 Spin 恢复
+    → 车在原地一直左转直到目标失败。
+
+    ``require_both`` 的**本意只适用于启动阶段**（第一帧必须是完整 360°，否则
+    slam_toolbox 可能只吃第一帧，地图永久缺半圈）。一旦已经成功发出过完整帧，
+    运行中掉一路应该**降级继续**（单雷达本来就能导航），而不是把定位一起停掉。
+
+    Returns
+    -------
+    (sources, mode)
+        ``sources`` 为空表示这一帧不发布；``mode`` ∈
+        'full' / 'degraded' / 'wait-first-frame' / 'wait-both' / 'none'
+    """
+    fresh = list(fresh)
+    if len(fresh) >= 2:
+        return fresh[:2], 'full'
+    if not fresh:
+        return [], 'none'
+    if not published_full and require_both:
+        # 等完整首帧，但**不能无限等**：万一开机时就少一路（线没插好），
+        # 原来会永远不发布 → 定位冻结 → 整车瘫痪。超时后接受单路降级。
+        if waited_s < wait_first_frame_s:
+            return [], 'wait-first-frame'
+        return (fresh[:1], 'degraded') if fallback_single else ([], 'wait-both')
+    if fallback_single:
+        return fresh[:1], 'degraded'
+    return [], 'wait-both'
