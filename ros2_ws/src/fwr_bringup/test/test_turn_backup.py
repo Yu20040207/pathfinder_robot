@@ -84,3 +84,20 @@ def test_distance_limit_is_bounded():
     import inspect
     sig = inspect.signature(backup_done)
     assert 0.30 <= sig.parameters['dist_m'].default <= 1.00
+
+
+def test_explorer_does_not_abort_task_during_reverse():
+    """让位期间探索器不能把任务杀掉。
+
+    2026-11-18 现场：让位节点打开 manual_enabled → frontier_explorer._on_manual
+    当成"人接管"直接 _trip() 中止整个任务 → 让位结束"恢复任务"时任务已死
+    → 表现"后退了但没有继续导航"。
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / 'fwr_bringup' /
+           'frontier_explorer.py').read_text()
+    i = src.index('def _on_manual')
+    block = src[i:i + 1200]
+    assert '_paused_for_reverse' in block, '让位期间必须跳过中止'
+    assert block.index('_paused_for_reverse') < block.index('_trip('), \
+        '必须先判断让位状态，再决定是否中止'

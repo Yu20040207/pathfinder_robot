@@ -455,6 +455,16 @@ class FrontierExplorer(Node):
         self._manual = msg.data
         if self._manual:
             if not was and self._sm.enabled:
+                if self._paused_for_reverse:
+                    # 2026-11-18 现场：让位节点（死胡同倒车 / 转弯让位）为了让车后退
+                    # 必须打开 manual_enabled，而这里原来会把它当成"人接管"，
+                    # 直接把整个任务 trip 掉。于是让位结束时那句"恢复任务"其实恢复的是
+                    # 一个已经死掉的任务 —— 表现就是"后退了但没有继续导航"。
+                    # 让位期间 tick 早已冻结（_paused_for_reverse 分支直接 return），
+                    # 所以这里跳过即可，不要中止。
+                    self.get_logger().info(
+                        '手动通道由让位节点打开（不是人接管）→ 不中止任务，保持暂停')
+                    return
                 self._trip('manual_enabled 被打开（手动通道接管）')
             self._sm.stop()
             self._end_recovery(False)
