@@ -38,7 +38,12 @@ def generate_launch_description():
                         '-configuration_basename', 'fwr_2d.lua'],
              parameters=[{'use_sim_time': use_sim_time}],
              remappings=[('scan', '/scan_mapping'),
+                         # Cartographer 的第 2 路雷达话题名随版本不同：
+                         # 有些版本是 scan_1，有些是 scan_2（本机实测期待 scan_2，
+                         # 见日志 'Queue waiting for data: (0, scan_2)'）。
+                         # 两个都 remap，未使用的那条是无害的空操作。
                          ('scan_1', '/scan_rear_mapping'),
+                         ('scan_2', '/scan_rear_mapping'),
                          ('odom', '/odom'),
                          ('imu', '/imu/data_raw')]),
         # 加载 pbstream 续建（两个独立参数，避免被当成一个 argv）
@@ -51,7 +56,12 @@ def generate_launch_description():
                         '-load_state_filename', LaunchConfiguration('load_state')],
              parameters=[{'use_sim_time': use_sim_time}],
              remappings=[('scan', '/scan_mapping'),
+                         # Cartographer 的第 2 路雷达话题名随版本不同：
+                         # 有些版本是 scan_1，有些是 scan_2（本机实测期待 scan_2，
+                         # 见日志 'Queue waiting for data: (0, scan_2)'）。
+                         # 两个都 remap，未使用的那条是无害的空操作。
                          ('scan_1', '/scan_rear_mapping'),
+                         ('scan_2', '/scan_rear_mapping'),
                          ('odom', '/odom'),
                          ('imu', '/imu/data_raw')]),
         Node(package='cartographer_ros', executable='cartographer_occupancy_grid_node',

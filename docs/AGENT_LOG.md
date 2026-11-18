@@ -6517,3 +6517,56 @@ ssh -i ~/.ssh/fwr_n305 manbaout@192.168.0.20
 ### 下一步
 阶段 0：`mask_windows()` 多段遮罩 + `scan_mapping_filter` 参数化（支持第二实例）
 → 然后 `num_laser_scans = 2` 接双雷达建图，用 A/B 指标（双墙窄缝面积）验收。
+
+## 2026-11-18 10:30 · 双雷达接入实机验证（部分完成，卡在前雷达 USB）
+
+### 已完成（开发机 `feature/dual-lidar`）
+| 提交 | 内容 |
+| --- | --- |
+| `8a9646c` | 双雷达建图：URDF + 后雷达驱动 + 第二路滤镜 + `num_laser_scans=2` + 代价地图双 source |
+| 本次 | `scan_2` remap 修正 + 本日志 |
+
+### 🔑 关键发现：Cartographer 第 2 路雷达话题是 **`scan_2`**，不是 `scan_1`
+现象：`num_laser_scans = 2` 后 Cartographer 一直刷
+`Queue waiting for data: (0, scan_2)`，且永不产出地图。
+原因：本机 Cartographer 版本的命名是 `scan` / `scan_2`（index+1），
+我们只 remap 了 `scan_1` → 第 2 路订阅到不存在的 `/scan_2` → 队列饿死。
+处置：**两个候选都 remap**（`scan_1` 与 `scan_2` 都指向 `/scan_rear_mapping`，
+未使用的那条是无害空操作），启动后 `Queue waiting` 归零。
+
+### 实机已验证（机器人 `fwr-n305`）
+| 项 | 结果 |
+| --- | --- |
+| 两个雷达枚举 | ✅ CP2102 ×2：`14da…`→ttyUSB1（后）、`e00a…`→ttyUSB3（前）|
+| 后雷达链路 | ✅ `/scan_rear` 10.4 Hz、`/scan_rear_mapping` 220° ✓ |
+| `laser_rear` TF | ✅ base_link→laser_rear = (−0.229, 0, 0.043)、yaw 0，与实测一致 |
+| Cartographer 双扫描 | ✅ 进程存活、`Queue waiting` 与 `process has died` 均为 **0** |
+| 单测 | ✅ 348 passed |
+
+### 环境坑（重要，长期影响）
+1. **`fwr-lidar-watchdog.service`（systemd 用户服务）会杀后雷达**
+   它执行 `pkill -x sllidar_node`，而**后雷达的 OS 进程名同样是 `sllidar_node`**
+   （`__node:=sllidar_node_rear` 只改 ROS 节点名，不改进程名）
+   → 双雷达要长期运行，**必须改这个脚本**（按 by-id 或 PID 管理自己那一路）。
+2. **`mqtt_bridge`（远程控制桥）会自动拉起 `run_navigation.launch.py`**
+   （ppid=1 的孤儿进程，断开后仍在）→ 占用 ESP32 串口、旧 URDF 无 `laser_rear`
+   → Cartographer 查 TF 失败 **SIGABRT**、话题出现重复发布者。
+3. 除以上两个，`battery_modbus` / `ultrasonic_rear` 也共用 `/dev/ttyUSB0`（E08），
+   会与雷达抢端口。
+
+### 当前阻塞
+**前雷达（ttyUSB3 / `e00a…`）节点启动后静默停止**：
+日志到 `current scan mode: Standard` 就没了，且**没有任何进程持有 ttyUSB3**。
+同一节点在本次会话早期是 10.2 Hz 正常的，怀疑反复 SIGKILL 后 USB 需要重新插拔。
+
+### 当前机器人状态
+```
+watchdog 服务: 已停（用户要求，等确认后再开）
+导航/远程控制栈: 已停
+双雷达建图栈: 运行中（前雷达无数据，后雷达正常）
+```
+
+### 下一步
+1. **物理重新插拔前雷达 USB**，确认 `/scan` 恢复 10 Hz
+2. 若恢复 → 双雷达建图即完成，做 A/B 地图质量对比（双墙窄缝面积）
+3. 之后改 `lidar_watchdog.py`（不再 `pkill -x`），否则双雷达无法长期共存
