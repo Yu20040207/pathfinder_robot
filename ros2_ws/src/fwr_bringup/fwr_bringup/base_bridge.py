@@ -372,7 +372,9 @@ class BaseBridgeNode(Node):
             f'[manual-in] rx v={msg.linear.x:.3f} w={msg.angular.z:.3f} '
             f'manual={bool(self.get_parameter("manual_enabled").value)} '
             f'nav={any(self._nav_active.values())} rev={self._reverse_active} '
-            f'motion={bool(self.get_parameter("motion_enabled").value)}',
+            f'motion={bool(self.get_parameter("motion_enabled").value)} '
+            f'conn={self._core.connected} ver={self._core.verified} '
+            f'fault={self._core.fault} turn={self._core._turn_owner}',
             throttle_duration_sec=1.0)
         # 2026-11-18 现场（"本该后退却前进了"）：让位倒车走手动通道，但手动通道
         # 是否打开取决于 trail_reverser 异步调用 /base_bridge/set_parameters。
@@ -415,11 +417,23 @@ class BaseBridgeNode(Node):
         if not manual_velocity(msg.linear.x, msg.angular.z, self._core.track_m,
                                 max_linear_mps=float(
                                     self.get_parameter('manual_max_speed_mps').value),
-                                allow_mixed=bool(
-                                    self.get_parameter('manual_allow_mixed').value)):
+                                # 2026-11-18 现场（"后退一直退不动"）：manual_velocity
+                                # 默认只允许**单轴**（键盘安全习惯），v 和 ω 同时非零
+                                # 直接判非法 → 底盘 halt()，命令连目标都没设。
+                                # 而沿轨迹倒车必然是"边退边修方向"（v=-0.08, ω=-0.15），
+                                # 于是每一帧都被拒 —— 机器人一动不动，日志里只有一句
+                                # "Rejected out-of-range manual velocity"。
+                                # 让位倒车天然需要混合速度，这里对它放行。
+                                allow_mixed=(bool(
+                                    self.get_parameter('manual_allow_mixed').value)
+                                    or self._reverse_active)):
             self._core.halt()
-            self.get_logger().warn('Rejected out-of-range manual velocity',
-                                   throttle_duration_sec=2.0)
+            self.get_logger().warn(
+                'Rejected out-of-range manual velocity'
+                f'（v={msg.linear.x:.3f} w={msg.angular.z:.3f} '
+                f'mixed={bool(self.get_parameter("manual_allow_mixed").value)} '
+                f'rev={self._reverse_active}）',
+                throttle_duration_sec=2.0)
             return
         try:
             # 2026-11-12：手动模式改为**直通**，不再用 IMU 做航向保持/转向速率修正。

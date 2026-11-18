@@ -245,6 +245,7 @@ class BaseBridgeCore:
         self._last_esp_us = None
         self._wheel_positions = [0.0, 0.0]
         self._turn_owner = False
+        self.last_refuse_reason = None
         self._fault_clear_pending = False
 
     def connect(self, now_s: float) -> None:
@@ -300,6 +301,11 @@ class BaseBridgeCore:
             self._target = (left, right)
             self._last_cmd_at = now_s
             self._cmd_hold_s = float(hold_s)
+        else:
+            # 2026-11-18：这里原来是**静默**不记录目标（底盘只发 'x'）。
+            # 现场"发了 12 s 倒车指令、车纹丝不动、日志一句话没有"就是这个。
+            self.last_refuse_reason = (
+                f'conn={self.connected} ver={self.verified} fault={self.fault}')
         return left, right
 
     def begin_turn(self, now_s: float) -> bool:
@@ -337,6 +343,7 @@ class BaseBridgeCore:
             print(f'[core] halt from {frames.filename.split("/")[-1]}:{frames.lineno}',
                   flush=True)
         self._turn_owner = False
+        self.last_refuse_reason = None
         self._target = None
         self._last_cmd_at = None
 

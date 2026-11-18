@@ -258,7 +258,7 @@ def test_manual_channel_not_silently_dropped_during_reverse():
     assert 'allow_reverse' in block, '_sensors_ready 必须支持让位放行'
     assert 'if not allow_reverse and not bool(' in block
     j = src.index('def _on_manual_velocity')
-    mblock = src[j:j + 2400]
+    mblock = src[j:j + 3000]
     assert 'allow_reverse=self._reverse_active' in mblock
     assert '被丢弃' in mblock and 'reverse_active=' in mblock
 
@@ -316,3 +316,21 @@ def test_capped_reverse_still_moves_backwards():
     left = 1000.0 * (v - w * track / 2.0)
     right = 1000.0 * (v + w * track / 2.0)
     assert left < -20 and right < -20, (left, right)
+
+
+def test_reverse_allows_mixed_velocity():
+    """让位倒车必须允许 v 与 ω 同时非零（沿轨迹退车必然要修方向）。
+
+    2026-11-18 现场：倒车指令 v=-0.08 w=-0.15 每一帧都被 manual_velocity
+    判非法（默认只允许单轴）→ halt() → 目标没设 → 车一动不动，
+    日志只有一句 "Rejected out-of-range manual velocity"。
+    这是"后退始终退不动"的真正原因。
+    """
+    from fwr_bringup.base_bridge_core import manual_velocity
+    track = 0.262
+    # 单轴策略下混合速度非法
+    assert not manual_velocity(-0.08, -0.15, track, max_linear_mps=0.2,
+                               allow_mixed=False)
+    # 让位倒车放行后必须合法
+    assert manual_velocity(-0.08, -0.15, track, max_linear_mps=0.2,
+                           allow_mixed=True)
