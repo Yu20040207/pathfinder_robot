@@ -49,10 +49,11 @@ def generate_launch_description():
         Node(package='fwr_bringup', executable='scan_mapping_filter',
              name='scan_mapping_filter', output='screen',
              parameters=[{'use_sim_time': use_sim_time,
-                          # 2026-11-18：遮罩从 ±50°（260° 视场）改为 ±60°（240° 视场）。
-                          # 理由：自击区更大（0° 方向 0.42~0.44 m 读数是另一个雷达 + 车体），
-                          # 两个雷达各保留 240°，合起来仍有 120° 重叠，覆盖满 360°。
-                          'rear_half_angle_rad': math.radians(60.0)}]),
+                          # 2026-11-18：遮罩改为 ±70°（**220° 视场**）——这是雷达装进车体、
+                          # 开窗带之后的**最终配置值**，现在就按它调，装进去后不用再改参数。
+                          # 现阶段雷达暂放车顶（自击只有 7°），220° 偏保守但更接近最终状态。
+                          # 两路各 220°，并集仍完整 360°（重叠 80°）。
+                          'rear_half_angle_rad': math.radians(70.0)}]),
         Node(package='robot_state_publisher', executable='robot_state_publisher',
              name='robot_state_publisher', output='screen',
              parameters=[{'robot_description': description, 'use_sim_time': use_sim_time}]),
