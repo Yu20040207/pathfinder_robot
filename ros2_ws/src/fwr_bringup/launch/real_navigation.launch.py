@@ -6,10 +6,30 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import ExecuteProcess, DeclareLaunchArgument, IncludeLaunchDescription
 from launch.conditions import IfCondition, UnlessCondition
+
+
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 from nav2_common.launch import RewrittenYaml
+
+def _repo_root():
+    # symlink-install 下 __file__ 指向源码树，parents[4] 是仓库根
+    from pathlib import Path
+    return Path(__file__).resolve().parents[4]
+
+
+def _watchdog():
+    from pathlib import Path
+    p = _repo_root() / 'tools' / 'chain_watchdog.py'
+    return str(p) if Path(p).is_file() else ''
+
+
+def _py():
+    from pathlib import Path
+    v = _repo_root() / '.venv' / 'bin' / 'python'
+    import sys
+    return str(v) if v.is_file() else sys.executable
 
 
 def generate_launch_description():
@@ -58,6 +78,11 @@ def generate_launch_description():
         # 2026-11-18 用户要求：双雷达到位后启用"沿原轨迹倒车"脱困。
         # 车尾安全由 rear_guard 用后雷达正后方扇区守着（不再是超声）。
         DeclareLaunchArgument('trail_reverser', default_value='true'),
+        # 2026-11-18：碰撞监控会"active 但不再发布"（本机反复出现），
+        # 一旦如此 /cmd_vel_auto_forward_filtered 静默 → 选择器判 no-command
+        # → 车完全不动。看门狗交给 launch 托管，随栈启动/退出，不会像
+        # 手工 nohup 那样被 ssh 会话带走。
+        DeclareLaunchArgument('collision_watchdog', default_value='true'),
         # amcl（地图图片）或 slam（slam_toolbox localization + posegraph）
         DeclareLaunchArgument('localizer', default_value='amcl'),
         DeclareLaunchArgument('map', default_value=str(share / 'maps' / 'real_map_merged.yaml')),
@@ -94,6 +119,11 @@ def generate_launch_description():
              name='trail_reverser', output='screen',
              condition=IfCondition(LaunchConfiguration('trail_reverser')),
              parameters=[{'use_sim_time': use_sim_time}]),
+        # 碰撞监控看门狗（同上）。用源码树里的 tools/chain_watchdog.py。
+        ExecuteProcess(
+            cmd=[_py(), _watchdog()], output='screen',
+            condition=IfCondition(LaunchConfiguration('collision_watchdog'))
+            if _watchdog() else IfCondition('false')),
         Node(package='fwr_bringup', executable='frontier_explorer',
              name='frontier_explorer', output='screen',
              condition=IfCondition(LaunchConfiguration('start_explorer')),

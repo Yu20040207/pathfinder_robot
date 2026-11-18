@@ -14,6 +14,8 @@
 判据：连续 2 秒「输入有 20 Hz、输出一帧都没有」→ 重启两个监控。
 """
 import argparse
+import os
+import subprocess
 import sys
 import time
 
@@ -80,53 +82,46 @@ class Watchdog(Node):
         self._last_out = time.monotonic()
 
     def _state_of(self, name):
-        cli = self._state_clients.get(name)
-        if cli is None or not cli.service_is_ready():
-            return 'unknown'
-        future = cli.call_async(GetState.Request())
-        rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
-        res = future.result()
-        return res.current_state.label if res is not None else 'unknown'
+        """用 CLI 查状态。
 
-    def _do(self, name, transition_id, label):
-        client = self._change_clients[name]
-        if not client.service_is_ready():
+        2026-11-18 现场：用 rclpy 的 GetState 客户端查询一直返回 'unknown'
+        （"collision_monitor_forward 状态 unknown"），于是 _restart 里所有
+        transition 都失败，看门狗触发 36 次一次没修好。CLI 反而稳定可用。
+        """
+        try:
+            out = subprocess.run(
+                ['ros2', 'lifecycle', 'get', '/' + name],
+                capture_output=True, text=True, timeout=10,
+                env=dict(os.environ)).stdout.strip()
+        except Exception:
+            return 'unknown'
+        for st in ('active', 'inactive', 'unconfigured', 'finalized'):
+            if st in out:
+                return st
+        return 'unknown'
+
+    def _cli(self, name, verb):
+        try:
+            r = subprocess.run(
+                ['ros2', 'lifecycle', 'set', '/' + name, verb],
+                capture_output=True, text=True, timeout=20,
+                env=dict(os.environ))
+            return 'successful' in (r.stdout + r.stderr)
+        except Exception:
             return False
-        req = ChangeState.Request()
-        req.transition.id = transition_id
-        future = client.call_async(req)
-        rclpy.spin_until_future_complete(self, future, timeout_sec=3.0)
-        res = future.result()
-        ok = res is not None and res.success
-        self.get_logger().info('%s %s %s' % (name, label, '完成' if ok else '失败'))
-        return ok
 
     def _restart(self, name):
-        """按当前状态恢复。2026-10-31：新增 unconfigured 处理。
-
-        原实现只做 deactivate->activate；当节点处于 unconfigured（lifecycle
-        manager 掉线、bond 断裂）时两个转换都失败，整条自动链路永久断开 —
-        现场表现是"规划有、车不动、目标全失败"。
-        """
-        if name not in self._change_clients:
-            return
         state = self._state_of(name)
-        if state == 'unconfigured':
-            self._do(name, Transition.TRANSITION_CONFIGURE, 'configure')
-            self._do(name, Transition.TRANSITION_ACTIVATE, 'activate')
-        elif state == 'inactive':
-            self._do(name, Transition.TRANSITION_ACTIVATE, 'activate')
-        elif state == 'active':
-            self._do(name, Transition.TRANSITION_DEACTIVATE, 'deactivate')
-            self._do(name, Transition.TRANSITION_ACTIVATE, 'activate')
-        else:
-            # unknown（get_state 没答上来）时不能只试 activate —— 节点很可能已经
-            # 是 active 但卡住，ACTIVATE 转换会报 "No transition matching 3"。
-            # 这时走已知有效的 deactivate->activate 周期。
-            self.get_logger().warn('%s 状态 %s，执行 deactivate->activate 周期'
-                                   % (name, state))
-            self._do(name, Transition.TRANSITION_DEACTIVATE, 'deactivate')
-            self._do(name, Transition.TRANSITION_ACTIVATE, 'activate')
+        self.get_logger().warn(f'{name} 状态 {state}，执行 deactivate->activate')
+        if state in ('active',):
+            self._cli(name, 'deactivate')
+            time.sleep(1.5)
+        if self._state_of(name) in ('inactive', 'unconfigured'):
+            self._cli(name, 'activate')
+        time.sleep(1.0)
+        self.get_logger().info(
+            f'{name} 处理后状态 {self._state_of(name)}')
+
 
     def _scan_publishers(self):
         try:
