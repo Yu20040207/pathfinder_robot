@@ -20,6 +20,7 @@ import sys
 import time
 
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.lifecycle import TransitionCallbackReturn  # noqa: F401  (类型存在性检查)
 from geometry_msgs.msg import Twist
 from lifecycle_msgs.msg import Transition
@@ -254,8 +255,8 @@ def main() -> int:
     ])
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass          # 重启导航栈时被 SIGINT/SIGTERM 打断属于正常，不要报"崩溃"
     finally:
         node.destroy_node()
         if rclpy.ok():
