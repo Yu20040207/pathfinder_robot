@@ -46,7 +46,7 @@ class TrailReverser(Node):
         self.declare_parameter('cooldown_s', 5.0)
         # 2026-11-18：转弯让位（要转大角度但车头贴太近 → 直线后退一点腾空间）
         self.declare_parameter('turn_backup_enabled', True)
-        self.declare_parameter('turn_blocked_s', 0.8)
+        self.declare_parameter('turn_blocked_s', 0.5)
         self.declare_parameter('turn_front_close_m', 0.45)
         # 车尾至少要够退「turn_backup_dist_m 的一部分 + 余量」，否则不许起步
         self.declare_parameter('turn_rear_need_m', 0.55)
@@ -98,6 +98,13 @@ class TrailReverser(Node):
         self._rear_scan = None
         self._rear_min = float('inf')
         self._unblocked_since = None
+        # 2026-11-18：'被挡时长'改成累计+衰减，不再要求连续。
+        # 现场：原地旋转时碰撞监控不停地在 stop/slowdown 之间抖
+        # (停 0.2 s → 放行 0.2 s → 停)，连续计时器每次被清零，永远攒
+        # 不到 0.8 s → 车一直转，2.9 s 后车角才蹭上墙。
+        self._blocked_acc = 0.0
+        self._unblocked_run = 0.0
+        self._tick_at = None
         self._rearm_at = None
         self._rearm_tries = 0
         self._rearm_deadline = 0.0
@@ -239,11 +246,21 @@ class TrailReverser(Node):
         filt = self._filtered_cmd
         wants_motion = bool(raw and abs(raw.linear.x) + abs(raw.angular.z) > 0.02)
         stopped = bool(filt and abs(filt.linear.x) + abs(filt.angular.z) < 0.01)
+        # 累计"被挡"时长：挡住时累加，放行时按 2 倍速衰减（不清零）。
+        # 这样"停一下/放行一下"的抖动也能攒够 blocked_s，让位能及时启动。
+        dt = 0.0 if self._tick_at is None else max(0.0, now - self._tick_at)
+        self._tick_at = now
+        if wants_motion and stopped:
+            self._unblocked_run = 0.0
+        else:
+            self._unblocked_run += dt
+        self._blocked_acc = tb.accumulate_blocked(
+            self._blocked_acc, dt, wants_motion and stopped, self._unblocked_run)
         if wants_motion and stopped:
             self._blocked_since = self._blocked_since or now
             self._unblocked_since = None
         else:
-            self._blocked_since = None
+            self._blocked_since = None if self._blocked_acc <= 0.0 else self._blocked_since
             # 车又能正常走了 → 连续 3 s 顺畅后把"转弯让位"次数复位，
             # 否则一次任务里用完 3 次就永久不再让位了。
             moving = bool(filt and abs(filt.linear.x) + abs(filt.angular.z) > 0.02)
@@ -264,7 +281,7 @@ class TrailReverser(Node):
         # 现在改成：**能沿轨迹倒车就先沿轨迹倒**（它退到左右都 >=0.9 m 才停，
         # 真正腾出转弯空间），短退只作为"两侧开阔、只差前方一点空间"的兜底。
         ok, why = tc.should_start(
-            blocked_for_s=now - self._blocked_since,
+            blocked_for_s=self._blocked_acc,
             side_left_m=left,
             side_right_m=right,
             rear_blocked=self._rear_blocked,
@@ -278,12 +295,16 @@ class TrailReverser(Node):
             self._try_turn_backup(now, raw, front_min)
             return
         self._reversing = True
+        self._tick_at = None
+        self._blocked_acc = 0.0
+        self._unblocked_run = 0.0
         self._mode = 'deadend'
         # 记住倒车前的自动授权状态，结束时恢复（否则 Nav2 接不上）
         self._armed_before = self._auto_armed
         self._started_at = now
         self._start_pose = self._pose
         self._reversed_m = 0.0
+        self._blocked_acc = 0.0
         self._set_manual(True)
         self._active_pub.publish(Bool(data=True))
         self.get_logger().warn(
@@ -317,6 +338,9 @@ class TrailReverser(Node):
         if not ok:
             return False
         self._reversing = True
+        self._tick_at = None
+        self._blocked_acc = 0.0
+        self._unblocked_run = 0.0
         self._mode = 'turn'
         self._armed_before = self._auto_armed
         self._started_at = now

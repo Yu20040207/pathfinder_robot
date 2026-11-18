@@ -75,3 +75,27 @@ def backup_done(backed_m: float,
     if elapsed_s >= max_s:
         return True, 'timeout'
     return False, ''
+
+
+def accumulate_blocked(acc: float, dt: float, blocked: bool,
+                       unblocked_s: float = 0.0,
+                       decay: float = 2.0, grace_s: float = 0.4,
+                       cap: float = 5.0) -> float:
+    """累计"被挡"时长：挡住时累加，放行时按 ``decay`` 倍速衰减（不清零）。
+
+    2026-11-18 现场：原地旋转时碰撞监控不停地在 stop / slowdown 之间抖
+    （停 0.2 s → 放行 0.2 s → 停），而原来的"连续计时"一放行就清零，
+    永远攒不到 ``blocked_s`` → 车一直转，2.9 s 后车角蹭上墙。
+    改成累计后，"抖动着被挡"也能攒够阈值。
+
+    注意：``unblocked_s`` 是"已经连续畅通了多久"。小于 ``grace_s`` 的短暂
+    放行当作噪声、**完全不衰减** —— 碰撞监控的 stop/slowdown 抖动周期约
+    0.2 s，若一放行就衰减，50% 占空比下净增为负，永远攒不够阈值。
+    真正畅通超过 ``grace_s`` 才开始按 ``decay`` 倍速衰减。
+    """
+    dt = max(0.0, float(dt))
+    if blocked:
+        return min(float(acc) + dt, cap)
+    if float(unblocked_s) < grace_s:
+        return float(acc)
+    return max(0.0, float(acc) - decay * dt)

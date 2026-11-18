@@ -179,3 +179,25 @@ def test_short_backup_needs_rear_room():
     i = src.index('def _try_turn_backup')
     block = src[i:i + 900]
     assert "turn_rear_need_m" in block, '必须检查车尾空间'
+
+
+def test_blocked_time_accumulates_through_toggling():
+    """碰撞监控抖动时也要攒够"被挡"时长（2026-11-18 旋转撞墙的根因）。
+
+    现场：原地旋转时 stop/slowdown 每 0.2 s 交替一次，连续计时器每次被清零，
+    2.9 s 里一次都没攒到 0.8 s → 车一直转，最后车角蹭上墙。
+    """
+    from fwr_bringup.turn_backup_core import accumulate_blocked
+    acc = 0.0
+    for _ in range(8):
+        acc = accumulate_blocked(acc, 0.2, True, unblocked_s=0.0)
+        acc = accumulate_blocked(acc, 0.2, False, unblocked_s=0.2)   # 短暂放行=噪声
+    assert acc >= 0.5, f'抖动 3.2 s 后应攒够阈值，实际 {acc:.2f}'
+
+
+def test_blocked_time_decays_when_clear():
+    from fwr_bringup.turn_backup_core import accumulate_blocked
+    acc = accumulate_blocked(0.8, 1.0, False, unblocked_s=1.0)
+    assert acc == 0.0, '连续 1 s 畅通应当衰减到 0'
+    acc = accumulate_blocked(0.0, 100.0, True, unblocked_s=0.0)
+    assert acc == 5.0, '必须有上限，避免长时间累加后一直触发'
