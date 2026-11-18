@@ -148,7 +148,7 @@ def test_manual_reverse_not_blocked_by_rear_guard_by_default():
     node = (Path(__file__).resolve().parents[1] / 'fwr_bringup' / 'base_bridge.py').read_text()
     assert "manual_rear_guard_enabled" in node
     assert "declare_parameter('manual_rear_guard_enabled', False)" in node
-    seg = node.split('def _on_manual_velocity')[1][:2200]
+    seg = node.split('def _on_manual_velocity')[1][:3200]
     assert 'manual_rear_guard_enabled' in seg, '手动回调必须引用该参数'
 
 

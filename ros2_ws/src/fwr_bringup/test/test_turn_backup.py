@@ -258,7 +258,7 @@ def test_manual_channel_not_silently_dropped_during_reverse():
     assert 'allow_reverse' in block, '_sensors_ready 必须支持让位放行'
     assert 'if not allow_reverse and not bool(' in block
     j = src.index('def _on_manual_velocity')
-    mblock = src[j:j + 1600]
+    mblock = src[j:j + 2400]
     assert 'allow_reverse=self._reverse_active' in mblock
     assert '被丢弃' in mblock and 'reverse_active=' in mblock
 
@@ -277,3 +277,20 @@ def test_reverse_active_is_published_continuously():
     block = src[i:i + 1800]
     assert "_active_pub.publish(Bool(data=True))" in block, \
         '每一步都要重发让位状态，否则晚连上的订阅者永远收不到'
+
+
+def test_reverse_active_opens_manual_channel_itself():
+    """收到 /reverse/active 时底盘必须自己放行手动通道。
+
+    2026-11-18 现场："本来要左转但位置不够，正常应该后退，但是还前进了"。
+    让位节点用异步参数服务打开 manual_enabled，那次没落地 →
+    手动通道关闭：倒车指令全丢、自动通道却还畅通 → Nav2 继续往前顶。
+    现在底盘见到 /reverse/active 就放行，不再依赖对端参数调用成功。
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / 'fwr_bringup' /
+           'base_bridge.py').read_text()
+    j = src.index('def _on_manual_velocity')
+    block = src[j:j + 3000]
+    assert '_reverse_active)' in block and 'manual_ok' in block
+    assert "or self._reverse_active" in block

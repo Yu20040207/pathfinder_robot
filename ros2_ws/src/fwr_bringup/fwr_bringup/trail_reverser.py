@@ -213,9 +213,15 @@ class TrailReverser(Node):
         return (min(left) if left else float('inf'),
                 min(right) if right else float('inf'))
 
-    def _set_manual(self, enabled: bool) -> None:
+    def _set_manual(self, enabled: bool) -> bool:
+        """设置底盘手动通道。返回 False 表示服务不可用（调用方必须放弃让位）。
+
+        2026-11-18 现场（"本该后退却前进了"）：这里原来静默 return，
+        手动通道没打开，但让位照常"开始" —— 结果倒车指令被底盘丢弃、
+        而**自动通道仍然畅通**，Nav2 继续按原速度往前开，直接顶到障碍上。
+        """
         if not self._params.service_is_ready():
-            return
+            return False
         req = SetParameters.Request()
         m = ParamMsg()
         m.name = 'manual_enabled'
@@ -223,6 +229,7 @@ class TrailReverser(Node):
         m.value.bool_value = bool(enabled)
         req.parameters.append(m)
         self._params.call_async(req)
+        return True
 
     def _stop_cmd(self) -> None:
         self._cmd.publish(Twist())
@@ -379,7 +386,12 @@ class TrailReverser(Node):
         self._started_at = now
         self._start_pose = self._pose
         self._reversed_m = 0.0
-        self._set_manual(True)
+        if not self._set_manual(True):
+            # 参数服务没就绪也能倒车：base_bridge 见到 /reverse/active 会自己
+            # 放行手动通道。这里只记录，不放弃让位。
+            self.get_logger().warn(
+                '/base_bridge/set_parameters 未就绪 → 依赖 /reverse/active 放行手动通道',
+                throttle_duration_sec=5.0)
         self._active_pub.publish(Bool(data=True))
         if why == 'turn-too-tight':
             detail = '想转但侧向不够（左 %.2f / 右 %.2f，需 %.2f）' % (
@@ -427,6 +439,10 @@ class TrailReverser(Node):
         cmd.angular.z = (0.0 if tgt is None else
                          tc.reverse_steering(x, y, yaw, tgt[0], tgt[1]))
         self._cmd.publish(cmd)
+        self.get_logger().info(
+            f'[reverse] 发布 v={cmd.linear.x:.3f} w={cmd.angular.z:.3f} '
+            f'退={self._reversed_m:.2f}m 左={lat_l:.2f} 右={lat_r:.2f}',
+            throttle_duration_sec=1.0)
 
     def _publish_inactive(self) -> None:
         self._active_pub.publish(Bool(data=False))

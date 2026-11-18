@@ -367,8 +367,24 @@ class BaseBridgeNode(Node):
                       float(self._core.ready(now)), float(self._sensors_ready(now)),
                       float(bool(self.get_parameter('manual_enabled').value))]
         self._manual_debug.publish(debug)
+        # 无条件记录"到达"，用来区分"没收到"和"收到但被丢弃"
+        self.get_logger().info(
+            f'[manual-in] rx v={msg.linear.x:.3f} w={msg.angular.z:.3f} '
+            f'manual={bool(self.get_parameter("manual_enabled").value)} '
+            f'nav={any(self._nav_active.values())} rev={self._reverse_active} '
+            f'motion={bool(self.get_parameter("motion_enabled").value)}',
+            throttle_duration_sec=1.0)
+        # 2026-11-18 现场（"本该后退却前进了"）：让位倒车走手动通道，但手动通道
+        # 是否打开取决于 trail_reverser 异步调用 /base_bridge/set_parameters。
+        # 那次调用没落地（服务没就绪/竞争），于是 **手动通道关闭**：
+        #   倒车指令全被丢弃（车身不退），而自动通道仍然畅通 → Nav2 继续往前开，
+        #   本该后退的动作变成"前进顶到障碍上"。
+        # 现在：只要 /reverse/active 为真，手动通道就**由底盘自己放行**，
+        # 不再依赖对端那次参数调用；导航态也不再拦截。
+        manual_ok = (bool(self.get_parameter('manual_enabled').value)
+                     or self._reverse_active)
         if not command_source_allowed(
-                'manual', bool(self.get_parameter('manual_enabled').value),
+                'manual', manual_ok,
                 any(self._nav_active.values()) and not self._reverse_active):
             self.get_logger().warn('手动指令被导航任务状态拦截（nav_active 残留？）',
                                    throttle_duration_sec=2.0)
