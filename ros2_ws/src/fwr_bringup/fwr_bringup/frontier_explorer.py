@@ -165,6 +165,9 @@ class FrontierExplorer(Node):
         self._last_nav_clear = 0.0
         self._reverse_active = False
         self._paused_for_reverse = False
+        # 让位节点关闭手动通道比发 /reverse/active=False 更晚（有个 0.6 s 延时），
+        # 这段宽限期里的 manual_enabled 消息仍属让位，不算人接管。
+        self._reverse_grace_until = 0.0
         self._reverse_episodes = 0
         self._mission_suspended = False
         self._paused_for_sensor = False
@@ -395,6 +398,9 @@ class FrontierExplorer(Node):
         if not self._paused_for_reverse:
             return
         self._paused_for_reverse = False
+        # 让位节点还要过一会儿才关手动通道，给它一个宽限期，别把它的消息当人接管
+        self._reverse_grace_until = (
+            self.get_clock().now().nanoseconds * 1e-9) + 2.5
         self._reverse_episodes += 1
         limit = int(self.get_parameter('max_reverse_episodes_per_leg').value)
         self.get_logger().warn(
@@ -453,21 +459,24 @@ class FrontierExplorer(Node):
     def _on_manual(self, msg):
         was = self._manual
         self._manual = msg.data
-        if self._manual:
-            if not was and self._sm.enabled:
-                if self._paused_for_reverse:
-                    # 2026-11-18 现场：让位节点（死胡同倒车 / 转弯让位）为了让车后退
-                    # 必须打开 manual_enabled，而这里原来会把它当成"人接管"，
-                    # 直接把整个任务 trip 掉。于是让位结束时那句"恢复任务"其实恢复的是
-                    # 一个已经死掉的任务 —— 表现就是"后退了但没有继续导航"。
-                    # 让位期间 tick 早已冻结（_paused_for_reverse 分支直接 return），
-                    # 所以这里跳过即可，不要中止。
-                    self.get_logger().info(
-                        '手动通道由让位节点打开（不是人接管）→ 不中止任务，保持暂停')
-                    return
-                self._trip('manual_enabled 被打开（手动通道接管）')
-            self._sm.stop()
-            self._end_recovery(False)
+        if not self._manual:
+            return
+        # 2026-11-18 现场（连续两次）：让位节点（死胡同倒车 / 转弯让位）为了让车
+        # 后退必须打开 manual_enabled，结束后它自己会恢复自动授权。这里原来把
+        # "手动通道被打开"一律当成**人接管**：先 _trip() 中止任务，再 _sm.stop()
+        # 停掉状态机。于是让位结束那句"恢复任务"恢复的是一个已经死掉的任务 ——
+        # 表现就是"后退了但导航不接上"。
+        # 注意 _sm.stop() 原来在 if 外面，所以**重复收到** manual_enabled=True
+        # 也会把状态机停掉（让位刚恢复任务的 50 ms 内就踩到了）。
+        now = self.get_clock().now().nanoseconds * 1e-9
+        if self._reverse_active or now < self._reverse_grace_until:
+            self.get_logger().info(
+                '手动通道由让位节点打开（不是人接管）→ 不停状态机、不中止任务')
+            return
+        if not was and self._sm.enabled:
+            self._trip('manual_enabled 被打开（手动通道接管）')
+        self._sm.stop()
+        self._end_recovery(False)
 
     def _on_bridge_arm(self, msg):
         was = self._bridge_armed

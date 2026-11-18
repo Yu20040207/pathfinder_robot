@@ -98,6 +98,8 @@ class TrailReverser(Node):
         self._rear_min = float('inf')
         self._unblocked_since = None
         self._rearm_at = None
+        self._rearm_tries = 0
+        self._rearm_deadline = 0.0
         self._arm_client = self.create_client(Trigger, '/base/arm_auto')
         self.create_subscription(Bool, '/base/auto_armed', self._on_auto_armed, 10)
         self.create_subscription(Bool, '/base/rear_blocked',
@@ -189,12 +191,45 @@ class TrailReverser(Node):
         self._maybe_start(now)
 
     def _restore_arm(self) -> None:
-        """把倒车时撤销的自动授权还回去，让 Nav2 能接着跑原来的目标。"""
+        """把倒车时撤销的自动授权还回去，让 Nav2 能接着跑原来的目标。
+
+        2026-11-18 现场：base_bridge 回 ``arm 失败：reason=serial not ready
+        core.ready=False``。倒车刚要结束时底盘串口可能还在恢复，原来只调一次
+        就放弃 → 导航再也接不上。改成带重试（0.7 s 一次，最长约 8 s）。
+        """
         if not self._arm_client.service_is_ready():
             self.get_logger().warn('倒车结束但 /base/arm_auto 不可用 → 需要手动重新开始导航')
             return
-        self._arm_client.call_async(Trigger.Request())
-        self.get_logger().info('倒车结束 → 已请求恢复自动授权（Nav2 可继续原目标）')
+        future = self._arm_client.call_async(Trigger.Request())
+        future.add_done_callback(self._arm_done)
+        self.get_logger().info(
+            '倒车结束 → 请求恢复自动授权（第 %d 次）' % (self._rearm_tries + 1))
+
+    def _arm_done(self, future) -> None:
+        ok = False
+        reason = ''
+        try:
+            res = future.result()
+            ok = bool(res is not None and res.success)
+            reason = (res.message if res is not None else '') or ''
+        except Exception as exc:                       # noqa: BLE001
+            reason = str(exc)
+        if ok:
+            self._rearm_at = None
+            self.get_logger().info('自动授权已恢复（Nav2 可继续原目标）')
+            return
+        self._rearm_tries += 1
+        if (self._rearm_tries >= 8
+                or time.monotonic() > self._rearm_deadline):
+            self._rearm_at = None
+            self.get_logger().error(
+                '自动授权恢复失败（%d 次，%s）→ 需要重新点"开始导航"'
+                % (self._rearm_tries, reason))
+            return
+        self._rearm_at = time.monotonic() + 0.7
+        self.get_logger().warn(
+            '恢复自动授权未成功（%s）→ 0.7 s 后重试（第 %d 次）'
+            % (reason, self._rearm_tries))
 
     def _maybe_start(self, now: float) -> None:
         if self._pose is None or self._scan is None:
@@ -346,6 +381,8 @@ class TrailReverser(Node):
         # manual_enabled 是异步参数服务，等它落地后再恢复自动授权
         if (self._armed_before
                 and bool(self.get_parameter('restore_auto_arm').value)):
+            self._rearm_tries = 0
+            self._rearm_deadline = time.monotonic() + 8.0
             self._rearm_at = time.monotonic() + float(
                 self.get_parameter('restore_arm_delay_s').value)
         self._publish_inactive()

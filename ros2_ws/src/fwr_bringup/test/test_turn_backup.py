@@ -97,7 +97,25 @@ def test_explorer_does_not_abort_task_during_reverse():
     src = (Path(__file__).resolve().parents[1] / 'fwr_bringup' /
            'frontier_explorer.py').read_text()
     i = src.index('def _on_manual')
-    block = src[i:i + 1200]
-    assert '_paused_for_reverse' in block, '让位期间必须跳过中止'
-    assert block.index('_paused_for_reverse') < block.index('_trip('), \
+    block = src[i:i + 1600]
+    # 注意用带 self. 的真实调用去匹配：注释里也写过 _trip() 字样，会误命中
+    assert block.index('self._reverse_active') < block.index('self._trip('), \
         '必须先判断让位状态，再决定是否中止'
+    assert block.index('self._reverse_grace_until') < block.index('self._sm.stop()'), \
+        '停状态机必须在让位/宽限期判断之后'
+
+
+def test_rearm_is_retried():
+    """现场：base_bridge 回 `arm 失败：reason=serial not ready`。
+
+    倒车刚结束时底盘串口可能还在恢复，原来只调一次就放弃 → 导航再也接不上。
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / 'fwr_bringup' /
+           'trail_reverser.py').read_text()
+    assert '_arm_done' in src, '必须有回执处理'
+    assert '_rearm_tries' in src and '_rearm_deadline' in src, '必须带重试与总时限'
+    i = src.index('def _arm_done')
+    block = src[i:i + 1500]
+    assert '_rearm_at = time.monotonic() + 0.7' in block, '失败后要重新排期重试'
+    assert 'res.success' in block, '必须检查服务回执，不能盲发'
