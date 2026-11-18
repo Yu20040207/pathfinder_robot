@@ -6707,3 +6707,35 @@ motion_enabled / manual_enabled 重启后被重置为 false
 1. 用户手动操控继续建图，验收双雷达地图质量（A/B 对比单雷达）
 2. 改 `lidar_watchdog.py`（不再 `pkill -x`）
 3. 恢复三个 systemd 服务（**需用户明确指示**）
+
+## 2026-11-18 16:53 · 让位逻辑收敛：三条分支合并为一条规则
+
+### 会话目标
+现场连续出现"该后退没后退 / 退了 0.00 m"，用户要求"执行前判断好是后退还是直接转弯"。
+
+### 仓库改动
+- 新增 `ros2_ws/src/fwr_bringup/fwr_bringup/maneuver_core.py`
+  （can_turn / wants_backup / backup_done / accumulate_blocked，单条规则）
+- 重写 `trail_reverser.py` 的触发与停止（删除三种 mode 与三个分支函数）
+- 新增 `test/test_maneuver_core.py`（16 条，含两个现场场景全过程）
+- `tools/check_stack.sh` 增加碰撞监控链路自检；`tools/chain_watchdog.py` 改用 CLI
+- `real_navigation.launch.py` 托管看门狗（参数 `collision_watchdog`，默认 true）
+
+### 已验证（命令 + 结果）
+- `PYTHONPATH=ros2_ws/src/fwr_bringup .venv/bin/python -m pytest ros2_ws/src/fwr_bringup/test -q`
+  → **430 passed**
+- 实机 `ros2 param get /trail_reverser turn_need_m|front_need_m|rear_need_m|backup_max_m`
+  → 0.45 / 0.45 / 0.55 / 0.8
+- `/cmd_vel_auto_forward_filtered` 20.5 Hz；`process has died` 计数 0
+
+### 未验证 / 遗留
+- **实车死胡同掉头尚未验证**（本轮只到部署）
+- 碰撞监控仍会"active 但不发布"（今天 3 次），靠看门狗兜底，根因未查
+- 地图里缺真实障碍（规划器认为能直走）导致反复同一处失败
+
+### 当前运行状态
+实机 fwr-n305 导航栈运行中，看门狗随 launch 托管，日志 `/tmp/fwr_runs/nav_latest`。
+
+### 下一步
+1. 现场测死胡同掉头，确认"退到能转就停"
+2. 若仍在同一处反复，查地图缺失障碍（而非继续调让位）
