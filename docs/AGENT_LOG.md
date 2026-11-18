@@ -6393,3 +6393,68 @@ RViz 迁移与雷达断流韧性。
 ### 当前运行状态
 - `fwr-nav` active、`fwr-map` inactive(disabled)、`fwr-mqtt-bridge` active、`fwr-battery` active
 - 提交：`0faf9a2` 已推送 `codex/real-nav2-imu-turn`
+
+## 2026-11-18 09:50 · 单雷达参数冻结 + 双雷达分支建立
+
+### 会话目标
+用户已把主控接上新雷达（前后各一）。要求：**保存当前单雷达参数并提交**，
+然后**开新分支**做双雷达方案。
+
+### 关键发现：雷达实际高度是 75 mm，不是文档里的 230 mm
+`fwr_chassis_demo.urdf:63-64` 的注释写着
+「base_link is 32.5 mm above floor, so **measured scan z=75 mm** is 42.5 mm here」，
+`laser_front` 相对 `base_link` 在 `(0.21, 0, 0.0425)`，加上 base_link 高 32.5 mm
+→ **扫描面绝对高度 = 75 mm**。
+
+车体已经改造过（雷达已降低），旧设计文档里的 0.2298 m 已作废。
+**后果：0~75 mm 的障碍完全看不见** —— 这正是本轮要加双雷达/低位感知的动因。
+
+### 仓库改动
+| 文件 | 动作 |
+| --- | --- |
+| `docs/hardware/lidar-single-baseline.md` | **新增**：单雷达完整基线快照（10 节，含回滚方法）|
+| `docs/hardware/dual-lidar-plan.md` | **新增**：双雷达分阶段计划（5 个阶段）|
+
+### 基线关键参数（已冻结）
+| 项 | 值 |
+| --- | --- |
+| 雷达 | RPLIDAR C1，460800，Standard，**倒装 180°**（scan 0 = 车尾）|
+| 扫描面高度 | **0.075 m** |
+| 遮罩 | 后方 **±50°** → 有效 **260°**，遮蔽值 **`+inf`（不是 NaN）** |
+| Cartographer | `num_laser_scans = 1`、`min_range 0.20`、`max_range 12.0`、`tracking_frame imu_link` |
+| 代价地图 | `observation_sources: scan` → `/scan_mapping`（全局 + 局部两处）|
+| 基线测试 | **348 passed in 1.44 s** ← 双雷达分支必须不减少 |
+
+### Git 操作
+```
+8d2e936  docs(lidar): freeze the single-lidar baseline before the dual-lidar work
+tag      lidar-single-baseline  →  8d2e936
+branch   feature/dual-lidar     →  从 8d2e936 拉出（当前所在分支）
+```
+⚠️ 提交时**只 add 了基线文档**，没有把工作区里那 3 个远程控制改动
+（`cloud/api/app.py`、`cloud/web/car.html`、`mqtt_bridge.py`，都是 ttl_ms 相关）
+一起提交 —— 那是其他会话的未完成工作，原样保留在工作区。
+
+### 关键技术决策（双雷达）
+1. **不用 merge 节点合并 scan** —— 两雷达相位差 0~100 ms，旋转时 100 ms × 0.55 rad/s
+   = 3.15°，2 m 处偏 110 mm，会出现重影
+2. **Cartographer 用 `num_laser_scans = 2`** —— 原生多路，各按自身时间戳插入
+3. **建图先只用前雷达**（A 方案），后雷达只做避障 —— 两传感器系统误差不一致会造双墙
+   （安装偏航误差 0.5° → 5 m 处偏 44 mm）
+4. 代价地图双 source，不合并
+
+### 未验证 / 遗留
+- 新雷达型号未确认（用户之前问过 YDLIDAR X2 二手 vs LD19，未定）
+- 雷达在开发机上**没有枚举**（`/dev/serial/by-id/` 为空），可能插在 Jetson 上
+- 后雷达实际覆盖角未测（后轮可能挡到 180~200°）
+- `fwr_chassis_demo.urdf` 的轮径 65 mm 与固件 `board_config.h` 的 100 mm **不一致**（已知遗留）
+
+### 当前运行状态
+```
+分支: feature/dual-lidar
+工作区: 3 个远程控制改动未提交（故意保留）
+无 ROS 进程运行
+```
+
+### 下一步
+阶段 0：实现 `mask_windows()` 多段遮罩 + 单测（不需要硬件），保证 348 测试不减少。
