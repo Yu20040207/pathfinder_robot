@@ -342,3 +342,19 @@ def test_small_curvature_never_triggers():
     assert not tight_turn_needed(raw_w_radps=0.20, lat_left_m=0.40,
                                  lat_right_m=0.30, front_m=0.80,
                                  blocked_for_s=3.0)
+
+
+def test_watchdog_detects_fake_active_monitor():
+    """看门狗必须能识别"监控有输出但全零"（假活），而不只是"输出静默"。
+
+    2026-11-18 现场（用户："不能自动恢复吗"）：监控状态 active、帧率正常，
+    但每一帧都是 0 —— 原因是 TF 偶发外推失败（
+    "Lookup would require extrapolation into the past"）让它算不出前停区。
+    看门狗只盯静默 → 完全漏掉 → 只能人工点"开始导航"。
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[4] / 'tools' / 'chain_watchdog.py').read_text()
+    assert '_in_nz' in src and '_out_nz' in src, '必须统计非零帧'
+    assert 'out_nz == 0' in src, '必须能识别"有输出但全零"'
+    assert '_blocked_pts' in src, '必须确认前停区里没有真实障碍，避免把真停车当假活'
+    assert '假活' in src

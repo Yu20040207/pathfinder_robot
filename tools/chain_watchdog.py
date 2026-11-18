@@ -14,6 +14,7 @@
 判据：连续 2 秒「输入有 20 Hz、输出一帧都没有」→ 重启两个监控。
 """
 import argparse
+import math
 import os
 import subprocess
 import sys
@@ -61,6 +62,10 @@ class Watchdog(Node):
         self.declare_parameter('dedupe_scan', False)
         self._last_scan = 0.0
         self._scan_n = 0
+        self._in_nz = 0
+        self._out_nz = 0
+        self._blocked_pts = 0
+        self._zero_run = 0.0
         self.create_subscription(LaserScan, '/scan', self._on_scan,
                                  qos_profile_sensor_data)
         self.create_subscription(Twist, IN_TOPIC, self._on_in, 20)
@@ -77,13 +82,17 @@ class Watchdog(Node):
         self.get_logger().info(
             f'看门狗启动（{"只报告" if dry_run else "自动重启"}）：{IN_TOPIC} → {OUT_TOPIC}')
 
-    def _on_in(self, _msg):
+    def _on_in(self, msg):
         self._in += 1
         self._last_in = time.monotonic()
+        if abs(msg.linear.x) > 0.01 or abs(msg.angular.z) > 0.01:
+            self._in_nz += 1
 
-    def _on_out(self, _msg):
+    def _on_out(self, msg):
         self._out += 1
         self._last_out = time.monotonic()
+        if abs(msg.linear.x) > 0.01 or abs(msg.angular.z) > 0.01:
+            self._out_nz += 1
 
     def _state_of(self, name):
         """用 CLI 查状态。
@@ -144,7 +153,20 @@ class Watchdog(Node):
         except Exception:                          # noqa: BLE001
             return []
 
-    def _on_scan(self, _msg) -> None:
+    def _on_scan(self, msg) -> None:
+        # 前停区里是否有真实障碍点（判断"监控压零"是不是真的该停）。
+        # 前停区在 base 系是 x∈[0.32,0.46]、|y|<=0.22；
+        # 雷达装在 base 前方 0.21 m，所以换算到 laser 系要减 0.21。
+        n = 0
+        for i, r in enumerate(msg.ranges):
+            if not (math.isfinite(r) and msg.range_min <= r <= msg.range_max):
+                continue
+            a = msg.angle_min + i * msg.angle_increment
+            fx = -r * math.cos(a)      # /scan: 0°=车尾，±180°=车头
+            ly = r * math.sin(a)
+            if 0.11 <= fx <= 0.25 and abs(ly) <= 0.22 and r > 0.05:
+                n += 1
+        self._blocked_pts = n
         self._last_scan = time.monotonic()
         self._scan_n += 1
 
@@ -237,15 +259,39 @@ class Watchdog(Node):
         out_alive = now - self._last_out < 1.0
         in_n, out_n = self._in, self._out
         self._in = self._out = 0
+        in_nz, out_nz = self._in_nz, self._out_nz
+        self._in_nz = self._out_nz = 0
         if in_alive and not out_alive and in_n > 0:
             self.get_logger().warn(
                 f'输入 {in_n} 帧/秒，但监控输出静默 → 判定卡死')
             if not self._dry:
                 for name in MONITORS:
                     self._restart(name)
+        elif (in_alive and out_alive and in_nz > 0 and out_nz == 0
+              and self._blocked_pts < 3):
+            # 2026-11-18（用户："不能自动恢复吗"）：监控"假活" ——
+            # 状态是 active、输出帧率正常，但**每一帧都是 0**。
+            # 原因之一是 TF 偶发外推失败（日志里的
+            # "Lookup would require extrapolation into the past"），
+            # 监控算不出前停区就按"看不见"处理 = 停车。
+            # 原来看门狗只盯"输出静默"，这种"有输出但全零"完全漏掉，
+            # 只能靠探索器取消目标 + 人工点"开始导航"。
+            # 现在：Nav2 在要速度、监控却持续压零、且前停区里**没有真实障碍点**
+            # → 判假活，自动重启监控。
+            self._zero_run += 1.0
+            if self._zero_run >= 2.0:
+                self._zero_run = 0.0
+                self.get_logger().warn(
+                    f'Nav2 要速度（{in_nz} 帧/秒非零），监控却持续压零 2 s，'
+                    f'且前停区无真实障碍（{self._blocked_pts} 点）→ 判定假活，重启监控')
+                if not self._dry:
+                    for name in MONITORS:
+                        self._restart(name)
         elif not in_alive and not out_alive:
             # 空闲时两者都没数据是正常的，不处理
-            pass
+            self._zero_run = 0.0
+        else:
+            self._zero_run = 0.0
 
 
 def _acquire_lock():
