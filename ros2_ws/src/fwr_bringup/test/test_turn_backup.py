@@ -294,3 +294,26 @@ def test_base_bridge_lets_reverse_channel_through():
     i = src.index("command_source_allowed(\n                'manual'")
     block = src[i:i + 260]
     assert '_reverse_active' in block, '让位期间必须放行手动指令'
+
+
+def test_tightturn_uses_distance_criterion_not_side_room():
+    """转弯净空不足触发的倒车必须用"退够距离"判据，不能用侧向判据。
+
+    2026-11-18 现场：守卫刚触发，should_stop 用"前侧扇区 max>=0.9 m"判成
+    "空间够了" → 退了 0.00 m 立刻结束，5 s 一轮连发 3 次 → 任务被耗死。
+    用户看到的还是"怎么没退"。
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / 'fwr_bringup' /
+           'trail_reverser.py').read_text()
+    i = src.index("if self._mode == 'tightturn':")
+    block = src[i:i + 900]
+    assert 'tb.backup_done(' in block, 'tightturn 必须走 backup_done 判据'
+    assert 'tc.should_stop(' not in block, 'tightturn 不许用侧向判据'
+
+
+def test_tightturn_mode_is_selected_by_guard():
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / 'fwr_bringup' /
+           'trail_reverser.py').read_text()
+    assert "_begin_trail_reverse(now, mode='tightturn')" in src

@@ -65,6 +65,7 @@ class TrailReverser(Node):
         self.declare_parameter('turn_backup_dist_m', 0.60)
         self.declare_parameter('turn_backup_max_s', 8.0)
         self.declare_parameter('turn_backup_speed_mps', 0.10)
+        self.declare_parameter('turn_backup_rear_stop_m', 0.20)
         self.declare_parameter('turn_max_attempts', 3)
         self.declare_parameter('turn_cooldown_s', 3.0)
         self.declare_parameter('rear_scan_topic', '/scan_rear_mapping')
@@ -331,14 +332,22 @@ class TrailReverser(Node):
                 float(self.get_parameter('side_tight_m').value), left, right))
         self._begin_trail_reverse(now)
 
-    def _begin_trail_reverse(self, now: float) -> None:
-        """启动"沿原路倒车"（死胡同 / 转弯净空不足共用）。"""
+    def _begin_trail_reverse(self, now: float, mode: str = 'deadend') -> None:
+        """启动"沿原路倒车"。
+
+        mode='deadend'  : 死胡同 —— 退到左右任一侧 >=0.9 m 才算腾出空间；
+        mode='tightturn': 转弯净空不足 —— 用小距离后退的判据（退够 dist_m、
+                          前方让开、车尾挡住、超时），**不能用侧向判据**：
+                          2026-11-18 现场守卫刚触发 0.05 s，should_stop 就用
+                          "前侧扇区 max>=0.9 m" 判成"空间够了" → 退了 0.00 m
+                          立刻结束，连发 3 次把任务耗死。
+        """
         self._reversing = True
         self._tick_at = None
         self._blocked_acc = 0.0
         self._unblocked_run = 0.0
         self._turn_tight_acc = 0.0
-        self._mode = 'deadend'
+        self._mode = mode
         # 记住倒车前的自动授权状态，结束时恢复（否则 Nav2 接不上）
         self._armed_before = self._auto_armed
         self._started_at = now
@@ -384,7 +393,7 @@ class TrailReverser(Node):
             '转不开，先沿原路后退让位' % (
                 self._lateral_clearance(), need))
         self._turn_attempts += 1
-        self._begin_trail_reverse(now)
+        self._begin_trail_reverse(now, mode='tightturn')
         return True
 
     def _try_turn_backup(self, now: float, raw, front_min: float) -> bool:
@@ -466,6 +475,29 @@ class TrailReverser(Node):
         x, y, yaw = self._pose
         self._reversed_m = math.hypot(x - self._start_pose[0], y - self._start_pose[1])
         left, right = self._side_clearance()
+        if self._mode == 'tightturn':
+            # 转弯净空不足：用"后退距离/前方让开/车尾/超时"判据，
+            # 不能用侧向判据（侧向净空在直退过程中几乎不变，会立即判"够了"）。
+            done, why = tb.backup_done(
+                backed_m=self._reversed_m,
+                elapsed_s=now - self._started_at,
+                rear_min_m=self._rear_min,
+                rear_blocked=self._rear_blocked,
+                front_min_m=min(left, right),
+                dist_m=float(self.get_parameter('turn_backup_dist_m').value),
+                max_s=float(self.get_parameter('turn_backup_max_s').value),
+                rear_stop_m=float(self.get_parameter('turn_backup_rear_stop_m').value),
+                front_clear_m=float(self.get_parameter('turn_backup_clear_m').value))
+            if done:
+                self._finish('tightturn-' + why, min(left, right))
+                return
+            tgt = self._trail.target_behind(float(self.get_parameter('target_back_m').value))
+            cmd = Twist()
+            cmd.linear.x = -abs(float(self.get_parameter('turn_backup_speed_mps').value))
+            cmd.angular.z = 0.0 if tgt is None else tc.reverse_steering(
+                x, y, yaw, tgt[0], tgt[1])
+            self._cmd.publish(cmd)
+            return
         done, why = tc.should_stop(
             side_left_m=left, side_right_m=right, rear_blocked=self._rear_blocked,
             reversed_m=self._reversed_m, elapsed_s=now - self._started_at,
