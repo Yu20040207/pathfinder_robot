@@ -489,6 +489,13 @@ class FrontierExplorer(Node):
     def _on_bridge_arm(self, msg):
         was = self._bridge_armed
         self._bridge_armed = msg.data
+        # 2026-11-18：让位节点（倒车 / 转弯让位）打开手动通道会让 base_bridge
+        # 撤销自动授权，这是**预期行为**。原来这里当成"传感器断流"去暂停任务，
+        # 日志里和让位同时出现"底盘授权丢失（传感器断流）→ 已暂停任务"，误导。
+        arm_now = self.get_clock().now().nanoseconds * 1e-9
+        if (not msg.data
+                and (self._reverse_active or arm_now < self._reverse_grace_until)):
+            return
         require = bool(self.get_parameter('require_bridge_arm').value)
         if not msg.data and self._sm.enabled and require and self._mission_suspended:
             # 暂停期间门是关的 → 授权必然丢失，这属于预期，不当作故障。

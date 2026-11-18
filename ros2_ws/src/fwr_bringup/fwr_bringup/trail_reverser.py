@@ -48,7 +48,8 @@ class TrailReverser(Node):
         self.declare_parameter('turn_backup_enabled', True)
         self.declare_parameter('turn_blocked_s', 0.8)
         self.declare_parameter('turn_front_close_m', 0.45)
-        self.declare_parameter('turn_rear_need_m', 0.35)
+        # 车尾至少要够退「turn_backup_dist_m 的一部分 + 余量」，否则不许起步
+        self.declare_parameter('turn_rear_need_m', 0.55)
         # 退到前方净空 >= turn_backup_clear_m 为止；dist/max_s 只是兜底上限
         self.declare_parameter('turn_backup_clear_m', 0.55)
         self.declare_parameter('turn_backup_dist_m', 0.60)
@@ -257,9 +258,11 @@ class TrailReverser(Node):
             return
         left, right = self._side_clearance()
         front_min = min(left, right)
-        # 先按"死胡同沿轨迹倒车"，不满足再按"转弯让位直线后退"
-        if self._try_turn_backup(now, raw, front_min):
-            return
+        # 2026-11-18 现场（第二次）：原来"转弯让位短退"排在前面，只要想转就抢着
+        # 只退 0.33 m。但现场是死胡同（两侧窄、车尾只剩 0.40 m），短退既退不够、
+        # 又会先贴到后墙 —— 用户原话"只是后退了一下没退到可以够位置转弯"。
+        # 现在改成：**能沿轨迹倒车就先沿轨迹倒**（它退到左右都 >=0.9 m 才停，
+        # 真正腾出转弯空间），短退只作为"两侧开阔、只差前方一点空间"的兜底。
         ok, why = tc.should_start(
             blocked_for_s=now - self._blocked_since,
             side_left_m=left,
@@ -271,6 +274,8 @@ class TrailReverser(Node):
             side_tight_m=float(self.get_parameter('side_tight_m').value),
             cooldown_s=float(self.get_parameter('cooldown_s').value))
         if not ok:
+            # 沿轨迹倒车不适用 → 再看"短退让位"（两侧开阔时才有意义）
+            self._try_turn_backup(now, raw, front_min)
             return
         self._reversing = True
         self._mode = 'deadend'
@@ -290,6 +295,10 @@ class TrailReverser(Node):
         if not bool(self.get_parameter('turn_backup_enabled').value):
             return False
         if self._blocked_since is None:
+            return False
+        # 2026-11-18 现场：车尾只剩 0.40 m 时也照样起步，退 0.33 m 就 rear-close
+        # 停住 —— 既没腾出空间还先贴上后墙。要求车尾够退「计划距离 + 余量」。
+        if self._rear_min < float(self.get_parameter('turn_rear_need_m').value):
             return False
         ok, why = tb.wants_backup(
             blocked_for_s=now - self._blocked_since,

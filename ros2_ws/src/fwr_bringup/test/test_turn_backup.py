@@ -153,3 +153,29 @@ def test_reverse_episode_counter_resets_on_progress():
     resets = [ln for ln in src.splitlines()
               if 'self._reverse_episodes = 0' in ln]
     assert len(resets) >= 2, '至少要在"目标成功"和"换段"两处复位'
+
+
+def test_trail_reverse_takes_priority_over_short_backup():
+    """死胡同里必须优先"沿轨迹倒车"，而不是只退 0.33 m 的短退。
+
+    2026-11-18 现场：短退排在前面抢着执行，车尾只剩 0.40 m 时退 0.33 m 就
+    rear-close，既没腾出转弯空间又先贴上后墙。用户原话"只是后退了一下，
+    没退到可以够位置转弯"。
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / 'fwr_bringup' /
+           'trail_reverser.py').read_text()
+    i = src.index('def _maybe_start')
+    block = src[i:i + 3000]
+    assert block.index('tc.should_start(') < block.index('self._try_turn_backup('), \
+        '沿轨迹倒车必须排在短退之前'
+
+
+def test_short_backup_needs_rear_room():
+    """短退起步前必须确认车尾够退，否则会先贴上后墙。"""
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / 'fwr_bringup' /
+           'trail_reverser.py').read_text()
+    i = src.index('def _try_turn_backup')
+    block = src[i:i + 900]
+    assert "turn_rear_need_m" in block, '必须检查车尾空间'
