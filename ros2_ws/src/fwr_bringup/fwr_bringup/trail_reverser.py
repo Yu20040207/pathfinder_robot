@@ -425,9 +425,11 @@ class TrailReverser(Node):
         self._reversed_m = 0.0
         self._set_manual(True)
         self._active_pub.publish(Bool(data=True))
+        # 两种触发原因的日志要分开，否则用户会以为"明明在直行，怎么日志说要转向"
+        what = '直行被挡，车头仅' if why == 'straight-panic' else '要转向但车头仅'
         self.get_logger().warn(
-            '要转向但车头仅 %.2f m（车尾 %.2f m 净空）→ 直线后退让位（第 %d 次）' % (
-                front_min, self._rear_min, self._turn_attempts + 1))
+            '%s %.2f m（车尾 %.2f m 净空）→ 直线后退让位（第 %d 次）' % (
+                what, front_min, self._rear_min, self._turn_attempts + 1))
         return True
 
     def _step_turn_backup(self, now: float) -> None:

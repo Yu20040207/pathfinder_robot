@@ -267,3 +267,30 @@ def test_dispatch_does_not_kill_route_on_transient_tf_gap():
     block = '\n'.join(code)
     assert 'self._sm.stop()' not in block, 'TF 缺失时不许停状态机'
     assert '下一帧再试' in block, '应只跳过本帧并限流告警'
+
+
+def test_manual_command_allowed_during_reverse():
+    """让位期间必须放行手动通道，否则倒车指令被"导航任务进行中"拦掉。
+
+    2026-11-18 现场：Nav2 目标还活着时开始沿轨迹倒车 → 手动指令被
+    command_source_allowed() 拒绝 → 10 s 只挪 0.02 m（"该后退没后退"），
+    随后连续让位 3 次把任务结束。
+    """
+    from fwr_bringup.base_bridge_core import command_source_allowed
+    # 正常情况：导航进行中，手动指令必须被拒（人不能抢）
+    assert not command_source_allowed('manual', True, True)
+    # 让位节点走手动通道时，调用方把 nav_active 传 False（因为 /reverse/active 为真）
+    assert command_source_allowed('manual', True, False)
+    # 手动门没开时仍然拒绝
+    assert not command_source_allowed('manual', False, False)
+
+
+def test_base_bridge_lets_reverse_channel_through():
+    """base_bridge 必须订阅 /reverse/active 并在让位时放行手动指令。"""
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / 'fwr_bringup' /
+           'base_bridge.py').read_text()
+    assert "/reverse/active" in src, '必须订阅让位状态'
+    i = src.index("command_source_allowed(\n                'manual'")
+    block = src[i:i + 260]
+    assert '_reverse_active' in block, '让位期间必须放行手动指令'

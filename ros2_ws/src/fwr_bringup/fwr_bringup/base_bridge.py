@@ -95,6 +95,15 @@ class BaseBridgeNode(Node):
         self._imu_yaw_rate = 0.0
         self._last_imu_at = None
         self._nav_active = {'pose': False, 'through': False}
+        # 2026-11-18：让位节点（沿轨迹倒车/转弯让位）走的是手动通道，
+        # 但 command_source_allowed() 规定"导航任务进行中就拒绝手动指令"。
+        # 现场后果：Nav2 目标还活着时开始倒车 → 手动指令被拦 → 10 s 只挪 0.02 m，
+        # 用户看到的就是"该后退没后退"，随后连续让位 3 次把任务结束。
+        # 让位节点自己发布的 /reverse/active 就是"这手动指令是它发的"的凭据。
+        self._reverse_active = False
+        self.create_subscription(
+            Bool, '/reverse/active',
+            lambda m: setattr(self, '_reverse_active', bool(m.data)), 10)
         # 2026-11-12：幽灵导航目标会让手动指令被静默丢弃（现场"按了完全不动"）。
         # 记录每个 action status 的更新时间，并在手动通道打开时强制清零。
         self._nav_status_at = {'pose': 0.0, 'through': 0.0}
@@ -358,8 +367,9 @@ class BaseBridgeNode(Node):
                       float(self._core.ready(now)), float(self._sensors_ready(now)),
                       float(bool(self.get_parameter('manual_enabled').value))]
         self._manual_debug.publish(debug)
-        if not command_source_allowed('manual', bool(self.get_parameter('manual_enabled').value),
-                                      any(self._nav_active.values())):
+        if not command_source_allowed(
+                'manual', bool(self.get_parameter('manual_enabled').value),
+                any(self._nav_active.values()) and not self._reverse_active):
             self.get_logger().warn('手动指令被导航任务状态拦截（nav_active 残留？）',
                                    throttle_duration_sec=2.0)
             return
