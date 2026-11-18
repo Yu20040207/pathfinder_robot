@@ -28,6 +28,26 @@ for srv in /explore/start_fixed_goal /explore/start_two_point_goal /explore/star
   timeout 8 ros2 service list 2>/dev/null | grep -qx "$srv" && say "$srv" "✅" || { say "$srv" "❌"; bad; }
 done
 
+echo "=== ③.5 碰撞监控链路（"开始导航没反应"的隐藏元凶）==="
+# 2026-11-18 现场：collision_monitor_forward 的 configure 超时
+# （"failed to send response to change_state (timeout)"）→ 节点停在 inactive，
+# /cmd_vel_auto_forward_filtered 一帧都不发 → 选择器判 no-command →
+# /cmd_vel_auto_safe 恒 0 → 面板显示"已开始"但车一动不动。
+_lc=$(timeout 10 ros2 lifecycle get /collision_monitor_forward 2>/dev/null | head -1)
+case "$_lc" in
+  active*) say "collision_monitor_forward" "✅ $_lc";;
+  *)       say "collision_monitor_forward" "❌ ${_lc:-查询超时}（应为 active）"; bad;;
+esac
+# 有发布者还不够，必须真的在发数据
+if timeout 8 ros2 topic echo --once /cmd_vel_auto_forward_filtered >/dev/null 2>&1; then
+  say "/cmd_vel_auto_forward_filtered" "✅ 有输出"
+else
+  say "/cmd_vel_auto_forward_filtered" "❌ 无输出（车不会动）"
+  say "" "修复: ros2 lifecycle set /collision_monitor_forward deactivate && sleep 2 && ros2 lifecycle set /collision_monitor_forward activate"
+  say "" "或常驻看门狗: .venv/bin/python tools/chain_watchdog.py"
+  bad
+fi
+
 echo "=== ④ 冻结参数是否被意外改动 ==="
 chk() {
   # 参数查询偶尔会超时（DDS 首次发现慢），重试一次再判定，避免误报
