@@ -269,3 +269,23 @@ def test_selector_gates_rotation_on_both_sides():
     assert 'rotation_allowed(' in src
     assert "rotate_clear_m', 0.38" in src, '0.16 只够正前方，侧向必撞'
     assert 'both_ok and self._front_min_m >= clear' in src
+
+
+def test_selector_poll_never_latches():
+    """监控状态查询必须有超时重发，不能"一次没回就永远不可用"。
+
+    2026-11-18 现场（"开始导航没反应"）：/cmd_vel_nav 与
+    /cmd_vel_auto_forward_filtered 都正常（10~17 Hz 全非零），但
+    /cmd_vel_auto_safe 50 帧**全零**。根因是选择器把 GetState 查询发出去后
+    `.done()` 永远 False → 不再重发 → confirmed_at 不再更新 →
+    判 monitor-forward 失败 → 恒输出 0。
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / 'fwr_bringup' /
+           'directional_safety_selector.py').read_text()
+    i = src.index('def _poll_monitors')
+    block = src[i:i + 2200]
+    assert 'query.cancel()' in block, '查询卡住必须取消重发'
+    assert '_query_at' in block
+    # 服务没就绪时不许 observe(False) —— 那会把热身计时器重置
+    assert 'observe_monitor(direction, False' not in block

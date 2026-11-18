@@ -60,6 +60,8 @@ class DirectionalSafetySelector(Node):
             for direction in ('forward', 'reverse')
         }
         self.monitor_queries = {direction: None for direction in self.monitor_clients}
+        # 每条查询的发出时刻，用于超时重发（见 _poll_monitors）
+        self._query_at = {direction: 0.0 for direction in self.monitor_clients}
         for direction in self.monitor_clients:
             self.create_subscription(
                 TransitionEvent, f'/collision_monitor_{direction}/transition_event',
@@ -133,22 +135,38 @@ class DirectionalSafetySelector(Node):
         return choice
 
     def _poll_monitors(self):
+        """轮询碰撞监控的 lifecycle 状态。
+
+        2026-11-18 现场（"开始导航没反应"）：这里原来有三个会让选择器**永久**
+        认为"监控不可用"的坑，一旦踩上就恒输出 0，看起来就跟没点按钮一样：
+          1. 查询发出去没有回（DDS 抖动/lifecycle 服务偶发不响应）→
+             `.done()` 永远 False → `continue` 死等 → confirmed_at 不再更新
+             → 选择器判 monitor-forward 失败 → 全零，而且**再也不会重发**。
+          2. `service_is_ready()` 抖一下就 observe(False) → 清掉 active_since
+             → 下次恢复又要重新热身 monitor_warmup，抖动期间全零。
+        现在：查询超过 0.6 s 未回 → 取消并重发；服务暂时没就绪只是跳过本帧，
+        不轻易否定监控（真正停止由 lifecycle 状态回答）。
+        """
         now = time.monotonic()
         for direction, client in self.monitor_clients.items():
-            if not client.service_is_ready():
-                self.core.observe_monitor(direction, False, now)
-                self.monitor_queries[direction] = None
-                continue
             query = self.monitor_queries[direction]
             if query is not None and not query.done():
+                if now - self._query_at.get(direction, 0.0) > 0.6:
+                    query.cancel()
+                    self.monitor_queries[direction] = None
+                else:
+                    continue
+            if not client.service_is_ready():
                 continue
             if query is not None:
                 try:
-                    active = query.result().current_state.label == 'active'
+                    self.core.observe_monitor(
+                        direction,
+                        query.result().current_state.label == 'active', now)
                 except (AttributeError, RuntimeError):
-                    active = False
-                self.core.observe_monitor(direction, active, now)
+                    pass          # 结果异常：不否定监控，下一轮重发
             self.monitor_queries[direction] = client.call_async(GetState.Request())
+            self._query_at[direction] = now
 
     def _raw(self, msg):
         self.core.observe_raw(msg.linear.x, msg.angular.z, time.monotonic())
