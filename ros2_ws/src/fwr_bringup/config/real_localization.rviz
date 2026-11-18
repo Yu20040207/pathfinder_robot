@@ -51,13 +51,41 @@ Visualization Manager:
         Depth: 5
       Value: true
     - Class: rviz_default_plugins/LaserScan
-      Name: Localization scan (front and sides)
+      Name: MERGED 360 (AMCL input)
+      Enabled: true
+      Topic:
+        Value: /scan_merged
+        Reliability Policy: Best Effort
+      Style: Flat Squares
+      Size (Pixels): 4
+      Color Transformer: FlatColor
+      Color: 255; 255; 255
+      Decay Time: 0.2
+      Value: true
+    - Class: rviz_default_plugins/LaserScan
+      Name: FRONT 200 (mapping)
       Enabled: true
       Topic:
         Value: /scan_mapping
         Reliability Policy: Best Effort
       Style: Flat Squares
       Size (Pixels): 4
+      Color Transformer: FlatColor
+      Color: 40; 220; 90
+      Decay Time: 0.2
+      Value: true
+    - Class: rviz_default_plugins/LaserScan
+      Name: REAR 200 (mapping)
+      Enabled: true
+      Topic:
+        Value: /scan_rear_mapping
+        Reliability Policy: Best Effort
+      Style: Flat Squares
+      Size (Pixels): 4
+      Color Transformer: FlatColor
+      Color: 60; 150; 255
+      Decay Time: 0.2
+      Value: true
       Color Transformer: FlatColor
       Color: 40; 220; 90
       Decay Time: 0.2

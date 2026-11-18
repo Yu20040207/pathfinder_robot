@@ -100,6 +100,30 @@ def base_pose_from_laser(x, y, yaw, laser_offset_m=.21):
             y - laser_offset_m * math.sin(base_yaw), base_yaw)
 
 
+def pose_laser_to_base(x, y, yaw, tx, ty, tyaw):
+    """把"匹配得到的雷达位姿"换算成 base 位姿（通用的 2D 刚体变换）。
+
+    (tx, ty, tyaw) 是 **base_footprint ← 扫描坐标系** 的平面变换（用 tf2 取）。
+
+    推导：匹配位姿满足 p_map = R(yaw)·p_scan + (x, y)；
+    p_base = R(tyaw)·p_scan + (tx, ty) → p_scan = R(-tyaw)·(p_base - t)。
+    代回并整理得
+        base_yaw = yaw - tyaw
+        base_pos = (x, y) - R(base_yaw)·(tx, ty)
+
+    历史背景（2026-11-18）：原来这里写死 `yaw - pi` 和 `-0.21 m`，只对"前雷达单路、
+    倒装 180°、装在 base 前方 0.21 m"成立。改用扫描合并节点（/scan_merged，
+    frame=base_link，0°=车头）后这两个修正都变成了额外的 180° 旋转和 21 cm 偏移，
+    但残差是在换算**前**算的，日志照样显示"残差 0.042 m 很漂亮"，实际位姿是错的。
+    现在改为从 TF 取真实外参，任何扫描坐标系都适用。
+    """
+    base_yaw = yaw - tyaw
+    c, sn = math.cos(base_yaw), math.sin(base_yaw)
+    return (x - (c * tx - sn * ty),
+            y - (sn * tx + c * ty),
+            base_yaw)
+
+
 def refine_pose(occupied, resolution, origin_x, origin_y, points, x, y, yaw,
                 span_m=.5, span_yaw_deg=15.0, step_m=.04, step_yaw_deg=1.0):
     """Local refinement around a prior pose (e.g. the last known checkpoint)."""

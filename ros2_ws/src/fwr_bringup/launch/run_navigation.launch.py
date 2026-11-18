@@ -62,6 +62,7 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument('start_imu', default_value='true'),
         DeclareLaunchArgument('localizer', default_value='amcl'),
         DeclareLaunchArgument('start_rviz', default_value='true'),
+        DeclareLaunchArgument('start_rear_lidar', default_value='true'),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
                 str(share / 'launch' / 'real_navigation.launch.py')),
@@ -73,6 +74,7 @@ def generate_launch_description() -> LaunchDescription:
                 'map': map_file,
                 'localizer': LaunchConfiguration('localizer'),
                 'start_explorer': 'true',
+                'start_rear_lidar': LaunchConfiguration('start_rear_lidar'),
             }.items()),
         Node(
             package='rviz2', executable='rviz2', name='rviz2',

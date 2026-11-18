@@ -45,6 +45,7 @@ def generate_launch_description():
         DeclareLaunchArgument('start_imu', default_value='true'),
         DeclareLaunchArgument('start_lidar', default_value='true'),
         DeclareLaunchArgument('use_saved_map', default_value='false'),
+        DeclareLaunchArgument('start_rear_lidar', default_value='true'),
         # 2026-10-30：建图引擎可选 slam（slam_toolbox）或 carto（Cartographer）。
         # 离线 bag 回放对比结论：Cartographer 墙更实（87.7% vs 84%）、方向更一致（6° vs 13.5°）。
         DeclareLaunchArgument('slam_engine', default_value='slam'),
@@ -84,7 +85,8 @@ def generate_launch_description():
                               'lidar_port': LaunchConfiguration('lidar_port'),
                               'start_imu': LaunchConfiguration('start_imu'),
                               'map': LaunchConfiguration('map'),
-                              'localizer': LaunchConfiguration('localizer')}.items()),
+                              'localizer': LaunchConfiguration('localizer'),
+                              'start_rear_lidar': LaunchConfiguration('start_rear_lidar')}.items()),
         # Navigation lifecycle stays inactive until map/TF/scan/drive gates are verified.
         Node(package='fwr_bringup', executable='trail_reverser',
              name='trail_reverser', output='screen',
@@ -136,7 +138,11 @@ def generate_launch_description():
              parameters=[{'use_sim_time': use_sim_time,
                           'rooms_file': str(share / 'maps' / 'rooms.yaml')}]),
         Node(package='fwr_bringup', executable='auto_initial_pose', output='screen',
-             parameters=[{'use_sim_time': use_sim_time, 'scan_topic': '/scan_mapping'}]),
+             parameters=[{'use_sim_time': use_sim_time,
+                          'scan_topic': PythonExpression([
+                              "'/scan_merged' if '",
+                              LaunchConfiguration('start_rear_lidar'),
+                              "' == 'true' else '/scan_mapping'"])}]),
         Node(package='fwr_bringup', executable='auto_command_gate',
              name='auto_command_gate', output='screen',
              parameters=[{'use_sim_time': use_sim_time}]),

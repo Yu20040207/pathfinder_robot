@@ -32,6 +32,9 @@ def generate_launch_description():
         # 的 localization 模式（加载建图时序列化的 posegraph，边定位边微调地图）。
         DeclareLaunchArgument('localizer', default_value='amcl'),
         DeclareLaunchArgument('start_lidar', default_value='true'),
+        # 2026-11-18 双雷达导航：后雷达参与建图/定位。
+        # 关掉时（start_rear_lidar:=false）AMCL 回到只看前雷达的 /scan_mapping。
+        DeclareLaunchArgument('start_rear_lidar', default_value='true'),
         DeclareLaunchArgument(
             'slam_params',
             default_value=str(share / 'config' / 'real_slam_localization.yaml')),
@@ -43,6 +46,7 @@ def generate_launch_description():
                 'start_imu': LaunchConfiguration('start_imu'),
                 'start_slam': start_slam,
                 'start_lidar': LaunchConfiguration('start_lidar'),
+                'start_rear_lidar': LaunchConfiguration('start_rear_lidar'),
                 'slam_params': LaunchConfiguration('slam_params'),
             }.items()),
         OpaqueFunction(function=_start_slam_localization,
@@ -54,8 +58,14 @@ def generate_launch_description():
                           'use_sim_time': use_sim_time}]),
         Node(package='nav2_amcl', executable='amcl',
              name='amcl', output='screen', condition=amcl_selected,
+             # 2026-11-18：双雷达时 AMCL 吃 scan_merger 合成的 360° /scan_merged，
+             # 单雷达（start_rear_lidar:=false）仍用 /scan_mapping。
              parameters=[str(share / 'config' / 'real_localization.yaml'),
-                         {'use_sim_time': use_sim_time}]),
+                         {'use_sim_time': use_sim_time,
+                          'scan_topic': PythonExpression([
+                              "'/scan_merged' if '",
+                              LaunchConfiguration('start_rear_lidar'),
+                              "' == 'true' else '/scan_mapping'"])}]),
         Node(package='nav2_lifecycle_manager', executable='lifecycle_manager',
              name='lifecycle_manager_localization', output='screen',
              condition=amcl_selected,

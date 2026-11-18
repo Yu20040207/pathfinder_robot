@@ -14,7 +14,7 @@ from nav_msgs.msg import OccupancyGrid
 from sensor_msgs.msg import LaserScan
 from nav2_msgs.srv import SetInitialPose
 
-from .auto_seed_core import base_pose_from_laser, find_best_pose, refine_pose
+from .auto_seed_core import base_pose_from_laser, pose_laser_to_base, find_best_pose, refine_pose
 
 
 class AutoInitialPose(Node):
@@ -71,6 +71,30 @@ class AutoInitialPose(Node):
         if not self._seeded:
             self.get_logger().info(
                 '用户已手动设置位姿 → 自动播种放弃（不再覆盖）')
+
+    def _to_base_pose(self, x: float, y: float, yaw: float):
+        """匹配位姿（雷达坐标系）→ base 位姿。
+
+        优先用 tf2 取 **base_footprint ← 扫描 frame** 的真实外参，
+        这样单雷达（倒装的前雷达）和双雷达合并扫描（base_link）都自动正确。
+        TF 不可用时退回旧的写死补偿（yaw - pi、-0.21 m），保证不退化。
+        """
+        frame = 'laser_front'
+        if self._scan is not None:
+            frame = self._scan.header.frame_id or 'laser_front'
+        try:
+            tr = self._tf_buffer.lookup_transform('base_footprint', frame, rclpy.time.Time())
+            t = tr.transform.translation
+            qq = tr.transform.rotation
+            tyaw = math.atan2(2.0 * (qq.w * qq.z + qq.x * qq.y),
+                              1.0 - 2.0 * (qq.y * qq.y + qq.z * qq.z))
+            return pose_laser_to_base(x, y, yaw, t.x, t.y, tyaw)
+        except Exception:                                   # noqa: BLE001
+            self.get_logger().warn(
+                '拿不到 %s → base_footprint 的 TF，退回写死补偿（可能不准）' % frame,
+                throttle_duration_sec=10.0)
+            return base_pose_from_laser(
+                x, y, yaw, float(self.get_parameter('laser_offset_m').value))
 
     def _scan_overlap(self, x, y, yaw) -> tuple[float, float]:
         """扫描点落在墙上的比例，以及"落在未知/图外"的比例。
@@ -145,8 +169,7 @@ class AutoInitialPose(Node):
             response.success = False
             response.message = '匹配失败: %s' % exc
             return response
-        base_x, base_y, base_yaw = base_pose_from_laser(
-            x, y, yaw, float(self.get_parameter('laser_offset_m').value))
+        base_x, base_y, base_yaw = self._to_base_pose(x, y, yaw)
         on_wall, unknown_frac = self._scan_overlap(x, y, yaw)
         sane, why = self._pose_is_sane(base_x, base_y)
         if sane and on_wall < float(self.get_parameter('min_wall_overlap').value):
