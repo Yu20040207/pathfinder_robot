@@ -37,6 +37,9 @@ class Watchdog(Node):
     def __init__(self, dry_run: bool):
         super().__init__('chain_watchdog')
         self._dry = dry_run
+        self._started = time.monotonic()
+        # 启动宽限期：栈起来后监控要几十秒才稳定发布
+        self._grace_s = float(os.environ.get('FWR_WATCHDOG_GRACE_S', '45'))
         self._in = 0
         self._out = 0
         self._last_in = 0.0
@@ -125,7 +128,8 @@ class Watchdog(Node):
         time.sleep(1.5)
         ok = self._cli(name, 'activate')
         time.sleep(1.5)
-        back = (time.monotonic() - self._out_at) < 2.0 if self._out_at else False
+        last_out = getattr(self, '_last_out', 0.0)
+        back = bool(last_out) and (time.monotonic() - last_out) < 2.0
         self.get_logger().info(
             f'{name} activate={"成功" if ok else "失败"}，输出'
             f'{"已恢复" if back else "仍静默"}')
@@ -223,6 +227,12 @@ class Watchdog(Node):
 
     def _check(self) -> None:
         now = time.monotonic()
+        # 2026-11-18：启动宽限期。导航栈刚起来时监控还没发布，
+        # 看门狗会立刻判"卡死"并 deactivate/activate —— 而这恰恰是
+        # collision_monitor "configure 超时/卡在 inactive" 的根源。
+        if now - self._started < self._grace_s:
+            self._in = self._out = 0
+            return
         in_alive = now - self._last_in < 1.0
         out_alive = now - self._last_out < 1.0
         in_n, out_n = self._in, self._out
@@ -238,7 +248,26 @@ class Watchdog(Node):
             pass
 
 
+def _acquire_lock():
+    """单实例锁：多个看门狗同时重启监控会把监控本身搞死。"""
+    import fcntl
+    os.makedirs('/tmp/fwr_runs', exist_ok=True)
+    f = open('/tmp/fwr_runs/chain_watchdog.lock', 'w')
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        f.close()
+        return None
+    f.write(str(os.getpid()))
+    f.flush()
+    return f
+
+
 def main() -> int:
+    lock = _acquire_lock()
+    if lock is None:
+        print('已有看门狗实例在运行 → 本实例退出')
+        return 0
     ap = argparse.ArgumentParser()
     ap.add_argument('--dry-run', action='store_true')
     ap.add_argument('--restart-scan', action='store_true',
