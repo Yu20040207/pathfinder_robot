@@ -6570,3 +6570,59 @@ watchdog 服务: 已停（用户要求，等确认后再开）
 1. **物理重新插拔前雷达 USB**，确认 `/scan` 恢复 10 Hz
 2. 若恢复 → 双雷达建图即完成，做 A/B 地图质量对比（双墙窄缝面积）
 3. 之后改 `lidar_watchdog.py`（不再 `pkill -x`），否则双雷达无法长期共存
+
+## 2026-11-18 10:32 · ✅ 双雷达建图实机跑通
+
+### 最终结果（机器人 `fwr-n305`，车静止）
+| 话题 | 频率 | 有效束 | 视场 |
+| --- | --- | --- | --- |
+| `/scan` | 10.0 Hz | 544 | 360° |
+| `/scan_rear` | 10.1 Hz | 538 | 360° |
+| `/scan_mapping` | 8.9 Hz | 355 | **219°** |
+| `/scan_rear_mapping` | 8.8 Hz | 339 | **220°** |
+
+- 地图从零重建 **12.3×10.6 m**（空闲 15.2 m²）—— 不再是旧栈残留的 1359 m² 旧图
+- `cartographer_node` 存活，`Queue waiting` 与 `process has died` **均为 0**
+- TF 全部正确：
+  ```
+  base_link -> laser_front  (0.210, 0, 0.043)  yaw 180°
+  base_link -> laser_rear  (-0.229, 0, 0.043)  yaw   0°
+  base_footprint -> base_link (0, 0, 0.033)
+  map -> base_footprint 可用（Cartographer 在发布）
+  ```
+
+### 🔑 之前反复失败的真正原因：**3 个系统级 systemd 服务**
+```bash
+sudo systemctl status fwr-nav.service          # 自动启动导航栈（抢 ESP32 + 旧 URDF）
+sudo systemctl status fwr-mqtt-bridge.service  # 远程控制桥（会拉起建图/导航）
+sudo systemctl status fwr-battery.service      # 电量计（占 ttyUSB0，不碰雷达）
++ systemctl --user  fwr-lidar-watchdog.service # pkill -x sllidar_node，会杀后雷达
+```
+**杀进程没用** —— 服务会立刻拉起。必须 `systemctl stop`。
+
+排查顺序（下次直接照做）：
+```bash
+systemctl list-units --type=service --state=running | grep -iE 'fwr|ros'
+systemctl --user list-units --type=service --state=running | grep -iE 'fwr|ros'
+```
+
+### 启动双雷达建图的完整步骤
+```bash
+sudo -n systemctl stop fwr-nav.service fwr-mqtt-bridge.service
+systemctl --user stop fwr-lidar-watchdog.service
+pkill -f run_navigation; pkill -f mqtt_bridge; pkill -x sllidar_node
+ros2 launch fwr_bringup real_mapping_cartographer.launch.py
+# 验证：两路 /scan*_mapping 应各 ≈220°，cartographer 存活，无 Queue waiting
+```
+
+### 已知遗留（不影响本次结论）
+1. **`lidar_watchdog.py` 仍会杀后雷达**（`pkill -x sllidar_node`）→ 双雷达长期运行前必须改
+2. 前雷达被反复 SIGKILL 后会静默掉线，**需要物理重插 USB**（本次已复现一次）
+
+### 当前机器人状态
+```
+fwr-nav.service        : failed（已停，用户要求稍后再开）
+fwr-mqtt-bridge.service: inactive（已停）
+fwr-lidar-watchdog     : inactive（已停）
+双雷达建图栈           : 运行中 ✅
+```
