@@ -139,16 +139,17 @@ def generate_launch_description():
         Node(package='fwr_bringup', executable='room_labels', output='screen',
              parameters=[{'use_sim_time': use_sim_time,
                           'rooms_file': str(share / 'maps' / 'rooms.yaml')}]),
-        # 2026-11-18：一键播种固定用**前雷达 200°**（/scan_mapping），不吃 360° 合并扫描。
-        # 原因：1A_map 等老地图是"单前雷达时代"建的，覆盖范围只到前向 200°；
-        # 合并扫描里的后向 200° 会看到地图覆盖范围外的走廊/未知区，那些点落在
-        # unknown 格上被判成"没贴墙"，把贴墙率从 60%+ 压到 57% → 播种被拒
-        # → 没有位姿 → 没有 map→odom → auto_activate_nav 不激活 Nav2 → 整栈不动。
-        # 播种是"地图 vs 扫描"的一次性全局匹配，必须与地图同源；
-        # AMCL 的连续跟踪仍然用 /scan_merged（360°），不受影响。
+        # 2026-11-18（第二次修正）：播种必须用 **360° 合并扫描**。
+        # 之前为了绕开"贴墙率 57% < 60%"改成只用前雷达 200°，结果现场匹配到
+        # 10 m 外的等分伪解（残差 0.038 比 360° 的 0.064 还低，搜索当然选它）。
+        # 现在 57% 那个症状已经由两个根因修复解决（净空掩码 + 车体外参换算），
+        # 360° 实测贴墙率 70% 可以通过，且视野越全越不会在长走廊里镜像歧义。
         Node(package='fwr_bringup', executable='auto_initial_pose', output='screen',
              parameters=[{'use_sim_time': use_sim_time,
-                          'scan_topic': '/scan_mapping'}]),
+                          'scan_topic': PythonExpression([
+                              "'/scan_merged' if '",
+                              LaunchConfiguration('start_rear_lidar'),
+                              "' == 'true' else '/scan_mapping'"])}]),
         Node(package='fwr_bringup', executable='auto_command_gate',
              name='auto_command_gate', output='screen',
              parameters=[{'use_sim_time': use_sim_time}]),

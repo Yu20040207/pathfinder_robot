@@ -73,3 +73,25 @@ def test_search_only_returns_standable_pose():
     assert 0 <= ix < size and 0 <= iy < size
     assert score < 9.0, f'没找到任何候选（哨兵值 {score}）'
     assert mask[iy, ix], f'搜索给出了停不进去的位姿 ({x:.2f},{y:.2f})'
+
+
+def test_seeding_uses_full_360_scan():
+    """播种必须吃 360° 合并扫描。
+
+    2026-11-18 现场教训：为了绕开贴墙率不足而改成只用前雷达 200°，
+    结果匹配到 10 m 外的等分伪解（残差 0.038 比 360° 的 0.064 更低，
+    搜索必然选它）。视野不全 → 长走廊/对称房间会出现镜像歧义。
+    """
+    launch = (Path(__file__).resolve().parents[1] / 'launch' /
+              'real_navigation.launch.py').read_text()
+    assert "executable='auto_initial_pose'" in launch
+    i = launch.index("executable='auto_initial_pose'")
+    block = launch[i:i + 700]
+    assert '/scan_merged' in block, '有后雷达时必须用 360° 合并扫描播种'
+    assert "'/scan_mapping' if" not in block, '不能再固定成前雷达 200°'
+
+
+def test_wall_overlap_ignores_unknown_cells():
+    """贴墙率只在已知格上统计（未知格既不能证明也不能否定位姿）。"""
+    assert 'known = vals >= 0' in SRC
+    assert 'd[known]' in SRC

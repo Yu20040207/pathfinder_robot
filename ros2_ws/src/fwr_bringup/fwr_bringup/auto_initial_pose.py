@@ -147,8 +147,13 @@ class AutoInitialPose(Node):
         if inside.sum() < len(pts) * 0.5:
             return 0.0, 1.0
         d = dist[iy[inside], ix[inside]]
-        on_wall = float((d <= 0.10).mean())          # 10 cm 内算"贴在墙上"
-        unknown = float((grid[iy[inside], ix[inside]] < 0).mean())
+        vals = grid[iy[inside], ix[inside]]
+        # 2026-11-18：贴墙率只在**已知**格上统计。落在未知格的点既不能证明
+        # 也不能否定这个位姿（地图那一片还没建过），把它们算进分母会冤枉
+        # 正确的位姿 —— 360° 扫描往后方看时尤其明显（会看到地图覆盖范围外）。
+        known = vals >= 0
+        on_wall = float((d[known] <= 0.10).mean()) if known.any() else 0.0
+        unknown = float((vals < 0).mean())
         return on_wall, unknown
 
     def _clearance(self):
