@@ -54,6 +54,8 @@ class TrailReverser(Node):
         # 「任一侧够宽就直接转，只有两侧都不够才后退」的要求。
         self.declare_parameter('front_need_m', 0.45)    # 前方也要 >= 它
         self.declare_parameter('rear_need_m', 0.55)     # 车尾要退得动
+        # 前方必须受限（门口前方是开阔的，死胡同前方是墙）才允许"想转但转不开"
+        self.declare_parameter('turn_front_need_m', 1.30)
         self.declare_parameter('turn_intent_radps', 0.20)  # 多少算"想转弯"
         self.declare_parameter('backup_max_m', 0.80)    # 单次后退距离上限
         self.declare_parameter('backup_max_s', 12.0)    # 单次后退时长上限
@@ -341,9 +343,18 @@ class TrailReverser(Node):
         front = self._front_min()
         turn_need = float(self.get_parameter('turn_need_m').value)
         # "想转但转不开"要持续一小会儿才动作，防单帧噪声
-        tight = (bool(raw) and abs(raw.angular.z) >=
-                 float(self.get_parameter('turn_intent_radps').value)
-                 and not mc.lateral_ok(lat_l, lat_r, turn_need))
+        # 2026-11-18 回归（"过门口就后退"）：原来只看"|ω|>=0.2 且两侧窄"，
+        # 而门口天然两侧都窄、过门又有曲率 → 每过一个门就后退。
+        # 现在要求"大角度转向 + 前方受限或确实卡住"（门口前方是开阔的）。
+        tight = bool(raw) and mc.tight_turn_needed(
+            raw_w_radps=raw.angular.z,
+            lat_left_m=lat_l, lat_right_m=lat_r,
+            front_m=front,
+            blocked_for_s=self._blocked_acc,
+            turn_need_m=turn_need,
+            w_min_radps=float(self.get_parameter('turn_intent_radps').value),
+            front_need_m=float(self.get_parameter('turn_front_need_m').value),
+            blocked_s=float(self.get_parameter('blocked_s').value))
         self._turn_tight_acc = self._turn_tight_acc + dt if tight else 0.0
 
         ok, why = mc.wants_backup(
@@ -396,8 +407,12 @@ class TrailReverser(Node):
                 throttle_duration_sec=5.0)
         self._active_pub.publish(Bool(data=True))
         if why == 'turn-too-tight':
-            detail = '想转但侧向不够（左 %.2f / 右 %.2f，需 %.2f）' % (
-                lat_l, lat_r, float(self.get_parameter('turn_need_m').value))
+            raw = self._raw_cmd
+            detail = '想转但侧向不够（左 %.2f / 右 %.2f，需 %.2f，前 %.2f）' % (
+                lat_l, lat_r, float(self.get_parameter('turn_need_m').value),
+                self._front_min())
+            if raw is not None:
+                detail += ' [Nav2 v=%.2f w=%.2f]' % (raw.linear.x, raw.angular.z)
         else:
             detail = '前方快撞（%.2f m，需 %.2f，已挡 %.1f s）' % (
                 front, float(self.get_parameter('front_need_m').value),

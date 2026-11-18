@@ -304,3 +304,41 @@ def test_escape_rotation_requires_both_sides():
     block = src[i:i + 3000]
     assert 'elif not both_ok:' in block, '脱困旋转必须检查两侧'
     assert 'escape_blocked and both_ok' in block
+
+
+def test_doorway_does_not_trigger_reverse():
+    """过门口绝对不能触发让位后退（2026-11-18 回归事故）。
+
+    门洞 ~0.9 m、车宽 0.36 → 每侧约 0.27 m，两侧都不够 0.40；
+    Nav2 沿路径过门时又有曲率。但门口是"穿过去"，不需要原地转。
+    实测门口读数：左 0.56~0.65 / 右 0.35~0.38。
+    """
+    from fwr_bringup.maneuver_core import tight_turn_needed  # noqa: E402
+    # 门口：两侧 0.35/0.56 但前方开阔（3 m）
+    assert not tight_turn_needed(raw_w_radps=0.30, lat_left_m=0.56,
+                                 lat_right_m=0.35, front_m=3.00,
+                                 blocked_for_s=0.0)
+    # 门口稍微带点大角度，只要前方开阔且没卡住，仍然不许退
+    assert not tight_turn_needed(raw_w_radps=0.45, lat_left_m=0.56,
+                                 lat_right_m=0.35, front_m=2.50,
+                                 blocked_for_s=0.1)
+
+
+def test_dead_end_still_triggers_reverse():
+    from fwr_bringup.maneuver_core import tight_turn_needed  # noqa: E402
+    # 死胡同：两侧窄 + 前方就是墙
+    assert tight_turn_needed(raw_w_radps=0.60, lat_left_m=0.45,
+                             lat_right_m=0.34, front_m=0.90,
+                             blocked_for_s=0.0)
+    # 大空间但被卡住不动（选择器拒绝原地转）→ 也要能退
+    assert tight_turn_needed(raw_w_radps=0.55, lat_left_m=1.20,
+                             lat_right_m=0.35, front_m=2.00,
+                             blocked_for_s=1.2)
+
+
+def test_small_curvature_never_triggers():
+    """小角度修正（过门、贴墙）永远不许触发后退。"""
+    from fwr_bringup.maneuver_core import tight_turn_needed  # noqa: E402
+    assert not tight_turn_needed(raw_w_radps=0.20, lat_left_m=0.40,
+                                 lat_right_m=0.30, front_m=0.80,
+                                 blocked_for_s=3.0)

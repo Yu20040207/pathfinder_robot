@@ -34,6 +34,31 @@ def can_turn(lat_left_m: float, lat_right_m: float, front_m: float,
             and front_m >= front_need_m)
 
 
+def tight_turn_needed(*, raw_w_radps: float, lat_left_m: float, lat_right_m: float,
+                      front_m: float, blocked_for_s: float,
+                      turn_need_m: float = 0.40, w_min_radps: float = 0.40,
+                      front_need_m: float = 1.30,
+                      blocked_s: float = 0.5) -> bool:
+    """是否"想大角度转但现在转不开"（= 死胡同掉头场景）。
+
+    2026-11-18 现场（**过门口就后退**，回归事故）：
+    原来的判据是"|ω|>=0.2 且两侧都 <0.40" —— 而**门口/走廊天然两侧都不够宽**
+    （门洞 ~0.9 m，车宽 0.36 → 每侧约 0.27 m），Nav2 沿路径过门时又有曲率
+    （|ω| 轻松 ≥0.2），于是每过一个门就触发让位后退。
+
+    门口和死胡同的区别**不在两侧宽度**（两者都窄），而在：
+      · 死胡同：前方被墙挡住（front 小），或者车已经被卡住不动了
+      · 门口：前方是开阔的（front 很大），车正在穿过去
+
+    所以必须再加一条"前方受限 或 确实卡住"，且要求**真正的大角度转向**。
+    """
+    if abs(raw_w_radps) < w_min_radps:
+        return False
+    if min(lat_left_m, lat_right_m) >= turn_need_m:
+        return False
+    return front_m < front_need_m or blocked_for_s >= blocked_s
+
+
 def wants_backup(*, want_turn: bool, blocked_for_s: float, front_m: float,
                  lat_left_m: float, lat_right_m: float,
                  rear_min_m: float, rear_blocked: bool,
