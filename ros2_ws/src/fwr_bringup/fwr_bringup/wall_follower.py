@@ -398,6 +398,10 @@ class WallFollower(Node):
 
     def _tick(self) -> None:
         now = self.get_clock().now().nanoseconds * 1e-9
+        # 2026-11-18：倒车分支（now < self._reverse_until）在下面的
+        # `twist = Twist()` 之前就用了 twist → NameError → 节点崩溃。
+        # 这里提前创建，保持"一进倒车就崩"不再发生。
+        twist = Twist()
         if self._gates_at is None:
             self._gates_at = now
         if bool(self.get_parameter('open_gates').value) and self._started_at is None:

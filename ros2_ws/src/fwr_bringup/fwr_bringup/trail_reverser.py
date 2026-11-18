@@ -29,6 +29,8 @@ from std_srvs.srv import Trigger
 from std_msgs.msg import Bool
 
 from . import trail_reverser_core as tc
+from . import turn_backup_core as tb
+from .rear_guard_core import sector_min_range
 
 
 class TrailReverser(Node):
@@ -42,6 +44,17 @@ class TrailReverser(Node):
         self.declare_parameter('max_reverse_m', 1.2)      # 安全上限
         self.declare_parameter('max_s', 10.0)             # 安全上限
         self.declare_parameter('cooldown_s', 5.0)
+        # 2026-11-18：转弯让位（要转大角度但车头贴太近 → 直线后退一点腾空间）
+        self.declare_parameter('turn_backup_enabled', True)
+        self.declare_parameter('turn_blocked_s', 0.8)
+        self.declare_parameter('turn_front_close_m', 0.45)
+        self.declare_parameter('turn_rear_need_m', 0.35)
+        self.declare_parameter('turn_backup_dist_m', 0.20)
+        self.declare_parameter('turn_backup_max_s', 2.5)
+        self.declare_parameter('turn_backup_speed_mps', 0.08)
+        self.declare_parameter('turn_max_attempts', 3)
+        self.declare_parameter('turn_cooldown_s', 3.0)
+        self.declare_parameter('rear_scan_topic', '/scan_rear_mapping')
         self.declare_parameter('target_back_m', 0.40)     # 跟踪"身后 0.4 m"的轨迹点
         self.declare_parameter('trail_step_m', 0.05)
         self.declare_parameter('trail_len_m', 5.0)
@@ -76,11 +89,20 @@ class TrailReverser(Node):
         self.declare_parameter('restore_arm_delay_s', 0.6)
         self._auto_armed = False
         self._armed_before = False
+        self._mode = 'deadend'          # 'deadend' | 'turn'
+        self._turn_attempts = 0
+        self._turn_last_end = -1e9
+        self._rear_scan = None
+        self._rear_min = float('inf')
+        self._unblocked_since = None
         self._rearm_at = None
         self._arm_client = self.create_client(Trigger, '/base/arm_auto')
         self.create_subscription(Bool, '/base/auto_armed', self._on_auto_armed, 10)
         self.create_subscription(Bool, '/base/rear_blocked',
                                  lambda m: setattr(self, '_rear_blocked', bool(m.data)), 10)
+        # 后雷达是传感器数据：直接用 qos_profile_sensor_data（Best Effort, depth 5）
+        self.create_subscription(LaserScan, str(self.get_parameter('rear_scan_topic').value),
+                                 self._on_rear_scan, qos_profile_sensor_data)
         self.create_subscription(Twist, '/cmd_vel_auto_unchecked', self._on_raw, 20)
         self.create_subscription(Twist, '/cmd_vel_auto_forward_filtered',
                                  self._on_filtered, 20)
@@ -97,6 +119,12 @@ class TrailReverser(Node):
         p = msg.pose.pose.position
         self._pose = (p.x, p.y, yaw)
         self._trail.append(p.x, p.y)
+
+    def _on_rear_scan(self, msg: LaserScan) -> None:
+        self._rear_scan = msg
+        # 后雷达 yaw=0：扫描角 180° 就是车尾正后方（与 rear_guard 一致）
+        self._rear_min = sector_min_range(
+            msg.ranges, msg.angle_min, msg.angle_increment, 180.0, 35.0)
 
     def _on_auto_armed(self, msg: Bool) -> None:
         self._auto_armed = bool(msg.data)
@@ -175,10 +203,26 @@ class TrailReverser(Node):
         stopped = bool(filt and abs(filt.linear.x) + abs(filt.angular.z) < 0.01)
         if wants_motion and stopped:
             self._blocked_since = self._blocked_since or now
+            self._unblocked_since = None
         else:
             self._blocked_since = None
+            # 车又能正常走了 → 连续 3 s 顺畅后把"转弯让位"次数复位，
+            # 否则一次任务里用完 3 次就永久不再让位了。
+            moving = bool(filt and abs(filt.linear.x) + abs(filt.angular.z) > 0.02)
+            if moving:
+                if self._unblocked_since is None:
+                    self._unblocked_since = now
+                elif now - self._unblocked_since > 3.0:
+                    self._turn_attempts = 0
+                    self._unblocked_since = None
+            else:
+                self._unblocked_since = None
             return
         left, right = self._side_clearance()
+        front_min = min(left, right)
+        # 先按"死胡同沿轨迹倒车"，不满足再按"转弯让位直线后退"
+        if self._try_turn_backup(now, raw, front_min):
+            return
         ok, why = tc.should_start(
             blocked_for_s=now - self._blocked_since,
             side_left_m=left,
@@ -192,6 +236,7 @@ class TrailReverser(Node):
         if not ok:
             return
         self._reversing = True
+        self._mode = 'deadend'
         # 记住倒车前的自动授权状态，结束时恢复（否则 Nav2 接不上）
         self._armed_before = self._auto_armed
         self._started_at = now
@@ -203,7 +248,65 @@ class TrailReverser(Node):
             '前方被挡且左右都不足 %.1f m（实测 左 %.2f / 右 %.2f m）→ 开始沿原路后退' % (
                 float(self.get_parameter('side_tight_m').value), left, right))
 
+    def _try_turn_backup(self, now: float, raw, front_min: float) -> bool:
+        """要转大角度但车头贴太近 → 直线后退一点腾出转弯空间。"""
+        if not bool(self.get_parameter('turn_backup_enabled').value):
+            return False
+        if self._blocked_since is None:
+            return False
+        ok, why = tb.wants_backup(
+            blocked_for_s=now - self._blocked_since,
+            raw_linear=raw.linear.x if raw else 0.0,
+            raw_angular=raw.angular.z if raw else 0.0,
+            front_min_m=front_min,
+            rear_min_m=self._rear_min,
+            rear_blocked=self._rear_blocked,
+            attempts=self._turn_attempts,
+            since_last_s=now - self._turn_last_end,
+            blocked_s=float(self.get_parameter('turn_blocked_s').value),
+            front_close_m=float(self.get_parameter('turn_front_close_m').value),
+            rear_need_m=float(self.get_parameter('turn_rear_need_m').value),
+            max_attempts=int(self.get_parameter('turn_max_attempts').value),
+            cooldown_s=float(self.get_parameter('turn_cooldown_s').value))
+        if not ok:
+            return False
+        self._reversing = True
+        self._mode = 'turn'
+        self._armed_before = self._auto_armed
+        self._started_at = now
+        self._start_pose = self._pose
+        self._reversed_m = 0.0
+        self._set_manual(True)
+        self._active_pub.publish(Bool(data=True))
+        self.get_logger().warn(
+            '要转向但车头仅 %.2f m（车尾 %.2f m 净空）→ 直线后退让位（第 %d 次）' % (
+                front_min, self._rear_min, self._turn_attempts + 1))
+        return True
+
+    def _step_turn_backup(self, now: float) -> None:
+        x, y, _ = self._pose
+        self._reversed_m = math.hypot(x - self._start_pose[0], y - self._start_pose[1])
+        done, why = tb.backup_done(
+            backed_m=self._reversed_m,
+            elapsed_s=now - self._started_at,
+            rear_min_m=self._rear_min,
+            rear_blocked=self._rear_blocked,
+            dist_m=float(self.get_parameter('turn_backup_dist_m').value),
+            max_s=float(self.get_parameter('turn_backup_max_s').value))
+        if done:
+            self._turn_attempts += 1
+            self._turn_last_end = now
+            self._finish(why, self._reversed_m)
+            return
+        cmd = Twist()
+        cmd.linear.x = -abs(float(self.get_parameter('turn_backup_speed_mps').value))
+        cmd.angular.z = 0.0
+        self._cmd.publish(cmd)
+
     def _step_reverse(self, now: float) -> None:
+        if self._mode == 'turn':
+            self._step_turn_backup(now)
+            return
         x, y, yaw = self._pose
         self._reversed_m = math.hypot(x - self._start_pose[0], y - self._start_pose[1])
         left, right = self._side_clearance()
@@ -241,7 +344,9 @@ class TrailReverser(Node):
         self._last_end = time.monotonic()
         self._blocked_since = None
         self.get_logger().info(
-            '后退结束（%s）：退了 %.2f m，左右净空 %.2f m' % (why, self._reversed_m, side))
+            '后退结束[%s]（%s）：退了 %.2f m' % (
+                '转弯让位' if getattr(self, '_mode', '') == 'turn' else '沿轨迹倒车',
+                why, self._reversed_m))
 
 
 def main() -> None:
