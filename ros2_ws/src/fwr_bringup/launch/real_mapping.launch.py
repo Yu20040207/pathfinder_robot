@@ -7,7 +7,7 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.conditions import IfCondition
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 
 
@@ -83,6 +83,17 @@ def generate_launch_description():
              remappings=[('/scan', '/scan_rear'),
                          ('/scan_mapping', '/scan_rear_mapping'),
                          ('/scan_mapping/healthy', '/scan_rear_mapping/healthy')]),
+
+        # ---- 双雷达合并：slam_toolbox 只吃单路，把两路 220° 合成 360° ----
+        # （Cartographer 原生支持多路，不需要这个节点；只在使用 slam 引擎时有用）
+        Node(package='fwr_bringup', executable='scan_merger', name='scan_merger',
+             condition=IfCondition(LaunchConfiguration('start_rear_lidar')),
+             output='screen',
+             parameters=[{'use_sim_time': use_sim_time,
+                          'scan_a': '/scan_mapping',
+                          'scan_b': '/scan_rear_mapping',
+                          'output_topic': '/scan_merged',
+                          'target_frame': 'base_link'}]),
         Node(package='robot_state_publisher', executable='robot_state_publisher',
              name='robot_state_publisher', output='screen',
              parameters=[{'robot_description': description, 'use_sim_time': use_sim_time}]),
@@ -94,7 +105,13 @@ def generate_launch_description():
              name='slam_toolbox', output='screen',
              remappings=[('/map', LaunchConfiguration('slam_map_topic'))],
              condition=IfCondition(LaunchConfiguration('start_slam')),
-             parameters=[LaunchConfiguration('slam_params')]),
+             # 2026-11-18：双雷达时 slam_toolbox 2.6.10 只能吃一路，
+             # 所以改用 scan_merger 合成的 /scan_merged（360°）；
+             # 单雷达（start_rear_lidar:=false）仍用 /scan_mapping。
+             parameters=[LaunchConfiguration('slam_params'),
+                         {'scan_topic': PythonExpression([
+                             "'/scan_merged' if '", LaunchConfiguration('start_rear_lidar'),
+                             "' == 'true' else '/scan_mapping'"])}]),
         # RViz「保存地图」按钮的服务：一次保存 .posegraph/.data + .pgm/.yaml。
         # 目录默认取 FWR_MAP_DIR（start_manual_mapping.sh 会设为源码 maps/），
         # 未设置时保存到 ~/robot_maps。
