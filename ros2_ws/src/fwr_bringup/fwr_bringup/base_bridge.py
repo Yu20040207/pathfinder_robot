@@ -379,10 +379,15 @@ class BaseBridgeNode(Node):
             # 2026-11-18 现场（"撞到障碍物了，没有后退"）：这条 return 以前是**静默**的。
             # 倒车节点发了 12 s 指令、车身一动不动，日志里一个字都没有 ——
             # 真凶是 motion_enabled 已被面板/任务结束关掉，_sensors_ready 直接 False。
-            if self._reverse_active:
+            # 2026-11-18：这里原来只在 _reverse_active 为真时告警。
+            # 但现场正是 _reverse_active **没收到**（DDS 没连上，单次 latch 丢失）
+            # 才导致的丢弃 —— 于是又变成静默。现在只要手动门开着就告警。
+            if self._reverse_active or bool(
+                    self.get_parameter('manual_enabled').value):
                 self.get_logger().warn(
-                    '让位倒车指令被丢弃：运动门未开或传感器未就绪'
-                    f'（motion_enabled={bool(self.get_parameter("motion_enabled").value)}）',
+                    '手动/倒车指令被丢弃：运动门未开或传感器未就绪'
+                    f'（motion_enabled={bool(self.get_parameter("motion_enabled").value)}，'
+                    f'reverse_active={self._reverse_active}）',
                     throttle_duration_sec=2.0)
             return
         if (msg.linear.x < -1e-6 and self._rear_blocked and

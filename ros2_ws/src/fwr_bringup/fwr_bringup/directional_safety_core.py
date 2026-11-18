@@ -227,6 +227,17 @@ class DirectionalSafetyCore:
         return output_x, output_z
 
 
+def rotation_allowed(left_m: float, right_m: float, clear_m: float) -> bool:
+    """原地转必须**两侧都**够宽。
+
+    2026-11-18 现场（"还左转撞到了障碍物"）：左侧 0.67 m 很宽、右侧只有 0.16 m，
+    选择器按"请求侧够宽就转"放行，于是原地左转 —— 但车角扫掠半径是 0.35 m，
+    左转时**右后角**同样会扫向右侧那堵 0.16 m 的墙 → 当场撞上。
+    原地旋转是绕车心转，四个角都要空间，只看一侧在几何上就是错的。
+    """
+    return min(left_m, right_m) >= clear_m
+
+
 def choose_rotate_side(blocked: bool, requested_m: float, opposite_m: float,
                        clear_m: float = 0.16,
                        margin_m: float = 0.15) -> str | None:

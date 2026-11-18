@@ -247,3 +247,25 @@ def test_still_backs_up_when_both_sides_under_040():
                            rear_min_m=1.20, rear_blocked=False,
                            attempts=0, since_last_s=99.0)
     assert ok and why == 'turn-too-tight'
+
+
+def test_rotation_requires_both_sides():
+    """原地转必须两侧都够宽 —— 左 0.67 / 右 0.16 绝对不能转。
+
+    2026-11-18 现场："还左转撞到了障碍物"。左转时右后角会扫向右侧那堵 0.16 m
+    的墙（车角扫掠半径 0.35 m），只看请求侧在几何上就是错的。
+    """
+    from fwr_bringup.directional_safety_core import rotation_allowed  # noqa: E402
+    assert not rotation_allowed(0.67, 0.16, 0.38)
+    assert not rotation_allowed(0.16, 0.67, 0.38)
+    assert rotation_allowed(0.40, 0.41, 0.38)
+    assert not rotation_allowed(0.37, 0.90, 0.38)
+
+
+def test_selector_gates_rotation_on_both_sides():
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / 'fwr_bringup' /
+           'directional_safety_selector.py').read_text()
+    assert 'rotation_allowed(' in src
+    assert "rotate_clear_m', 0.38" in src, '0.16 只够正前方，侧向必撞'
+    assert 'both_ok and self._front_min_m >= clear' in src

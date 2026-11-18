@@ -415,6 +415,11 @@ class TrailReverser(Node):
                 self._turn_attempts = 0        # 目的达成，下次重新计
             self._finish(why, min(lat_l, lat_r))
             return
+        # 2026-11-18：/reverse/active 必须**持续**发布。原来只在 _begin_reverse
+        # 发一次（latch），导航栈刚起来时 DDS 发现还没完成 → 这一条丢了 →
+        # base_bridge 认为"不是让位"，把倒车指令全部静默丢弃（实测 12 s 退 0.00 m、
+        # 日志里 [manual] rx 一条都没有）。
+        self._active_pub.publish(Bool(data=True))
         tgt = self._trail.target_behind(
             float(self.get_parameter('target_back_m').value))
         cmd = Twist()

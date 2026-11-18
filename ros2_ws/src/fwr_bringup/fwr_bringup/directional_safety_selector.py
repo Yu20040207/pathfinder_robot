@@ -16,7 +16,8 @@ from std_msgs.msg import Bool, String
 from tf2_ros import Buffer, TransformException, TransformListener
 
 from .directional_safety_core import (DirectionalSafetyCore,
-                                     choose_rotate_side, latch_choice)
+                                     choose_rotate_side, latch_choice,
+                                     rotation_allowed)
 
 
 class DirectionalSafetySelector(Node):
@@ -32,7 +33,9 @@ class DirectionalSafetySelector(Node):
         # 雷达装在被转中心**前方 0.21 m**，旋转时车体扫过半径 0.37 m
         # → 雷达读数只要 > 0.37 - 0.21 = 0.16 m 就是安全的。
         # 之前用 0.34（相当于要求 0.55 m 实际余量），难怪"能转却不转"。
-        self.declare_parameter('rotate_clear_m', 0.16)
+        # 2026-11-18：0.16 → 0.38。0.16 只够"车角不碰到正前方"，
+        # 原地转绕车心扫掠半径 0.35 m，侧向 0.16 m 必撞（实测撞了）。
+        self.declare_parameter('rotate_clear_m', 0.38)
         # 前方被挡要原地转时，对面要比请求侧宽出这么多才翻过去
         self.declare_parameter('flip_margin_m', 0.15)
         # 前进被挡的判定距离（= 碰撞监控 front_stop 的外沿 0.45 m）
@@ -223,21 +226,24 @@ class DirectionalSafetySelector(Node):
         # 左转（w>0）要左前空旷；右转（w<0）要右前空旷
         requested = self._left_min_m if cmd_w > 0 else self._right_min_m
         opposite = self._right_min_m if cmd_w > 0 else self._left_min_m
-        # 正前方空旷 → 随便转
-        self.core.rotate_clear_ok = self._front_min_m >= clear
-        # 请求方向本身就空旷 → 直接转（不翻转）
-        self.core.rotate_same_side_ok = requested >= clear
-        # 请求方向被挡、反方向空旷 → 翻转
-        self.core.rotate_flip_ok = (not self.core.rotate_same_side_ok) and opposite >= clear
+        # 原地转是绕车心转：**两侧都**要够宽，只看一侧在几何上就是错的
+        both_ok = rotation_allowed(self._left_min_m, self._right_min_m, clear)
+        # 正前方空旷 + 两侧都够 → 随便转
+        self.core.rotate_clear_ok = both_ok and self._front_min_m >= clear
+        # 请求方向本身就空旷（且两侧都够）→ 直接转（不翻转）
+        self.core.rotate_same_side_ok = both_ok and requested >= clear
+        # 请求方向被挡、反方向空旷（且两侧都够）→ 翻转
+        self.core.rotate_flip_ok = (both_ok and not self.core.rotate_same_side_ok
+                                    and opposite >= clear)
 
         # 前进被挡时改原地转：用**前进停车距离**判断（不是旋转阈值！）
         # 前进停车区 0.45 m；旋转只需 0.16 m（雷达前置偏移已扣除）。
         blocked = self._front_min_m < float(self.get_parameter('forward_block_m').value)
         # 2026-11-04：翻转方向必须**迟滞锁定**，否则阈值附近逐帧翻转 →
         # 两后轮反复正反转 → 固件判堵转（fault 1）。见 latch_choice 注释。
-        want = choose_rotate_side(
+        want = (choose_rotate_side(
             blocked, requested, opposite, clear,
-            float(self.get_parameter('flip_margin_m').value))
+            float(self.get_parameter('flip_margin_m').value)) if both_ok else None)
         choice = self.core_latch(blocked, want)
         self.core.blocked_rotate_same = blocked and choice == 'same'
         self.core.blocked_rotate_ok = blocked and choice == 'flip'

@@ -260,4 +260,20 @@ def test_manual_channel_not_silently_dropped_during_reverse():
     j = src.index('def _on_manual_velocity')
     mblock = src[j:j + 1600]
     assert 'allow_reverse=self._reverse_active' in mblock
-    assert '让位倒车指令被丢弃' in mblock
+    assert '被丢弃' in mblock and 'reverse_active=' in mblock
+
+
+def test_reverse_active_is_published_continuously():
+    """让位状态必须持续发布，不能只在开始发一次。
+
+    2026-11-18：导航栈刚起来时 DDS 发现未完成，单条 latch 丢失 →
+    base_bridge 的 _reverse_active 一直是 False → 倒车指令被静默丢弃，
+    实测 12 s 退 0.00 m、日志里 [manual] rx 一条都没有。
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / 'fwr_bringup' /
+           'trail_reverser.py').read_text()
+    i = src.index('def _step_reverse')
+    block = src[i:i + 1800]
+    assert "_active_pub.publish(Bool(data=True))" in block, \
+        '每一步都要重发让位状态，否则晚连上的订阅者永远收不到'
