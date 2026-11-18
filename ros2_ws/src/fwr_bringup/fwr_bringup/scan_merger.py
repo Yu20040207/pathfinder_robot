@@ -37,6 +37,10 @@ class ScanMerger(Node):
         self.declare_parameter('range_max', 12.0)
         self.declare_parameter('stale_timeout_s', 0.6)
         self.declare_parameter('publish_rate_hz', 10.0)
+        # 2026-11-18：默认等**两路都就绪**再开始发布。
+        # 原因：slam_toolbox 的 minimum_travel_distance=0.5，车不动时只处理第一帧；
+        # 若第一帧只有前雷达（后雷达还在起转），整个地图就永远缺后半圈。
+        self.declare_parameter('require_both', True)
 
         self._target = str(self.get_parameter('target_frame').value)
         self._bins = int(self.get_parameter('bins').value)
@@ -92,6 +96,14 @@ class ScanMerger(Node):
                  if s in self._latest and now - self._at.get(s, 0.0) <= self._stale]
         if not fresh:
             return                       # 两路都没数据：不发（避免"全空"误导）
+        if bool(self.get_parameter('require_both').value) and len(fresh) < 2:
+            # 只有一路就绪时先不发布：slam_toolbox 可能只处理第一帧，
+            # 那第一帧必须已经是完整 360°，否则地图会永久缺半圈。
+            if not getattr(self, '_warned_wait', False):
+                self._warned_wait = True
+                self.get_logger().info(
+                    f'等待第二路雷达就绪（已有 {fresh}），暂不发布合并扫描')
+            return
         pieces = []
         stamps = []
         for slot in fresh:
