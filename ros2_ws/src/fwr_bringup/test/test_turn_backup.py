@@ -334,3 +334,20 @@ def test_reverse_allows_mixed_velocity():
     # 让位倒车放行后必须合法
     assert manual_velocity(-0.08, -0.15, track, max_linear_mps=0.2,
                            allow_mixed=True)
+
+
+def test_arm_auto_does_not_require_state_freshness():
+    """恢复自动授权不能要求 ESP 状态帧新鲜。
+
+    2026-11-18 现场："退完就失控"。倒车期间底盘被连续下发速度，固件只在
+    串口空闲时上报状态 → core.ready() 为 False → arm_auto 连报 4 次
+    "serial not ready" → 自动授权恢复失败 → Nav2 再也接不上。
+    与 accept_cmd 一致：只要 connected + verified + fault==0。
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / 'fwr_bringup' /
+           'base_bridge.py').read_text()
+    i = src.index('def _arm_auto')
+    block = src[i:i + 1400]
+    assert 'self._core.ready(now)' not in block, 'arm_auto 不能看状态帧新鲜度'
+    assert 'self._core.connected and self._core.verified' in block

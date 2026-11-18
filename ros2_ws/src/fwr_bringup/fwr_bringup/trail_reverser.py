@@ -427,6 +427,9 @@ class TrailReverser(Node):
         if done:
             if why == 'can-turn-now':
                 self._turn_attempts = 0        # 目的达成，下次重新计
+            self.get_logger().info(
+                f'后退判定[{why}] 左={lat_l:.2f} 右={lat_r:.2f} '
+                f'前={self._front_min():.2f} 退={self._reversed_m:.2f}m')
             self._finish(why, min(lat_l, lat_r))
             return
         # 2026-11-18：/reverse/active 必须**持续**发布。原来只在 _begin_reverse

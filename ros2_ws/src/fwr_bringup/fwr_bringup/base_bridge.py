@@ -191,7 +191,14 @@ class BaseBridgeNode(Node):
         reason = 'base/sensors unavailable'
         while True:
             now = time.monotonic()
-            if not self._core.ready(now):
+            # 2026-11-18 现场（"退完就失控"）：这里原来用 core.ready()，它要求
+            # **ESP 状态帧新鲜**；而固件只在串口空闲时才上报状态 —— 底盘正在被
+            # 连续下发速度（倒车刚结束就是这种状态）时状态必然变旧，
+            # 于是 arm_auto 连报 4 次 "serial not ready" → 自动授权没恢复 →
+            # Nav2 再也接不上，只能"重新点开始导航"。
+            # 与 accept_cmd 保持一致：只要求"链路已连接 + 握手完成 + 无故障"。
+            if not (self._core.connected and self._core.verified
+                    and self._core.fault == 0):
                 reason = 'serial not ready'
             elif not self._sensors_ready(now):
                 reason = 'scan/imu not fresh'
