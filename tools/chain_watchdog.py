@@ -111,17 +111,26 @@ class Watchdog(Node):
             return False
 
     def _restart(self, name):
-        state = self._state_of(name)
-        self.get_logger().warn(f'{name} 状态 {state}，执行 deactivate->activate')
-        if state in ('active',):
-            self._cli(name, 'deactivate')
-            time.sleep(1.5)
-        if self._state_of(name) in ('inactive', 'unconfigured'):
-            self._cli(name, 'activate')
-        time.sleep(1.0)
-        self.get_logger().info(
-            f'{name} 处理后状态 {self._state_of(name)}')
+        """不看状态，直接"停->起"，然后用输出是否恢复来判定。
 
+        2026-11-18：这个看门狗原来先查状态再决定怎么转，但 rclpy 和 CLI 两种
+        查法在现场都会返回 'unknown'（ros2 lifecycle get 10 s 超时），于是
+        36 次重启全部失败、还要反复打扰监控。现在干脆不查 —— deactivate 失败
+        也无所谓（可能已经 inactive），关键是后面那次 activate，然后用
+        "输出是否恢复"验证效果。
+        """
+        self.get_logger().warn(f'{name} 输出静默 → deactivate/activate')
+        self._cli(name, 'deactivate')
+        time.sleep(1.5)
+        ok = self._cli(name, 'activate')
+        time.sleep(1.5)
+        back = (time.monotonic() - self._out_at) < 2.0 if self._out_at else False
+        self.get_logger().info(
+            f'{name} activate={"成功" if ok else "失败"}，输出'
+            f'{"已恢复" if back else "仍静默"}')
+        if not back:
+            self.get_logger().error(
+                f'{name} 无法恢复 → 需要重启导航栈（bash /tmp/restart_nav.sh）')
 
     def _scan_publishers(self):
         try:
