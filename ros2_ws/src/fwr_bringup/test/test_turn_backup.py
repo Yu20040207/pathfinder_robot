@@ -240,3 +240,24 @@ def test_base_bridge_lets_reverse_channel_through():
     i = src.index("command_source_allowed(\n                'manual'")
     block = src[i:i + 260]
     assert '_reverse_active' in block, '让位期间必须放行手动指令'
+
+
+def test_manual_channel_not_silently_dropped_during_reverse():
+    """让位倒车期间不许因为 motion_enabled=False 被静默丢弃。
+
+    2026-11-18 现场："撞到障碍物了，没有后退"。倒车节点发了 12 s 指令、
+    车身一动不动、日志一个字都没有 —— motion_enabled 已被任务结束/面板关掉，
+    _sensors_ready() 直接 False 且不打印。改：让位期间放宽运动门（扫描/IMU
+    有效性照旧），并且丢弃时要 warn。
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / 'fwr_bringup' /
+           'base_bridge.py').read_text()
+    i = src.index('def _sensors_ready')
+    block = src[i:i + 900]
+    assert 'allow_reverse' in block, '_sensors_ready 必须支持让位放行'
+    assert 'if not allow_reverse and not bool(' in block
+    j = src.index('def _on_manual_velocity')
+    mblock = src[j:j + 1600]
+    assert 'allow_reverse=self._reverse_active' in mblock
+    assert '让位倒车指令被丢弃' in mblock

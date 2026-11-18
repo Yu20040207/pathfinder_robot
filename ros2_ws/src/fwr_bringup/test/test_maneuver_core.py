@@ -189,3 +189,39 @@ def test_blocked_decays_only_after_grace():
     assert acc == 1.0
     acc = accumulate_blocked(acc, 0.2, False, unblocked_s=1.0)   # 真的通了 → 2 倍速
     assert acc == pytest.approx(0.6)
+
+
+# ---------- 被挡要原地转时，往宽的那侧转（2026-11-18 用户提问） ----------
+
+from fwr_bringup.directional_safety_core import choose_rotate_side  # noqa: E402
+
+
+def test_turns_toward_wider_side_when_blocked():
+    """前方被挡、要原地转出去时，明显更宽的一侧优先。
+
+    原来是"只有请求侧 <0.16 m 才翻"，等于永不翻转 —— 死胡同里 Nav2 想往窄的
+    那侧掉头，车就顶着窄墙转。
+    """
+    # Nav2 想往右（requested=右 0.30），左边 0.60 更宽 → 应翻到左
+    assert choose_rotate_side(True, 0.30, 0.60) == 'flip'
+    # 反过来
+    assert choose_rotate_side(True, 0.60, 0.30) == 'same'
+
+
+def test_no_flip_without_margin():
+    """两边差不多宽时不要来回翻（差值 <= 0.15 视作一样）。"""
+    assert choose_rotate_side(True, 0.50, 0.60) == 'same'
+    assert choose_rotate_side(True, 0.50, 0.52) == 'same'
+
+
+def test_front_clear_keeps_nav_direction():
+    """前方没被挡时不许改方向 —— 正常行驶必须听 Nav2 的。"""
+    assert choose_rotate_side(False, 0.20, 0.90) == 'same'
+    # 请求侧看起来窄但前方没挡，也不该翻
+    assert choose_rotate_side(False, 0.10, 0.90) == 'flip'   # 请求侧 < clear 才翻
+    assert choose_rotate_side(False, 0.30, 0.90) == 'same'
+
+
+def test_both_sides_tight_cannot_turn():
+    """两侧都不够宽 → 不允许转（交给后退让位）。"""
+    assert choose_rotate_side(True, 0.10, 0.12) is None

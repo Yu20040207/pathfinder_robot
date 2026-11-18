@@ -227,6 +227,31 @@ class DirectionalSafetyCore:
         return output_x, output_z
 
 
+def choose_rotate_side(blocked: bool, requested_m: float, opposite_m: float,
+                       clear_m: float = 0.16,
+                       margin_m: float = 0.15) -> str | None:
+    """被挡要原地转时，往哪边转。返回 'same' / 'flip' / None。
+
+    2026-11-18 用户问"现在转弯是往宽的那侧转弯吗"。原来的规则是：
+    只有**请求的那侧几乎贴脸（< clear_m）**才翻到另一边 —— clear_m 实测 0.16 m，
+    基本等于"永不翻转"，两侧都 >=0.16 时永远跟着 Nav2 的方向走，
+    不比较谁更宽。于是死胡同里 Nav2 想往窄的那侧掉头，车就顶着窄墙转。
+
+    现在（仅在**前方被挡、需要原地转出去**时生效）：
+      - 对面明显更宽（宽出 margin_m 以上）→ 翻到宽的那侧
+      - 否则请求的那侧够宽 → 按请求转
+      - 请求侧不够宽、对面够宽 → 翻
+      - 两侧都不够 → None（转不了，交给后退让位逻辑）
+    """
+    if blocked and opposite_m >= clear_m and opposite_m - requested_m >= margin_m:
+        return 'flip'
+    if requested_m >= clear_m:
+        return 'same'
+    if opposite_m >= clear_m:
+        return 'flip'
+    return None
+
+
 def latch_choice(prev: str | None, prev_at: float, now: float,
                  hold_s: float, new: str | None, blocked: bool) -> str | None:
     """翻转方向的迟滞锁定（2026-11-04）。

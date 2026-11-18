@@ -374,7 +374,16 @@ class BaseBridgeNode(Node):
                                    throttle_duration_sec=2.0)
             return
         if not self._sensors_ready(now, require_scan=bool(
-                self.get_parameter('manual_requires_scan').value)):
+                self.get_parameter('manual_requires_scan').value),
+                allow_reverse=self._reverse_active):
+            # 2026-11-18 现场（"撞到障碍物了，没有后退"）：这条 return 以前是**静默**的。
+            # 倒车节点发了 12 s 指令、车身一动不动，日志里一个字都没有 ——
+            # 真凶是 motion_enabled 已被面板/任务结束关掉，_sensors_ready 直接 False。
+            if self._reverse_active:
+                self.get_logger().warn(
+                    '让位倒车指令被丢弃：运动门未开或传感器未就绪'
+                    f'（motion_enabled={bool(self.get_parameter("motion_enabled").value)}）',
+                    throttle_duration_sec=2.0)
             return
         if (msg.linear.x < -1e-6 and self._rear_blocked and
                 bool(self.get_parameter('rear_guard_enabled').value) and
@@ -436,8 +445,14 @@ class BaseBridgeNode(Node):
     def _stamp_s(stamp) -> float:
         return stamp.sec + stamp.nanosec / 1e9
 
-    def _sensors_ready(self, now: float, require_scan: bool = True) -> bool:
-        if not bool(self.get_parameter('motion_enabled').value):
+    def _sensors_ready(self, now: float, require_scan: bool = True,
+                       allow_reverse: bool = False) -> bool:
+        # allow_reverse=True：让位节点（/reverse/active）在用**手动通道**倒车。
+        # 它属于"用户已经开始的导航任务"的一部分，门被任务结束/面板关掉时
+        # 仍应允许它把车退出来 —— 否则车会顶在障碍前一米也退不动。
+        # 注意：只放宽运动门，扫描/IMU 的有效性**一律照旧**（数据不新绝对不走）。
+        if not allow_reverse and not bool(
+                self.get_parameter('motion_enabled').value):
             return False
         if require_scan and not (self._scan.ready(now) and self._scan_stamp.ready(now)):
             return False

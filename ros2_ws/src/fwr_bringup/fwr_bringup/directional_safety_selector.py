@@ -15,7 +15,8 @@ from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Bool, String
 from tf2_ros import Buffer, TransformException, TransformListener
 
-from .directional_safety_core import DirectionalSafetyCore, latch_choice
+from .directional_safety_core import (DirectionalSafetyCore,
+                                     choose_rotate_side, latch_choice)
 
 
 class DirectionalSafetySelector(Node):
@@ -32,6 +33,8 @@ class DirectionalSafetySelector(Node):
         # → 雷达读数只要 > 0.37 - 0.21 = 0.16 m 就是安全的。
         # 之前用 0.34（相当于要求 0.55 m 实际余量），难怪"能转却不转"。
         self.declare_parameter('rotate_clear_m', 0.16)
+        # 前方被挡要原地转时，对面要比请求侧宽出这么多才翻过去
+        self.declare_parameter('flip_margin_m', 0.15)
         # 前进被挡的判定距离（= 碰撞监控 front_stop 的外沿 0.45 m）
         # 翻转方向迟滞时间：防止阈值附近逐帧翻转导致堵转
         self.declare_parameter('flip_hold_s', 0.7)
@@ -232,8 +235,9 @@ class DirectionalSafetySelector(Node):
         blocked = self._front_min_m < float(self.get_parameter('forward_block_m').value)
         # 2026-11-04：翻转方向必须**迟滞锁定**，否则阈值附近逐帧翻转 →
         # 两后轮反复正反转 → 固件判堵转（fault 1）。见 latch_choice 注释。
-        want = ('same' if requested >= clear else
-                ('flip' if opposite >= clear else None))
+        want = choose_rotate_side(
+            blocked, requested, opposite, clear,
+            float(self.get_parameter('flip_margin_m').value))
         choice = self.core_latch(blocked, want)
         self.core.blocked_rotate_same = blocked and choice == 'same'
         self.core.blocked_rotate_ok = blocked and choice == 'flip'
