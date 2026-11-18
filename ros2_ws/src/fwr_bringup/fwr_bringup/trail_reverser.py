@@ -49,9 +49,11 @@ class TrailReverser(Node):
         self.declare_parameter('turn_blocked_s', 0.8)
         self.declare_parameter('turn_front_close_m', 0.45)
         self.declare_parameter('turn_rear_need_m', 0.35)
-        self.declare_parameter('turn_backup_dist_m', 0.20)
-        self.declare_parameter('turn_backup_max_s', 2.5)
-        self.declare_parameter('turn_backup_speed_mps', 0.08)
+        # 退到前方净空 >= turn_backup_clear_m 为止；dist/max_s 只是兜底上限
+        self.declare_parameter('turn_backup_clear_m', 0.55)
+        self.declare_parameter('turn_backup_dist_m', 0.60)
+        self.declare_parameter('turn_backup_max_s', 8.0)
+        self.declare_parameter('turn_backup_speed_mps', 0.10)
         self.declare_parameter('turn_max_attempts', 3)
         self.declare_parameter('turn_cooldown_s', 3.0)
         self.declare_parameter('rear_scan_topic', '/scan_rear_mapping')
@@ -286,16 +288,23 @@ class TrailReverser(Node):
     def _step_turn_backup(self, now: float) -> None:
         x, y, _ = self._pose
         self._reversed_m = math.hypot(x - self._start_pose[0], y - self._start_pose[1])
+        left, right = self._side_clearance()
+        front_min = min(left, right)
         done, why = tb.backup_done(
             backed_m=self._reversed_m,
             elapsed_s=now - self._started_at,
             rear_min_m=self._rear_min,
             rear_blocked=self._rear_blocked,
+            front_min_m=front_min,
             dist_m=float(self.get_parameter('turn_backup_dist_m').value),
-            max_s=float(self.get_parameter('turn_backup_max_s').value))
+            max_s=float(self.get_parameter('turn_backup_max_s').value),
+            front_clear_m=float(self.get_parameter('turn_backup_clear_m').value))
         if done:
             self._turn_attempts += 1
             self._turn_last_end = now
+            self.get_logger().info(
+                '转弯让位结束(%s)：已退 %.2f m，前方净空 %.2f m' % (
+                    why, self._reversed_m, front_min))
             self._finish(why, self._reversed_m)
             return
         cmd = Twist()

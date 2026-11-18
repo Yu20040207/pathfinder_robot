@@ -52,14 +52,24 @@ def backup_done(backed_m: float,
                 elapsed_s: float,
                 rear_min_m: float,
                 rear_blocked: bool,
-                dist_m: float = 0.20,
-                max_s: float = 2.5,
-                rear_stop_m: float = 0.20) -> tuple[bool, str]:
-    """后退该停了吗。返回 (是否结束, 原因)。"""
+                front_min_m: float = float('inf'),
+                dist_m: float = 0.60,
+                max_s: float = 8.0,
+                rear_stop_m: float = 0.20,
+                front_clear_m: float = 0.55) -> tuple[bool, str]:
+    """后退该停了吗。返回 (是否结束, 原因)。
+
+    2026-11-18（第二次修正）：原来固定退 0.20 m 是拍脑袋的。现场车头只剩
+    0.09 m，退 0.17 m 后还剩 0.26 m —— 仍在 front_stop（0.32~0.38 m）里，
+    照样转不了，目标又失败。改成**自适应**：一直退到前方净空 >= front_clear_m
+    为止（同时受 dist_m / max_s / 车尾限制兜底）。
+    """
     if rear_blocked:
         return True, 'rear-blocked'
     if rear_min_m < rear_stop_m:
         return True, 'rear-close'
+    if front_min_m >= front_clear_m:
+        return True, 'front-clear'
     if backed_m >= dist_m:
         return True, 'reached'
     if elapsed_s >= max_s:

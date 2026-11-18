@@ -45,15 +45,42 @@ def test_attempt_limit_and_cooldown():
 
 
 def test_backup_stop_conditions():
-    assert backup_done(0.05, 0.5, 1.0, False)[1] == ''
-    assert backup_done(0.25, 0.5, 1.0, False) == (True, 'reached')
-    assert backup_done(0.05, 9.0, 1.0, False) == (True, 'timeout')
-    assert backup_done(0.05, 0.2, 1.0, True) == (True, 'rear-blocked')
-    assert backup_done(0.05, 0.2, 0.10, False) == (True, 'rear-close')
+    assert backup_done(0.05, 0.5, 1.0, False, front_min_m=0.10)[1] == ''
+    assert backup_done(0.65, 5.0, 1.0, False, front_min_m=0.10) == (True, 'reached')
+    assert backup_done(0.05, 9.0, 1.0, False, front_min_m=0.10) == (True, 'timeout')
+    assert backup_done(0.05, 0.2, 1.0, True, front_min_m=0.10) == (True, 'rear-blocked')
+    assert backup_done(0.05, 0.2, 0.10, False, front_min_m=0.10) == (True, 'rear-close')
 
 
-def test_distance_limit_is_short():
-    """后退只为腾出转弯空间，不该退太多（默认 0.20 m）。"""
+def test_stops_when_front_has_room_again():
+    """现场教训：固定退 0.20 m 不够 —— 车头 0.09 m 只退到 0.26 m，
+    仍在 front_stop(0.32~0.38) 里，照样转不了。必须退到真腾出空间。"""
+    done, why = backup_done(0.30, 3.0, 1.0, False, front_min_m=0.58,
+                            front_clear_m=0.55)
+    assert done and why == 'front-clear'
+
+
+def test_keeps_backing_while_front_still_close():
+    done, why = backup_done(0.30, 3.0, 1.0, False, front_min_m=0.26,
+                            front_clear_m=0.55)
+    assert not done and why == '', '车头 0.26 m 还在 front_stop 里，要继续退'
+
+
+def test_defaults_allow_enough_distance():
+    """默认上限必须能覆盖"从 0.09 m 退到 0.55 m"（至少 0.46 m）。"""
     import inspect
     sig = inspect.signature(backup_done)
-    assert sig.parameters['dist_m'].default <= 0.30
+    assert sig.parameters['dist_m'].default >= 0.46
+    assert sig.parameters['front_clear_m'].default >= 0.45
+
+
+def test_distance_limit_is_bounded():
+    """后退要有上限（防失控），但要够用。
+
+    2026-11-18：原来定 0.20 m，现场车头 0.09 m 退完还剩 0.26 m，
+    仍在 front_stop 里 → 白退一次。上限放到 0.60 m（0.09→0.55 只需 0.46 m），
+    同时仍然有明确上限；真正的安全兜底是车尾守卫和后雷达。
+    """
+    import inspect
+    sig = inspect.signature(backup_done)
+    assert 0.30 <= sig.parameters['dist_m'].default <= 1.00
