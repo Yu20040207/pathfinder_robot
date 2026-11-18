@@ -487,7 +487,12 @@ class TrailReverser(Node):
                 dist_m=float(self.get_parameter('turn_backup_dist_m').value),
                 max_s=float(self.get_parameter('turn_backup_max_s').value),
                 rear_stop_m=float(self.get_parameter('turn_backup_rear_stop_m').value),
-                front_clear_m=float(self.get_parameter('turn_backup_clear_m').value))
+                # 2026-11-18（第三次同型 bug）：这里**不能**用"前方让开"当停止条件。
+                # 守卫是因为**侧向**窄才触发，前方本来通常是空的 →
+                # backup_done 立刻判 front-clear，退了 0.01 m 就结束。
+                # tightturn 的目的就是"物理上退够一段距离"，所以只按
+                # 距离/车尾/超时停，传 inf 关掉前方判据。
+                front_clear_m=float('inf'))
             if done:
                 self._finish('tightturn-' + why, min(left, right))
                 return

@@ -317,3 +317,17 @@ def test_tightturn_mode_is_selected_by_guard():
     src = (Path(__file__).resolve().parents[1] / 'fwr_bringup' /
            'trail_reverser.py').read_text()
     assert "_begin_trail_reverse(now, mode='tightturn')" in src
+
+
+def test_tightturn_stop_ignores_front_clear():
+    """tightturn 的停止条件里不许出现"前方让开"。
+
+    2026-11-18 第三次同型 bug：守卫因**侧向**窄触发，前方本来是空的 →
+    backup_done 立刻判 front-clear → 退 0.01 m 结束。
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / 'fwr_bringup' /
+           'trail_reverser.py').read_text()
+    i = src.index("if self._mode == 'tightturn':")
+    block = src[i:i + 1600]
+    assert "front_clear_m=float('inf')" in block, 'tightturn 必须关掉前方判据'
