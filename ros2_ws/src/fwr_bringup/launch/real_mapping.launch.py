@@ -120,7 +120,12 @@ def generate_launch_description():
              parameters=[{'use_sim_time': use_sim_time,
                           'in_topic': LaunchConfiguration('slam_map_topic'),
                           'out_topic': '/map_view',
-                          'downsample_factor': 2,
+                          # 2026-11-18：不再降采样（factor 2 → 1）。
+                          # 降采样会把墙每边扩一格：50mm 图的 100mm 墙在 100mm 图上
+                          # 变成 200mm，看起来"墙变粗了"（实测确认）。
+                          # 流量问题已由 Best Effort + 0.5 Hz 解决：
+                          # 149 KB × 0.5 Hz = 75 KB/s，远低于原先重传风暴的 7 MB/s。
+                          'downsample_factor': 1,
                           'period_s': 2.0}]),
         # RViz「保存地图」按钮的服务：一次保存 .posegraph/.data + .pgm/.yaml。
         # 目录默认取 FWR_MAP_DIR（start_manual_mapping.sh 会设为源码 maps/），

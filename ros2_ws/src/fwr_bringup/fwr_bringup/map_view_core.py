@@ -56,3 +56,31 @@ def downsample(data: Sequence[int], width: int, height: int, factor: int):
                             break
             out[ny * nw + nx] = best
     return out, nw, nh
+
+
+def crop_around(data: Sequence[int], width: int, height: int,
+                center_x: int, center_y: int, half_cells: int):
+    """裁出以 (center_x, center_y) 为中心、边长 2*half_cells+1 的方形窗口。
+
+    窗口内保持**原始分辨率**（不降采样，墙厚不会变化），只是范围变小，
+    这样单帧消息小到不会触发 DDS 分片重传。
+
+    Returns
+    -------
+    (new_data, new_width, new_height, origin_dx, origin_dy)
+        origin_dx/dy 是窗口左上角相对原图左上角**移动了多少格**，
+        调用方要据此平移 origin（米 = 格数 × resolution）。
+    """
+    if width <= 0 or height <= 0 or len(data) != width * height:
+        raise ValueError('data 长度与 width*height 不一致')
+    side = 2 * half_cells + 1
+    x0 = max(0, min(width - side, center_x - half_cells)) if width > side else 0
+    y0 = max(0, min(height - side, center_y - half_cells)) if height > side else 0
+    x1 = min(width, x0 + side)
+    y1 = min(height, y0 + side)
+    nw, nh = x1 - x0, y1 - y0
+    out = []
+    for y in range(y0, y1):
+        row = y * width
+        out.extend(data[row + x0: row + x1])
+    return out, nw, nh, x0, y0
