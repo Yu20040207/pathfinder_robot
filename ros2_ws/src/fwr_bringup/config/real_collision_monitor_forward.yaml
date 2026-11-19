@@ -6,7 +6,12 @@ collision_monitor_forward:
     odom_frame_id: odom
     cmd_vel_in_topic: /cmd_vel_auto_unchecked
     cmd_vel_out_topic: /cmd_vel_auto_forward_filtered
-    transform_tolerance: 0.2
+    # 2026-11-19（用户批准 0.2 → 0.5）：雷达 10 Hz / EKF 30 Hz，正常时间偏差
+    # <0.1 s；0.2 太紧，一次调度抖动就超时 → 这一帧算不出前停区 → 压零停车。
+    # 现场日志出现过 12 次 "Lookup would require extrapolation into the past"。
+    # 0.5 s 对应额外刹车距离 0.2 m/s × 0.5 = 10 cm，而 front_stop 相对车头
+    # (0.30 m) 留了 0.32→0.46 的余量，安全不受影响。
+    transform_tolerance: 0.5
     # 雷达扫描的 header 时间是扫描起始时刻，实际到达时已 0.25–0.36 s 旧；
     # 0.25 s 会间歇性整帧丢弃，导致安全层时有时无。
     source_timeout: 0.6
