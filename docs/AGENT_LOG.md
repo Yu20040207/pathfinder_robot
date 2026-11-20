@@ -9044,3 +9044,22 @@ CPU governor        powersave
 ### 未做
 - 没有改任何运行参数（本次只动文档）
 - 功耗/线程三项优化（stale 4 s、governor performance、slam 线程限制）仍在等用户点头
+
+## 2026-11-20 17:45 · 首次推送到 GitHub（用户要求）
+
+### 动作
+- 分支 `feature/dual-lidar` 提交 `ae49182`，30 个文件、+5350/−379
+- 首次推送：`git push -u origin feature/dual-lidar`
+  远端 `ae491825bd04…` 与本地 HEAD 一致
+- 提交前跑全量测试：`574 passed`（ROS 环境已 source，
+  `PYTHONPATH=ros2_ws/src/fwr_bringup:ros2_ws/src/fwr_voice`）
+
+### 提交范围（一次提交）
+手机端 car.html（切图提示分层/文案/删除×/PWA 图标）、cloud/api/app.py、
+mqtt_bridge（active-pending 地图、切图即推图、ack/done、手机地图目录、删除地图、
+chain/leg 字段）、trail_reverser + maneuver_core（no_forward 与 0.60 m 余量）、
+lidar_watchdog（remaps 崩溃修复 + 新测试）、start_mapping.sh（bridge 白名单）、
+chain_watchdog、AGENTS/README/Jetson 文档标注作废、本日志。
+
+### 遗留
+- 之前提的三项硬件/性能优化（看门狗 4 s、governor performance、slam 线程限制）未做，等用户决定
