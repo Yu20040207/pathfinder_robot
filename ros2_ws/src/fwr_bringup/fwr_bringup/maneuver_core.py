@@ -98,7 +98,8 @@ def backup_done(*, backed_m: float, elapsed_s: float,
                 rear_min_m: float, rear_blocked: bool,
                 turn_need_m: float = 0.40, front_need_m: float = 0.45,
                 dist_m: float = 0.80, max_s: float = 12.0,
-                rear_stop_m: float = 0.20) -> tuple[bool, str]:
+                rear_stop_m: float = 0.20,
+                front_clear_m: float | None = None) -> tuple[bool, str]:
     """后退该停了吗。返回 (是否结束, 原因)。
 
     **第一条也是最重要的一条：又能转了就立刻停** —— 用户原话
@@ -109,7 +110,11 @@ def backup_done(*, backed_m: float, elapsed_s: float,
         return True, 'rear-blocked'
     if rear_min_m < rear_stop_m:
         return True, 'rear-close'
-    if can_turn(lat_left_m, lat_right_m, front_m, turn_need_m, front_need_m):
+    # 2026-11-20：退到"能转"就停会只留 4~5 cm 余量，车头又立刻被判贴墙。
+    # front_clear_m 给一个更大的目标净空（车头 >= 它才收工）。
+    stop_front = front_need_m if front_clear_m is None else max(front_need_m,
+                                                               front_clear_m)
+    if can_turn(lat_left_m, lat_right_m, front_m, turn_need_m, stop_front):
         return True, 'can-turn-now'
     if backed_m >= dist_m:
         return True, 'reached'

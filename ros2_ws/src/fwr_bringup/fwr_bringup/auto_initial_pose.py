@@ -54,9 +54,19 @@ class AutoInitialPose(Node):
         self.create_subscription(PoseWithCovarianceStamped,
                                  str(self.get_parameter('initialpose_topic').value),
                                  self._on_initialpose, 10)
-        self.create_subscription(OccupancyGrid, '/map', self._on_map, map_qos)
-        self.create_subscription(LaserScan, str(self.get_parameter('scan_topic').value),
-                                 self._on_scan, scan_qos)
+        # 2026-11-20 开机现场：这个节点比 map_server 早 0.2 s 起来时，
+        # 它的 /map 订阅**永远收不到**那张 latched 地图（TRANSIENT_LOCAL 历史没补发），
+        # 30 s 后 _tick 就永久放弃 → 手机点"重新定位"一直回"还没有地图或激光数据"。
+        # 现在保留句柄，缺数据时定期销毁重建订阅（重建后立刻能收到历史）。
+        self._map_qos = map_qos
+        self._scan_qos = scan_qos
+        self._map_topic = '/map'
+        self._scan_topic = str(self.get_parameter('scan_topic').value)
+        self._map_sub = self.create_subscription(
+            OccupancyGrid, self._map_topic, self._on_map, map_qos)
+        self._scan_sub = self.create_subscription(
+            LaserScan, self._scan_topic, self._on_scan, scan_qos)
+        self._resub_at = 0.0
         self.create_timer(0.5, self._tick)
         self._started = time.monotonic()
         self._seeded = False
@@ -158,9 +168,12 @@ class AutoInitialPose(Node):
 
     def _clearance(self):
         """"车能停在这里"的掩码，按地图缓存（地图不变就不用重算）。"""
+        m = self._map
+        if self._mask_cache is not None and \
+                self._mask_cache.shape != (m.info.height, m.info.width):
+            self._mask_cache = None      # 形状不符就重算，绝不带错形状去索引
         if self._mask_cache is not None:
             return self._mask_cache
-        m = self._map
         grid = np.asarray(m.data, dtype=np.int16).reshape(m.info.height, m.info.width)
         self._mask_cache = clearance_mask(grid, m.info.resolution, 0.10)
         return self._mask_cache
@@ -197,12 +210,17 @@ class AutoInitialPose(Node):
         播种用 call_async 发出去，不等 AMCL 回执（结果位姿已经算好了）。
         """
         if self._map is None or self._scan is None:
+            # 重建一次订阅再回话：下次点"重新定位"就有机会成功（不用重启导航栈）
+            self._resubscribe_missing()
             response.success = False
-            response.message = '还没有地图或激光数据'
+            response.message = '还没有地图或激光数据（已重新订阅，请 3 秒后再点一次）'
             return response
         try:
             score, x, y, yaw, base = self._match_or_global()
         except Exception as exc:                       # noqa: BLE001
+            import traceback
+            self.get_logger().error(
+                '匹配失败: %s\n%s' % (exc, traceback.format_exc()))
             response.success = False
             response.message = '匹配失败: %s' % exc
             return response
@@ -232,10 +250,44 @@ class AutoInitialPose(Node):
         return response
 
     def _on_map(self, msg):
+        # 2026-11-19：换地图（尺寸不同）时必须让清除区掩码缓存失效。
+        # 否则 refine_pose 会拿旧地图的掩码去索引新地图 → IndexError
+        # "index 390 is out of bounds for axis 0 with size 235"（16:54 现场）。
+        old = self._map
+        if (old is not None and
+                (old.info.width != msg.info.width or
+                 old.info.height != msg.info.height or
+                 abs(old.info.resolution - msg.info.resolution) > 1e-9)):
+            self._mask_cache = None
         self._map = msg
 
     def _on_scan(self, msg):
         self._scan = msg
+
+    def _resubscribe_missing(self) -> None:
+        """缺地图/激光时重建订阅。
+
+        开机时本节点可能比 map_server / scan_merger 更早创建订阅，FastDDS
+        的 TRANSIENT_LOCAL 历史不会补给"早于发布者"的订阅者（2026-11-20 实测：
+        重建订阅后立刻收到 928x605 的地图）。所以缺数据就重建一次，代价很小。
+        """
+        if self._map is None:
+            try:
+                self.destroy_subscription(self._map_sub)
+            except Exception:                       # noqa: BLE001
+                pass
+            self._map_sub = self.create_subscription(
+                OccupancyGrid, self._map_topic, self._on_map, self._map_qos)
+            self.get_logger().warn('auto initial pose: 重建 /map 订阅（还没收到地图）')
+        if self._scan is None:
+            try:
+                self.destroy_subscription(self._scan_sub)
+            except Exception:                       # noqa: BLE001
+                pass
+            self._scan_sub = self.create_subscription(
+                LaserScan, self._scan_topic, self._on_scan, self._scan_qos)
+            self.get_logger().warn(
+                f'auto initial pose: 重建 {self._scan_topic} 订阅（还没收到激光）')
 
     def _tick(self):
         if self._seeded:
@@ -274,11 +326,17 @@ class AutoInitialPose(Node):
                 self._future = None
             return
         if self._map is None or self._scan is None:
-            if time.monotonic() - self._started > 30.0:
+            now = time.monotonic()
+            # 每 8 s 重建一次缺失的订阅（最多等到地图/激光出现为止，不永久放弃：
+            # 建图模式本来就该没有地图，但切回导航后要能自己恢复）
+            if now - self._resub_at > 8.0:
+                self._resub_at = now
+                self._resubscribe_missing()
+            if now - self._started > 180.0 and not getattr(self, '_warned_no_scan', False):
+                self._warned_no_scan = True
                 self.get_logger().error(
-                    'auto initial pose: no map/scan after 30 s; '
-                    'slam localization mode does not need this node')
-                self._gave_up = True
+                    'auto initial pose: 180 s 仍没有地图/激光数据'
+                    '（建图模式没有地图是正常的；导航模式请检查 map_server 与雷达）')
             return
         score, x, y, yaw, base = self._match_or_global()
         if score > 9.0:

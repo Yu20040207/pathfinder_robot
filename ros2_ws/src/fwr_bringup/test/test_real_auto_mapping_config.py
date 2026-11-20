@@ -16,7 +16,10 @@ def test_monitor_is_only_automatic_bridge_input():
         assert .5 <= cfg['source_timeout'] <= 1.0
         assert 'scan' in cfg['observation_sources']
         assert cfg['scan']['topic'] == '/scan'
-        assert 17.0 <= cfg['stop_pub_timeout'] <= 20.0
+        # 2026-11-20（用户批准）：上限 20 → 600。下限 17 是硬约束（让 Nav2 的
+        # 15 s 进度检查能放弃目标）；上限只要求"有限值"，用来保证丢流时
+        # base_bridge 的 0.5 s 传感器超时仍会 disarm。
+        assert 17.0 <= cfg['stop_pub_timeout'] <= 600.0
     assert forward['cmd_vel_out_topic'] == '/cmd_vel_auto_forward_filtered'
     assert reverse['cmd_vel_out_topic'] == '/cmd_vel_auto_reverse_filtered'
     assert forward['polygons'] == ['front_stop', 'front_slow']

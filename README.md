@@ -41,7 +41,7 @@ ros2 topic pub --once /robot/voice/text_input std_msgs/msg/String "{data: '前�
 当前 VITS 模型有 5 个说话人。若需要更多音色，需要换用其他兼容的中文 TTS 模型；仅修改当前模型的 speaker_id 无法增加音色。修改 `ros2_ws/src/fwr_bringup/config/voice.yaml` 中的 `tts_speaker_id` 并重启 `voice_demo.launch.py` 即可换音色：`0=suyingxue`、`1=gunian`、`2=fushiyu`、`3=bingjiao`、`4=bazong`。超出 0–4 会在启动时明确报错；这些名称来自模型自带的说话人配置。
 `tts_streaming: false` 默认等待云端完整回答后一次合成播报，减少逐句停顿；改为 `true` 可恢复逐句抢先播报，首句延迟更低。麦克风采集保留起音前约 0.2 秒音频，以减少句首被截断。当前默认 `tts_provider: aliyun`、`tts_cloud_model: cosyvoice-v3-flash`、`tts_cloud_voice: longanya_v3`，使用与百炼问答相同的 `FWR_LLM_API_KEY`。在线时优先播报“龙安雅”音色；未设置密钥或云端语音不可用时自动使用本地 VITS。`tts_cloud_websocket_url` 可替换为百炼工作空间专属 WebSocket 地址。语音合成会按阿里云计费。`tts_speed` 控制语速，当前设为正常语速 `1.0`；本地 VITS 允许范围为 `0.5`–`1.5`，修改后同样需要重启节点。不同 VITS 模型对速度参数的实际响应可能不同。
 
-语音架构见[设计文档](docs/superpowers/specs/2026-10-09-voice-interaction-design.md)，实测方法见[语音评测方法](docs/voice/benchmark-protocol.md)。后续主控目标已定为 Jetson Orin Nano Super Developer Kit（8GB），开发与迁移约束见 [Jetson 主控迁移约束](docs/hardware/jetson-migration.md)；麦克风、扬声器和实机控制接口确定后，还需验证语音与视觉并发、现场识别率及真实急停链路。
+语音架构见[设计文档](docs/superpowers/specs/2026-10-09-voice-interaction-design.md)，实测方法见[语音评测方法](docs/voice/benchmark-protocol.md)。实机主控已确定为 **Intel i5-13500H x86_64 迷你主机**（16 线程 / 15 GB，Ubuntu 22.04.5，2026-11-20 实测，**不是 Jetson**）；旧的 [Jetson 迁移约束](docs/hardware/jetson-migration.md) 仅作历史参考；麦克风、扬声器和实机控制接口确定后，还需验证语音与视觉并发、现场识别率及真实急停链路。
 
 这是独立的 ROS 2 Humble 工程。一代仓库仅供硬件协议与业务规则参考。本阶段实现 HP60C 相机输入、人脸录入、识别与本机打卡；底盘路径规划、机械臂按电梯按钮及腰部关节模组在后续阶段接入。
 
@@ -135,7 +135,7 @@ ros2 launch fwr_bringup navigation_preview.launch.py
 
 腰部折叠六舵机、USB-CAN 调试卡和 ESP32-S3 收发器的候选方案及协议疑点见 [腰部 CAN 执行器选型记录](docs/hardware/waist-can-actuator-selection.md)。此方案尚未完成型号核对、机构扭矩计算和实机验证。
 
-当前 Ubuntu 电脑充当开发阶段的 ROS 2 主控；后续迁移至 Jetson Orin Nano Super Developer Kit（8GB）。新功能应保持主机与 ESP32-S3、雷达、IMU 的接口可移植，避免写死电脑设备路径，并在 Jetson 上重新验证 ARM64 依赖、厂商驱动及并发性能，详见 [迁移约束](docs/hardware/jetson-migration.md)。
+当前实机主控就是 **Intel i5-13500H x86_64 迷你主机**（Ubuntu 22.04.5，16 线程 / 15 GB）；旧计划中的 Jetson Orin Nano 迁移**不再执行**。新功能应保持主机与 ESP32-S3、雷达、IMU 的接口可移植，避免写死电脑设备路径，并在 Jetson 上重新验证 ARM64 依赖、厂商驱动及并发性能，详见 [迁移约束](docs/hardware/jetson-migration.md)。
 
 ### RViz 底盘示意模型
 

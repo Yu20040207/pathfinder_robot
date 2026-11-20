@@ -8,7 +8,10 @@
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   html, body { height: 100%; }
   body { margin: 0; font-family: system-ui, -apple-system, "PingFang SC", sans-serif;
-         background: #0f1419; color: #e6edf3; overflow: hidden; }
+         background: #0f1419; color: #e6edf3; overflow: hidden;
+         /* 加到主屏幕（standalone）后避开刘海和 Home 指示条；普通浏览器里 env() = 0 */
+         padding: env(safe-area-inset-top) env(safe-area-inset-right)
+                  env(safe-area-inset-bottom) env(safe-area-inset-left); }
   header { display: flex; align-items: center; gap: 6px; padding: 8px 10px;
            background: #161b22; border-bottom: 1px solid #30363d; font-size: 13px;
            flex-wrap: nowrap; overflow-x: auto; white-space: nowrap; }
@@ -18,6 +21,20 @@
   .grow { flex: 1; }
   .badge { padding: 2px 6px; border-radius: 10px; background: #21262d; font-size: 12px;
            white-space: nowrap; }
+  /* 2026-11-20 用户要求：刷新左边放一个 WiFi 图标，显示当前网络延迟 */
+  .netChip { display: inline-flex; align-items: center; gap: 3px; padding: 4px 7px;
+             border-radius: 8px; border: 1px solid #30363d; background: #21262d;
+             font-size: 11px; color: #3fb950; flex: none; }
+  .netChip b { font-weight: 600; font-variant-numeric: tabular-nums; }
+  .netChip.idle { color: #8b949e; }
+  /* 2026-11-20：顶栏东西多（延迟+刷新+模式），窄屏压缩间距，保证右侧 ⚙ 不被挤出屏幕 */
+  @media (max-width: 400px) {
+    header { gap: 4px; padding: 6px 7px; font-size: 12px; }
+    #refreshBtn { padding: 4px 6px; }
+    #modeSelect { padding: 4px 2px; font-size: 12px; }
+    .netChip { padding: 3px 5px; }
+    #devName { max-width: 68px; overflow: hidden; text-overflow: ellipsis; }
+  }
   .hdrBtn { padding: 5px 8px; border-radius: 8px; border: 1px solid #30363d;
             background: #21262d; color: #e6edf3; font-size: 12px;
             white-space: nowrap; flex: none; }
@@ -49,13 +66,15 @@
   .prodDesc { font-size: 12px; color: #7d9bb3; }
   .productFoot { margin-top: 10px; color: #8b949e; font-size: 13px; }
 
-  /* 切换进度条 */
-  #switchBar { position: fixed; top: 44px; left: 0; right: 0; z-index: 18;
-               background: rgba(13,17,23,.95); padding: 6px 12px 8px; }
-  #switchBar .barText { font-size: 12px; color: #ffffff; margin-bottom: 5px; }
-  #switchBar .barTrack { height: 5px; border-radius: 3px; background: #21262d;
+  /* 切换进度条：贴在顶栏下沿的细绿条（平时满格绿色，切换时走条） */
+  #switchBar { position: fixed; left: 0; right: 0; top: 44px; height: 3px;
+               z-index: 25; pointer-events: none; background: rgba(33,38,45,.9); }
+  /* 切换说明只在进度条下方显示一行（navInfo 在切换期间隐藏，避免重复） */
+  /* 切换说明统一走 navInfo（贴在绿条下方居中），这里不再重复显示 */
+  #switchBar .barText { display: none !important; }
+  #switchBar .barTrack { height: 3px; background: rgba(33,38,45,.9);
                          overflow: hidden; }
-  #switchBar .barFill { height: 100%; width: 0%; border-radius: 3px;
+  #switchBar .barFill { height: 100%; width: 100%; border-radius: 0;
                         background: linear-gradient(90deg, #2ea043, #4ade80);
                         transition: width .2s linear; }
 
@@ -89,14 +108,16 @@
   #devPanel { position: fixed; inset: 0; background: rgba(0,0,0,.66); display: flex;
               align-items: center; justify-content: center; z-index: 32; }
   #hdrPct { font-size: 13px; font-weight: 600; color: #3fb950; }
-  #gearBtn { font-size: 18px; color: #8b949e; padding: 0 2px; margin-right: 10px;
-             cursor: pointer; }
+  /* 2026-11-20 用户要求：齿轮图标直接换成「设置」按钮，样式跟刷新按钮一致 */
+  #gearBtn { padding: 5px 8px; border-radius: 8px; border: 1px solid #30363d;
+             background: #21262d; color: #e6edf3; font-size: 12px;
+             white-space: nowrap; flex: none; cursor: pointer; margin-right: 4px; }
   #netBar { display: flex; align-items: center; gap: 6px; padding: 5px 12px;
             background: #0d1117; border-bottom: 1px solid #21262d;
             font-size: 12px; color: #d29922; }
   #netBar .dot { width: 8px; height: 8px; }
   #netBar.ok { color: #3fb950; }
-  #gearBtn:active { color: #e6edf3; }
+  #gearBtn:active { background: #30363d; }
   .askCard { position: relative; }
   .panelClose { position: absolute; right: 10px; top: 8px; width: 28px; height: 28px;
                 display: flex; align-items: center; justify-content: center;
@@ -109,7 +130,7 @@
   #mapPicker, #askDialog { position: fixed; inset: 0; background: rgba(0,0,0,.66);
                             display: flex; align-items: center; justify-content: center; }
   #mapPicker { z-index: 30; }
-  #askDialog { z-index: 31; }
+  #askDialog { z-index: 80; }
   .pickerCard { width: min(86vw, 340px); max-height: 70vh; overflow-y: auto;
                 background: #161b22; border: 1px solid #30363d; border-radius: 14px;
                 padding: 16px; display: flex; flex-direction: column; gap: 8px; }
@@ -120,6 +141,14 @@
              font-size: 13px; }
   .mapItem:active { background: #2d333b; }
   .mapItem small { color: #8b949e; }
+  /* 2026-11-20 用户要求：地图列表每项后面加删除按钮 */
+  .mapRow { display: flex; gap: 6px; align-items: stretch; }
+  .mapRow .mapItem { flex: 1 1 auto; min-width: 0; }
+  .mapDel { flex: 0 0 40px; border-radius: 8px; border: 1px solid #6e2a2a;
+            background: #2b1416; color: #ff7b72; font-size: 20px;
+            line-height: 1; padding: 0; }
+  .mapDel:active { background: #3d1a1d; }
+  .mapSrc { font-size: 11px; color: #8b949e; }
   #mapPickerClose { padding: 12px 6px; border-radius: 10px; font-size: 14px;
                     border: 1px solid #238636; background: rgba(22,27,34,.92);
                     color: #3fb950; }
@@ -161,21 +190,22 @@
           padding: 6px 8px; text-align: center; }
   .card b { display: block; font-size: 18px; margin-top: 2px; }
   .card span { font-size: 11px; color: #c9d1d9; }
-  .joyWrap { flex: 1; display: flex; align-items: center; justify-content: center; min-height: 0; }
+  .joyWrap { flex: 1; display: flex; align-items: flex-end; justify-content: center;
+             min-height: 0; padding-bottom: 10px; }
   #joy { width: min(64vw, 46vh); height: min(64vw, 46vh); border-radius: 50%;
          border: 2px solid #30363d; position: relative;
          background: radial-gradient(circle, #1c2128, #0f1419); touch-action: none; }
   #knob { width: 76px; height: 76px; border-radius: 50%; background: #238636;
           position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%);
           box-shadow: 0 0 18px rgba(35,134,54,.6); }
-  .hint { text-align: center; color: #8b949e; font-size: 12px; padding: 0 12px 8px; }
+  .hint { text-align: center; color: #8b949e; font-size: 12px; padding: 0 12px 10px;
+          flex: none; }
   .row { display: flex; gap: 8px; padding: 0 12px 8px; }
   .row button { flex: 1; padding: 9px; border-radius: 8px; border: 1px solid #30363d;
                 background: #161b22; color: #e6edf3; font-size: 13px; }
-  #stop { margin: 0 12px 10px; padding: 13px; border-radius: 10px; border: 1px solid #f85149;
-          background: #2d1518; color: #ff7b72; font-size: 16px; }
-  #testBtn { margin: 0 12px 12px; padding: 9px; border-radius: 10px; border: 1px solid #30363d;
-             background: #161b22; color: #8b949e; font-size: 12px; }
+  #stop { margin: auto 12px calc(10px + env(safe-area-inset-bottom));
+          padding: 15px; border-radius: 10px; border: 1px solid #f85149;
+          background: #2d1518; color: #ff7b72; font-size: 17px; flex: none; }
   #login { position: fixed; inset: 0; z-index: 20; display: flex;
            align-items: center; justify-content: center;
            background:
@@ -244,7 +274,65 @@
                    border: 1px solid #30363d; background: rgba(22,27,34,.92); color: #e6edf3; }
   #startNav { border-color: #238636; color: #3fb950; }
   #stopNav { border-color: #f85149; color: #ff7b72; }
-  #navStatus { position: absolute; left: 10px; top: 44px; right: 10px; font-size: 12px;
+  /* 诊断条不再显示给用户看（2026-11-19 用户要求），
+     但文本仍然每 5 秒回传云端 /opt/jc/logs/diag.log，供远程排查。 */
+  #dbgPill { display: none !important; }
+  /* 地图编辑器（全屏覆盖） */
+  #mapEditor { position: fixed; inset: 0; background: #000; z-index: 60;
+               display: flex; flex-direction: column; overscroll-behavior: none;
+               -webkit-user-select: none; user-select: none; }
+  #mapEditor.hidden { display: none; }
+  .edTop { display: flex; justify-content: space-between; align-items: center;
+           gap: 8px; padding: calc(8px + env(safe-area-inset-top)) 10px 8px;
+           background: #161b22; color: #e6edf3;
+           font-size: 14px; font-weight: 600; flex: 0 0 auto; }
+  .edTopTools { display: flex; gap: 6px; flex: 0 0 auto; }
+  /* 2026-11-20 用户要求：－ ＋ ⟳ 竖着排在画面右侧，顶部只留「返回」 */
+  /* 2026-11-20 用户要求：右侧竖排按钮贴到画面最下面 */
+  .edRight { position: absolute; right: 10px; bottom: 172px;
+             display: flex; flex-direction: column; gap: 8px; z-index: 5; }
+  .edRight button { width: 42px; height: 42px; border-radius: 10px;
+                    background: rgba(33,38,45,.94); color: #e6edf3;
+                    border: 1px solid #30363d; font-size: 20px; line-height: 1;
+                    display: inline-flex; align-items: center; justify-content: center; }
+  .edRight button:active { background: #30363d; }
+  .edBar button.sym { flex: 0 0 56px; font-size: 22px; padding: 8px 0; }
+  /* 2026-11-20 用户要求：粗细滑条默认隐藏，点「粗细」按钮才浮到画面右侧 */
+  #edWidthPanel { position: absolute; right: 10px; bottom: 300px; width: 168px;
+                  padding: 10px 12px; border-radius: 12px; z-index: 6;
+                  background: rgba(22,27,34,.96); border: 1px solid #30363d;
+                  box-shadow: 0 6px 20px rgba(0,0,0,.5); color: #e6edf3;
+                  font-size: 12px; }
+  #edWidthPanel.hidden { display: none; }
+  #edWidthPanel input[type=range] { width: 100%; margin: 8px 0 4px; }
+  #edWidthPanel .pv { display: flex; justify-content: space-between;
+                      color: #8b949e; font-size: 11px; }
+  #edWidthBtn.on { border-color: #3fb950; color: #3fb950; }
+  .edTop button { background: #21262d; color: #e6edf3; border: 1px solid #30363d;
+                  border-radius: 8px; padding: 6px 8px; font-size: 13px;
+                  min-width: 34px; }
+  #edTitle { font-size: 13px; font-weight: 600; white-space: nowrap;
+             overflow: hidden; text-overflow: ellipsis; flex: 1 1 auto;
+             min-width: 0; }
+  #edCanvas { flex: 1 1 auto; width: 100%; min-height: 0; background: #0b0f14;
+              touch-action: none; }
+  .edBar { display: flex; gap: 8px; padding: 10px 12px; background: #161b22; }
+  .edBar button { flex: 1 1 0; padding: 12px 0; border-radius: 10px;
+                  background: #21262d; color: #e6edf3; border: 1px solid #30363d;
+                  font-size: 15px; }
+  .edBar button.on { border-color: #3fb950; color: #3fb950; }
+  .edBar button.primary { border-color: #238636; color: #3fb950; font-weight: 600; }
+  .edHint { padding: 0 14px calc(12px + env(safe-area-inset-bottom));
+            background: #161b22; color: #8b949e; font-size: 12px;
+            text-align: center; }
+  .edSize { align-items: center; padding-top: 0; }
+  .edLabel { color: #8b949e; font-size: 13px; flex: 0 0 auto; }
+  .edVal { color: #e6edf3; font-size: 13px; flex: 0 0 auto; min-width: 62px;
+           text-align: right; }
+  #edWidth { flex: 1 1 auto; accent-color: #3fb950; height: 26px; }
+  #edLineBtn { flex: 0 0 72px; }
+  #edLineBtn.on { border-color: #58a6ff; color: #58a6ff; }
+  #navStatus { position: absolute; left: 10px; top: 30px; right: 10px; font-size: 12px;
                color: #3fb950; background: rgba(15,20,25,.75); padding: 4px 10px;
                border-radius: 8px; pointer-events: none; }
   #zoomCtl { position: absolute; right: 10px; bottom: 86px; display: flex;
@@ -255,17 +343,18 @@
                     justify-content: center; padding: 0; }
   #rotBtn { font-size: 30px !important; line-height: 1; }
   #relocBtn { font-size: 24px !important; line-height: 1; }
-  #navInfo { position: absolute; left: 10px; top: 10px; right: 10px; font-size: 12px;
-             color: #e6edf3; background: rgba(15,20,25,.82); padding: 6px 10px;
-             border-radius: 8px; pointer-events: none; }
+  #navInfo { position: absolute; left: 0; right: 0; top: 3px; font-size: 12px;
+             color: #d7e3ec; background: rgba(13,17,23,.62); padding: 4px 10px;
+             text-align: center; letter-spacing: .3px;
+             border-radius: 0; pointer-events: none; }
 </style>
   <link rel="manifest" href="manifest.webmanifest">
   <meta name="theme-color" content="#0d1117">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="机器人控制">
-  <link rel="apple-touch-icon" href="apple-touch-icon.png">
-  <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png?v=4">
+  <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png?v=4">
 </head>
 <body>
 <div id="login">
@@ -295,15 +384,20 @@
       <div class="prodName">底轮机器人</div>
       <div class="prodDesc">四轮底盘 · 遥控 / 导航 / 建图</div>
     </div>
-    <div class="productCard disabled">
+    <div class="productCard" id="prodArm">
       <div class="prodIcon">🦾</div>
       <div class="prodName">机械臂</div>
-      <div class="prodDesc">即将上线</div>
+      <div class="prodDesc">六轴协作臂 · 抓取 / 示教　<span style="color:#d29922">即将上线</span></div>
     </div>
-    <div class="productCard disabled">
+    <div class="productCard" id="prodHumanoid">
+      <div class="prodIcon">🤖</div>
+      <div class="prodName">人形机器人</div>
+      <div class="prodDesc">双足行走 · 语音交互　<span style="color:#d29922">即将上线</span></div>
+    </div>
+    <div class="productCard" id="prodBoat">
       <div class="prodIcon">🚤</div>
-      <div class="prodName">无人船</div>
-      <div class="prodDesc">即将上线</div>
+      <div class="prodName">水上表演机器人</div>
+      <div class="prodDesc">水面编队 · 灯光表演　<span style="color:#d29922">即将上线</span></div>
     </div>
   </div>
   <div class="productFoot" id="prodLogout">退出登录</div>
@@ -313,15 +407,14 @@
   <div class="dot" id="dot"></div>
   <span id="devName" title="点击查看设备信息">car-001</span>
   <span id="hdrPct">--</span>
-  <span class="badge" id="navBadge">--</span>
   <div class="grow"></div>
-  <span id="gearBtn" title="设备设置">⚙</span>
+  <button id="gearBtn" title="设备设置">设置</button>
 </header>
 
 
 <div id="batteryWarn" class="hidden">电量低</div>
 
-<div id="switchBar" class="hidden">
+<div id="switchBar">
   <div class="barText" id="switchText">正在切换…</div>
   <div class="barTrack"><div class="barFill" id="switchFill"></div></div>
 </div>
@@ -350,6 +443,7 @@
   </div>
 </div>
 
+<div id="dbgPill"></div>
 <div id="shutdownView" class="hidden">
   <div class="shutdownCard">
     <div class="shutdownIcon">⏻</div>
@@ -365,8 +459,11 @@
     <div class="status" style="padding:0">
       <div class="card"><span>电量</span><b id="pct">--</b></div>
       <div class="card"><span id="voltLabel">电压</span><b id="volt">--</b></div>
+      <div class="card"><span>CPU 温度</span><b id="cpuTemp">--</b></div>
+      <div class="card"><span>SSD 温度</span><b id="ssdTemp">--</b></div>
+      <div class="card"><span>WiFi 温度</span><b id="wifiTemp">--</b></div>
+      <div class="card"><span>雷达</span><b id="lidarBoth">--</b></div>
     </div>
-    <div class="tempRow" id="tempRow">CPU -- · SSD -- · WiFi --</div>
     <div class="askRow">
       <button id="rebootBtn" style="border-color:#d29922;color:#d29922">重启主控</button>
       <button id="shutdownBtn" style="border-color:#f85149;color:#ff7b72">关机</button>
@@ -411,7 +508,6 @@
     <div class="joyWrap"><div id="joy"><div id="knob"></div></div></div>
     <div class="hint" id="dbg">拖动绿色摇杆控制；松手自动停车</div>
     <button id="stop">■ 急停</button>
-    <button id="testBtn">发送一条测试指令（零速）</button>
   </div>
 
   <!-- 导航模式 -->
@@ -434,17 +530,52 @@
     </div>
     <div id="mapCtl" class="navBar hidden">
       <button id="mapArmBtn" style="border-color:#238636;color:#3fb950">授权</button>
-      <button id="mapSaveBtn">保存地图</button>
+      <button id="mapSaveBtn">编辑地图</button>
       <button id="mapRestartBtn">重新建图</button>
       <button id="mapStopBtn" style="border-color:#f85149;color:#ff7b72">急停</button>
     </div>
     <div id="mapJoyWrap" class="hidden">
       <div id="mapJoy"><div id="mapKnob"></div></div>
     </div>
+    <div id="mapEditor" class="hidden">
+      <div class="edTop">
+        <span id="edTitle">编辑地图</span>
+        <span class="edTopTools">
+          <button id="edClose">返回</button>
+        </span>
+      </div>
+      <canvas id="edCanvas"></canvas>
+      <div class="edRight">
+        <button id="edZoomOut" title="缩小">－</button>
+        <button id="edZoomIn" title="放大">＋</button>
+        <button id="edRotate" title="旋转 90°" aria-label="旋转 90 度"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg></button>
+        <button id="edWidthBtn" title="画笔粗细" aria-label="画笔粗细"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20c2.2.4 4-.4 4.8-2.2.7-1.7-.2-3.2-1.8-3.6-1.7-.4-3.2.7-3.4 2.4-.1 1.2.1 2.4.4 3.4z"/><path d="M9 15.2 19.2 5a2 2 0 0 0-2.8-2.8L6.2 12.4"/></svg></button>
+      </div>
+      <div id="edWidthPanel" class="hidden">
+        <span>画笔粗细</span>
+        <input id="edWidth" type="range" min="1" max="24" step="1" value="1">
+        <div class="pv"><span>1 格</span><span>24 格</span></div>
+        <b id="edWidthVal" style="display:block;text-align:center;font-size:13px">1 格 0.05m</b>
+      </div>
+      <div class="edBar">
+        <button id="edErase" class="on">清除</button>
+        <button id="edWall">绘画</button>
+        <button id="edUndo" class="sym" title="返回上一步" aria-label="返回上一步">↶</button>
+        <button id="edRedo" class="sym" title="返回下一步" aria-label="返回下一步">↷</button>
+        <button id="edLineBtn" class="sym" title="两点直线" aria-label="两点直线">/</button>
+        <button id="edSave" class="primary">保存</button>
+      </div>
+      <div class="edHint" id="edHint">白=可通行 · 灰=未探索 · 黑=障碍　|　单指涂抹 · 双指缩放/平移</div>
+    </div>
   </div>
 </main>
 
 <script>
+// 8080 是"boat"项目的静态服务器（没有 /api 与 /ws），误用会显示"云端断开"。
+// 检测到 8080 时自动跳到正确入口（80 端口的 /car/）。
+if (location.port === '8080') {
+  location.replace(`http://${location.hostname}/car/`);
+}
 const API = (location.port && location.port !== '80')
   ? `${location.protocol}//${location.hostname}` : location.origin;
 const DEVICE = 'car-001';
@@ -456,6 +587,10 @@ let ws = null, wsReady = false;
 let joyActive = false, jx = 0, jy = 0;
 let sendTimer = null, reconnectTimer = null;
 let robotState = {};
+// 2026-11-20：切图期间禁止画航点/开始导航。现场事故：手机还在显示旧图（test1），
+// 车端已经切到 1A，用户随手点的 6 个航点按 test1 坐标发到 1A 的地图上 →
+// 目标落在墙里，Nav2 每 15 秒判"没前进"重派 → 车原地左右打转。
+let mapSwitching = false;
 let robotOnline = null;   // null=未知 true/false=机器人 MQTT 在线状态
 let pathPoints = [];
 let poseTarget = null, poseDisp = null, renderDirty = true, lastFrame = 0;
@@ -473,16 +608,32 @@ function showProductPage() {
   $('productView').classList.remove('hidden');
   $('mainHeader').style.display = 'none';
   $('mainContent').style.display = 'none';
+  placeProgressBar();
 }
 function showMain() {
   $('productView').classList.add('hidden');
   $('mainHeader').style.display = '';
   $('mainContent').style.display = '';
+  offlineOverlaySuppressed = false;
+  if (!wsReady || robotOnline === false) robotOfflineSince = Date.now();
+  placeProgressBar();
+  setTimeout(placeProgressBar, 300);
   if (!wsReady) connect();
 }
 $('prodWheel').onclick = () => {
   localStorage.setItem('jc_product', 'wheel');
   showMain();
+};
+// 2026-11-20 用户要求：产品页加上机械臂。控制页还没做，先给明确提示，
+// 不灰掉（灰掉看着像坏了）。控制页好了之后把这里换成跳转即可。
+$('prodArm').onclick = () => {
+  showToast('机械臂即将上线，敬请期待', false);
+};
+$('prodHumanoid').onclick = () => {
+  showToast('人形机器人即将上线，敬请期待', false);
+};
+$('prodBoat').onclick = () => {
+  showToast('水上表演机器人即将上线，敬请期待', false);
 };
 $('prodLogout').onclick = () => {
   localStorage.removeItem('jc_product');
@@ -490,10 +641,25 @@ $('prodLogout').onclick = () => {
 };
 
 let lastOnlineOk = true;
+// 2026-11-19：用户点「返回产品」后，离线页不应再自动弹回来
+let offlineOverlaySuppressed = false;
 
 function offlineTick() {
+  if (offlineOverlaySuppressed) return;
   if (!robotOfflineSince || shutdownPending) return;
-  if (wsReady && robotOnline !== false) { robotOfflineSince = 0; return; }
+  // 登录/刷新后的宽限期：车端刚开机时导航栈要 60~90 秒才起来
+  // （base_bridge 在导航栈里），这期间没有任何 state 是**正常**的，
+  // 判离线只会让用户以为设备坏了（2026-11-20 早现场）。
+  // 从没收到过 state（页面刚打开、车可能还在启动）→ 等 90 秒；
+  // 收到过再丢（真离线）→ 30 秒就够，不用让用户干等。
+  const bootWait = lastStateAt ? 30000 : 90000;
+  if (Date.now() - pageBootAt < bootWait) return;
+  // 只要还在正常收 state（20 秒内收过），就不算离线
+  const silent = lastStateAt ? Date.now() - lastStateAt : Infinity;
+  if (wsReady && robotOnline !== false && silent < 20000) {
+    robotOfflineSince = 0; return;
+  }
+  if (!wsReady && silent < 8000) return;   // 断线但数据还很新：再等等
   if (Date.now() - robotOfflineSince < 15000) return;
   // 持续离线 15 秒：清空数值并显示离线页
   clearStatusValues();
@@ -503,8 +669,47 @@ function offlineTick() {
   if ($('shutdownView')) $('shutdownView').classList.remove('hidden');
 }
 setInterval(offlineTick, 1000);
+
+// 2026-11-19：模式"对账"。
+// 现象：手机切到建图探索，但切换指令丢了/被并发吃掉，车端还在导航栈，
+// 页面就一直黑屏不出图（用户 11:44 现场）。现在每秒比对一次车端上报的
+// `mode`，不一致就每 15 s 重发一次切换请求，最多 5 次。
+function modeReconcileTick() {
+  // 弹窗等待确认 / 正在切栈时不干预用户选择
+  if (askResolve) return;
+  // 2026-11-19：下拉框和界面模式脱节时（用户选了但 onchange 没走完/被弹窗打断），
+  // 按用户看到的选项把界面切过去。否则会出现"下拉框写着建图探索、
+  // 界面还停在手动模式、地图画布被隐藏 → 一直黑屏"（11:56 现场）。
+  const sel = $('modeSelect');
+  // 用户刚动过下拉框（8 秒内）：交给 onchange 走"确认弹窗"流程，
+  // 对账逻辑不能抢先把界面切走（否则弹窗还没出来模式就变了）。
+  if (sel && Date.now() - userModeChangeAt < 8000) return;
+  if (sel && sel.value && sel.value !== lastMode &&
+      (sel.value === 'manual' || sel.value === 'nav' || sel.value === 'map')) {
+    console.log('下拉框与界面模式不一致，按选项应用:', sel.value, '(当前', lastMode, ')');
+    lastAppliedMode = sel.value;
+    try { applyMode(sel.value); } catch (e) { console.warn('applyMode 失败', e); }
+    return;
+  }
+  if (!wsReady || !robotMode || !lastMode) return;
+  if (lastMode !== 'map' && lastMode !== 'nav') return;
+  // 正在切换中不要重复下发；但超过 120 秒说明切换卡死了，允许接管
+  if (progressActive && Date.now() - progressStartedAt < 120000) return;
+  if (lastMode === robotMode) { modeResendN = 0; return; }
+  if (modeResendN >= 5) return;
+  const now = Date.now();
+  if (now - modeResendAt < 15000) return;
+  modeResendAt = now;
+  modeResendN += 1;
+  const action = lastMode === 'map' ? 'mapping_start' : 'mapping_stop';
+  console.log('模式不一致，重发', action, '车端=', robotMode, '页面=', lastMode);
+  ws.send(JSON.stringify({ type: 'nav', action }));
+}
+setInterval(modeReconcileTick, 1000);
 let shutdownPending = false;
 let robotOfflineSince = 0;
+let lastStateAt = 0;      // 最后一条 state 消息时间（判断真离线才弹页）
+const pageBootAt = Date.now();
 function clearStatusValues() {
   ['pct', 'volt', 'pose', 'spd', 'armState', 'hdrPct'].forEach((id) => {
     const el = $(id);
@@ -552,6 +757,7 @@ function updateLinkBadge() {
 
 function showLogin(show) {
   $('login').style.display = show ? 'flex' : 'none';
+  placeProgressBar();
   if (show) {
     try {
       const saved = localStorage.getItem('jc_remember');
@@ -618,20 +824,30 @@ function connect() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   const wsHost = (location.port && location.port !== '80') ? location.hostname : location.host;
   ws = new WebSocket(`${proto}://${wsHost}/ws/control/${DEVICE}?token=${encodeURIComponent(token)}`);
-  ws.onopen = () => { wsReady = true; updateLinkBadge(); };
+  ws.onopen = () => {
+    wsReady = true; updateLinkBadge();
+    lmapPlain = null;            // 重连后重新协商地图格式
+    syncLiveMapFormat();
+    startNetPing();              // 开始测网络延迟（WiFi 图标）
+  };
   ws.onclose = (ev) => {
     wsReady = false; updateLinkBadge();
+    clearInterval(netTimer); setNetLatency(null);
     if (ev.code === 4401 || ev.code === 4403) { logout(); return; }
     clearTimeout(reconnectTimer);
     reconnectTimer = setTimeout(connect, 3000);
   };
   ws.onmessage = (ev) => {
     let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
+    if (m.type === 'pong') {
+      const rtt = performance.now() - (typeof m.t === 'number' ? m.t : netPendingAt);
+      setNetLatency(rtt);
+    }
     if (m.type === 'state') updateStatus(m);
     if (m.type === 'online') { robotOnline = (m.online === 'online'); updateLinkBadge(); }
     if (m.type === 'live_map') { applyLiveMap(m); }
     if (m.type === 'maps') { renderMapList(m.maps || []); }
-    if (m.type === 'preview_path') {
+    if (m.type === 'preview_path') { if (lastMode === 'map') return;
       previewPoints = m.points || [];
       renderDirty = true;
       if (robotState.nav !== 'navigating') {
@@ -656,8 +872,13 @@ function connect() {
           ? `导航已接受：共 ${navWaypoints.length} 个航点`
           : '导航被拒绝：' + m.reason;
       } else if (m.action === 'relocalize') {
+        if (!m.accepted && navSwitchPending) {
+          // 导航栈还没起来：继续等，别把进度条收掉，也别停循环
+          setProgressLabel('导航栈启动中，请稍候…');
+        }
         if (m.accepted && navSwitchPending) {
           navSwitchPending = false;
+          mapSwitching = false;
           clearInterval(navReadyTimer);
           finishProgress(pendingMapName
             ? `地图已切换：${pendingMapName}（已重新定位）`
@@ -668,24 +889,51 @@ function connect() {
             clearTimeout(mapSwitchTimer);
           }
         }
+        if (!m.accepted && navSwitchPending) {
+          // 栈还没起来/服务没就绪：这是"等"，不是"失败"，别吓用户
+          setProgressLabel('导航栈还没就绪，等它就绪后自动重新定位…');
+          return;
+        }
         $('navInfo').textContent = m.accepted
           ? '重新定位成功：' + (m.reason || '播种完成')
           : '重新定位失败：' + (m.reason || '未知原因');
-      } else if (m.action === 'set_map') {
+      } else if (m.action === 'set_map_ack') {
+        // 2026-11-20：受理 ≠ 已加载。这里只说"切换中"，别提前报已加载。
         if (m.accepted) {
-          $('navInfo').textContent =
-            `地图已加载：${m.reason}，正在等待定位…`;
-          setProgressLabel('地图已加载，正在等待定位…');
-          if (pendingMapName) startNavReadyWatch('正在等待导航就绪，重新定位');
+          // 图在车端已经换好（新图 0.1 秒就传到云端了），剩下的只是重启栈
+          $('navInfo').textContent = `已切换到 ${m.reason}，正在重启导航栈…`;
+          setProgressLabel(
+            `地图已切换：${m.reason}（正在重启导航栈，约 40~60 秒）…`);
         } else {
           $('navInfo').textContent = '切换地图失败：' + (m.reason || '');
           showToast('切换地图失败：' + (m.reason || ''), false);
         }
+      } else if (m.action === 'set_map_done') {
+        if (m.accepted) {
+          // 新图已经由车端确认加载 → 立刻解除"切图中"锁，
+          // 否则就绪监听会一直以为还在切图
+          mapSwitching = false;
+          $('navInfo').textContent = `地图已生效：${m.reason}，正在定位…`;
+          setProgressLabel(`地图已生效：${m.reason}（导航栈已就绪，正在定位）…`);
+          // 2026-11-20：不能再依赖 pendingMapName —— 状态帧往往先把地图名
+          // 更新掉、把 pending 清空，导致这里不启动监听 → 页面卡在
+          // "等待导航栈就绪"。改成无条件启动（函数内部幂等）。
+          startNavReadyWatch('等待导航栈就绪');
+        } else {
+          $('navInfo').textContent = '地图加载失败：' + (m.reason || '');
+          showToast('地图加载失败，请重试', false);
+        }
+      } else if (m.action === 'set_map') {
+        // 兼容旧车端（没有 set_map_ack 的版本）
+        if (m.accepted) {
+          $('navInfo').textContent = `地图切换中：${m.reason}（重启导航栈）…`;
+          setProgressLabel(`正在切换地图：${m.reason}（重启导航栈）…`);
+        }
       } else if (m.action === 'nav_restart') {
         if (m.accepted) {
-          $('navInfo').textContent = '地图切换：导航栈已重启，正在重新定位…';
-          setProgressLabel('导航栈已重启，正在等待定位…');
-          if (pendingMapName) startNavReadyWatch('正在等待导航就绪，重新定位');
+          $('navInfo').textContent = '导航栈已就绪，正在重新定位…';
+          setProgressLabel('导航栈已就绪，正在重新定位…');
+          if (pendingMapName) startNavReadyWatch('等待导航栈就绪');
         } else {
           $('navInfo').textContent = '导航栈重启失败：' + (m.reason || '');
           showToast('导航栈重启失败', false);
@@ -700,6 +948,17 @@ function connect() {
           showToast('保存失败：' + (m.reason || '未知原因'), false);
           $('navInfo').textContent = '保存失败：' + (m.reason || '未知原因');
         }
+      } else if (m.action === 'map_edit') {
+        if (m.accepted) {
+          showToast('地图已保存：' + (m.reason || ''), true);
+          finishProgress('地图已保存，可用于导航');
+          $('navInfo').textContent = '地图已保存：' + (m.reason || '');
+          closeMapEditor();
+        } else {
+          showToast('保存失败：' + (m.reason || '未知'), false);
+          finishProgress('保存失败');
+          if ($('edHint')) $('edHint').textContent = '保存失败：' + (m.reason || '未知');
+        }
       } else if (m.action === 'mapping_restart') {
         clearTimeout(restartGuard);
         if (m.accepted) setProgressLabel('建图栈已重启，等待 SLAM 地图…');
@@ -707,11 +966,27 @@ function connect() {
           ? '建图栈已重启，等待 SLAM 地图…'
           : '重新建图失败：' + (m.reason || '未知');
       } else if (m.action === 'mapping_start') {
+        // 结果回来了：把下拉框/界面模式同步到实际动作，避免"下拉框写导航、
+        // 顶部写建图"这种自相矛盾的画面（14:41 现场）。
+        if (m.accepted) {
+          if ($('modeSelect')) $('modeSelect').value = 'map';
+          lastAppliedMode = 'map';
+          if (lastMode !== 'map' && !askResolve) {
+            try { applyMode('map'); } catch (e) { console.warn(e); }
+          }
+        }
         if (m.accepted) setProgressLabel('建图栈已启动，等待 SLAM 地图…');
         $('navInfo').textContent = m.accepted
           ? '建图栈已启动，等待 SLAM 地图…'
           : '启动建图失败：' + (m.reason || '未知');
       } else if (m.action === 'mapping_stop') {
+        if (m.accepted) {
+          if ($('modeSelect')) $('modeSelect').value = 'nav';
+          lastAppliedMode = 'nav';
+          if (lastMode !== 'nav') {
+            try { applyMode('nav'); } catch (e) { console.warn(e); }
+          }
+        }
         if (m.accepted) setProgressLabel('导航栈已重启，正在加载地图…');
         $('navInfo').textContent = m.accepted
           ? '已切回导航模式：导航栈已重启，正在加载地图…'
@@ -728,8 +1003,103 @@ function connect() {
   };
 }
 
+function updateDbgLine() {
+  const el = $('dbgPill');
+  if (!el) return;
+  const img = mapImg ? `${mapImg.width}x${mapImg.height}` : '无图';
+  const cv = canvas ? `${canvas.width}x${canvas.height}` : '-';
+  const sel = $('modeSelect') ? $('modeSelect').value : '-';
+  const dec = (typeof DecompressionStream === 'undefined') ? 'gzipx' : 'gzip';
+  const batTxt = (typeof robotState.percentage === 'number')
+    ? Math.round(robotState.percentage * 100) + '%'
+    : (typeof batteryPct === 'number' ? Math.round(batteryPct * 100) + '%' : '无');
+  const chainTxt = (robotState.chain === false) ? '断' : '通';
+  el.textContent = (dbgErr ? dbgErr + ' | ' : '')
+    + `界面${lastMode}/车${robotMode || '?'}/选${sel}/图${img}/布${cv}/${dec}`
+    + `/电${batTxt}/链${chainTxt}/栈${robotState.nav || '?'}`;
+}
+
+// 每 5 秒把诊断条文本回传云端（调试用，可远程看到手机端状态）
+setInterval(() => {
+  if (!wsReady || !$('dbgPill')) return;
+  try {
+    ws.send(JSON.stringify({ type: 'diag', text: $('dbgPill').textContent }));
+  } catch (e) {}
+}, 5000);
+let dbgErr = '';             // 页面内部错误，直接显示在左下角诊断条上
+let modeAutoSwitching = false;   // 防止 car 端 mode 回推时反复自动切换
+let robotMode = '';          // 车端实际在跑的栈：'map' / 'nav'
+let modeResendN = 0;         // 本轮模式不一致的重发次数
+let modeResendAt = 0;
+// 建图必须先确认两只雷达都在出数据，否则 SLAM 会用"半圈"首帧把地图窗口定死
+// （2026-11-19 现场：只建了一半）。这里在界面上也把住门：
+// 双雷达没就绪就不显示建图画面，只显示"等待雷达就绪"。
+function syncLidarGate(s) {
+  if (!s) return;
+  lastState = s;
+  const f = !!s.lidar_front, r = !!s.lidar_rear;
+  const ok = f && r;
+  const now = Date.now();
+  const label = '等待双雷达就绪：前雷达' + (f ? '✓' : '…') +
+                ' 后雷达' + (r ? '✓' : '…');
+  if (lastMode !== 'map') {
+    lidarWait = false;
+    lidarBadSince = 0;
+    return;
+  }
+  if (ok) {
+    lidarBadSince = 0;
+    if (lidarWait) {
+      lidarWait = false;
+      // 2026-11-20 用户反馈：这里原来调 finishProgress，进度条直接顶到 100%，
+      // 但画面还写着"SLAM 正在建图，稍候…"，看着像卡死在满格。
+      // 雷达就绪 ≠ 建图就绪：只换文案，进度条继续挂着（最多 92%），
+      // 等 SLAM 第一帧地图（applyLiveMap）才真正收条。
+      if (progressActive) setProgressLabel('双雷达已就绪，等待 SLAM 地图…');
+      if (lastState && mapImg) renderDirty = true;
+    }
+    return;
+  }
+  // 单帧抖动不重进等待：必须持续 6 秒都不就绪才算真的掉线，
+  // 否则状态帧一飘就会出现"已就绪↔等待"来回刷屏（2026-11-19 现场）。
+  if (!lidarBadSince) {
+    lidarBadSince = now;
+    return;
+  }
+  if (now - lidarBadSince < 6000) {
+    return;
+  }
+  lidarWait = true;
+  if (!progressActive) startProgress(label, 180000);
+  else setProgressLabel(label);
+}
+
 function updateStatus(s) {
   robotState = Object.assign(robotState, s);
+  lastStateAt = Date.now();
+  syncLidarGate(s);
+  if (typeof s.mode === 'string' && s.mode) {
+    if (s.mode !== robotMode) {
+      robotMode = s.mode;
+      modeResendN = 0;         // 模式已按预期变化，清零计数
+    }
+    // 车端已经在建图栈，界面却还停在别的模式 → 直接把界面切过去。
+    // 注意：这里不能只在 mode 变化时判断一次，否则第一次切换失败后就永远不再试。
+    const selMap = $('modeSelect') && $('modeSelect').value === 'map';
+    if (s.mode === 'map' && lastMode !== 'map' && selMap && !modeAutoSwitching
+        && !askResolve && !progressActive) {
+      modeAutoSwitching = true;
+      try {
+        if ($('modeSelect')) $('modeSelect').value = 'map';
+        lastAppliedMode = 'map';
+        applyMode('map');
+      } catch (e) {
+        dbgErr = '自动切图失败:' + (e && e.message ? e.message : e);
+        console.warn('自动切到建图模式失败', e);
+      }
+      setTimeout(() => { modeAutoSwitching = false; }, 3000);
+    }
+  }
   if (shutdownPending) {
     clearStatusValues();
     if (typeof s.online === 'string') robotOnline = (s.online === 'online');
@@ -749,15 +1119,30 @@ function updateStatus(s) {
     if (voltEl && typeof s.voltage === 'number') {
       voltEl.textContent = s.voltage.toFixed(1) + 'V';
     }
+    // 雷达状态 / 温度：改成卡片后单独更新（不再依赖 percentage 字段存在）
+    if (s.lidar_front !== undefined || s.lidar_rear !== undefined) {
+      // 用户要求：一个「雷达」卡片，里面显示前/后两个勾
+      const el = $('lidarBoth');
+      if (el) {
+        const front = s.lidar_front !== false;
+        const rear = s.lidar_rear !== false;
+        const tick = (v) => (v ? '✓' : '✗');
+        el.textContent = `前 ${tick(front)} 后 ${tick(rear)}`;
+        el.style.color = (front && rear) ? '#e6edf3' : '#ff7b72';
+      }
+    }
     if (s.temps) {
       const t = s.temps;
-      const f = (v) => (typeof v === 'number' ? v.toFixed(0) + '°C' : '--');
-      const tr = $('tempRow');
-      if (tr) {
-        tr.textContent = `CPU ${f(t.cpu)} · SSD ${f(t.ssd)} · WiFi ${f(t.wifi)}`;
-        const hot = (t.cpu || 0) >= 85;
-        tr.style.color = hot ? '#ff7b72' : '#8b949e';
-      }
+      const setTemp = (id, v) => {
+        const el = $(id);
+        if (!el) return;
+        el.textContent = (typeof v === 'number') ? v.toFixed(0) + '°C' : '--';
+        el.style.color = (typeof v !== 'number') ? '#8b949e'
+          : (v >= 85 ? '#ff7b72' : (v >= 70 ? '#d29922' : '#e6edf3'));
+      };
+      setTemp('cpuTemp', t.cpu);
+      setTemp('ssdTemp', t.ssd);
+      setTemp('wifiTemp', t.wifi);
     }
     const voltLabel = $('voltLabel');
     if (voltLabel) {
@@ -767,10 +1152,15 @@ function updateStatus(s) {
   if (typeof s.x === 'number') {
     $('pose').textContent = `${s.x.toFixed(2)}, ${s.y.toFixed(2)}`;
     poseTarget = {x: s.x, y: s.y, yaw: s.yaw || 0};
+    const poseFirst = !poseDisp;
     if (!poseDisp) poseDisp = Object.assign({}, poseTarget);
     renderDirty = true;
+    // 建图模式下车的位置第一次可用时，把视图重新居中到车，
+    // 否则会停在上一次/地图中心的位置，看起来"车不在图中间"。
+    if (poseFirst && lastMode === 'map' && mapImg) {
+      try { resetView(); } catch (e) { console.warn('居中失败', e); }
+    }
   }
-  if (s.nav) $('navBadge').textContent = s.nav;
   if (typeof s.online === 'string') {
     robotOnline = (s.online === 'online');
   }
@@ -787,7 +1177,12 @@ function updateStatus(s) {
       armEl.textContent = '已授权';
       armEl.style.color = '#3fb950';
     } else if (manual) {
-      armEl.textContent = '传感器未就绪';
+      // 2026-11-20：这里原来写"传感器未就绪"，但实际最常见的原因是
+      // **雷达断流**（readiness 由 /base/ready 决定，它要求雷达+IMU 都新鲜）。
+      // 写清楚是哪一种，现场才知道该去查雷达线还是等启动。
+      const lidarDown = (robotState.lidar_front === false) ||
+                        (robotState.lidar_rear === false);
+      armEl.textContent = lidarDown ? '已授权（雷达未就绪）' : '已授权（等待传感器）';
       armEl.style.color = '#d29922';
     } else {
       armEl.textContent = '未授权';
@@ -809,6 +1204,28 @@ function updateNavProgress() {
   const nav = robotState.nav || '';
   const now = Date.now();
   if (nav === 'navigating' && navWaypoints.length && poseDisp) {
+    // 0) 最准的：车端直接告诉我们"当前正在前往哪个坐标"（leg_x/leg_y）
+    //    以前靠段号/路径反推，探索器会跳点、切图后会重排，编号就对不上。
+    if (typeof robotState.leg_x === 'number' &&
+        typeof robotState.leg_y === 'number') {
+      let best = -1, bestD = Infinity;
+      navWaypoints.forEach((w, i) => {
+        const d = Math.hypot(w.x - robotState.leg_x, w.y - robotState.leg_y);
+        if (d < bestD) { bestD = d; best = i; }
+      });
+      if (best >= 0 && bestD < 1.5) {
+        navWpIdx = best;
+        $('navInfo').textContent =
+          `导航中：正在前往 ${best + 1}/${navWaypoints.length} 号航点`;
+      } else {
+        // 车端目标不在手机这份航点里（切图/换路线）：如实显示坐标，不瞎编编号
+        $('navInfo').textContent =
+          `导航中：正在前往 (${robotState.leg_x.toFixed(2)}, `
+          + `${robotState.leg_y.toFixed(2)})`;
+      }
+      lastNavMovingAt = now;
+      return;
+    }
     // 1) 以实线路径为准（实时）：沿路径向前找第一个航点
     if (pathPoints.length > 1) {
       let startIdx = 0, bestD = Infinity;
@@ -828,8 +1245,9 @@ function updateNavProgress() {
         }
       }
     }
-    // 2) 车端探索器上报的段号
-    if (robotState.legs > 1 && robotState.leg > 0) {
+    // 2) 车端探索器上报的段号（仅在数量对得上时才用，否则编号会错位）
+    if (robotState.legs > 1 && robotState.leg > 0 &&
+        robotState.legs === navWaypoints.length) {
       $('navInfo').textContent =
         `导航中：正在前往 ${robotState.leg}/${robotState.legs} 号航点`;
       lastNavMovingAt = now;
@@ -914,16 +1332,23 @@ setInterval(batteryTick, 500);
 function updateNavStatus() {
   const r = robotState;
   const pose = (typeof r.x === 'number') ? `${r.x.toFixed(2)}, ${r.y.toFixed(2)}` : '无定位';
-  const bat = (typeof r.percentage === 'number') ? Math.round(r.percentage * 100) + '%' : '--';
   const mapTxt = (lastMode === 'map')
-    ? ' · 建图模式'
+    ? ' · 建图探索'
     : (r.map ? ` · 地图 ${r.map}` : '');
   let authTxt = '待命';
   if (r.armed) authTxt = '已授权';
   else if (r.nav === 'navigating') authTxt = '未授权';
+  // 建图栈没有 explorer 发布 /explore/state，桥接会报 unknown；
+  // 直接显示 unknown 容易让人以为故障，这里归一成"待命"。
+  const navTxt = (r.nav && r.nav !== 'unknown')
+    ? r.nav : (r.manual ? '手动待命' : '待命');
+  // 安全链（collision_monitor）没通时给个明确提示：这时候发目标一定走不动
+  const chainTxt = (r.chain === false) ? ' · 安全链等待中' : '';
+  // 2026-11-20 用户要求：状态行不再显示电量（顶部 header 已有），只留位置/状态/地图
   $('navStatus').textContent =
-    `位置 ${pose} · 电量 ${bat} · ${r.nav || '--'}${mapTxt} · ${authTxt}`;
-  // 手动授权成功后更新建图模式的提示
+    `位置 ${pose} · ${navTxt}${mapTxt}${chainTxt} · ${authTxt}`;
+  updateDbgLine();
+  // 手动授权成功后更新建图探索的提示
   if (r.manual && ($('navInfo').textContent || '').indexOf('授权') >= 0) {
     $('navInfo').textContent = '已授权：拖动底部摇杆开始建图';
   }
@@ -932,6 +1357,7 @@ function updateNavStatus() {
     $('navInfo').textContent = `地图已切换：${pendingMapName}`;
     showToast('地图已切换：' + pendingMapName, true);
     pendingMapName = '';
+    mapSwitching = false;
     clearTimeout(mapSwitchTimer);
   }
   // 地图名变了（含切换后）→ 丢弃缓存的地图图片并重新拉取
@@ -1004,7 +1430,7 @@ function sendCmd(cx, cy) {
   const angular = +(-px * MAX_ANGULAR).toFixed(3);
   if (!wsReady) { $('dbg').textContent = '未连接，指令未发送'; return; }
   try {
-    ws.send(JSON.stringify({linear, angular}));
+    ws.send(JSON.stringify({linear, angular, ttl_ms: 800}));
     $('dbg').textContent = `发送 v=${linear} w=${angular}`;
   } catch (err) {
     $('dbg').textContent = '发送失败：' + err.message;
@@ -1013,11 +1439,11 @@ function sendCmd(cx, cy) {
 }
 sendTimer = setInterval(() => { if (joyActive || jx || jy) sendCmd(); }, 50);
 
-/* ---------------- 摇杆（建图模式） ---------------- */
+/* ---------------- 摇杆（建图探索） ---------------- */
 const mapJoyEl = $('mapJoy'), mapKnobEl = $('mapKnob');
 let mapJoyActive = false, mjx = 0, mjy = 0;
-function bindMapJoystick() {
-  if (!mapJoyEl || !mapKnobEl) return;
+// 注意：这三个函数必须在顶层。原来它们写在 bindMapJoystick() 内部，
+// 导致 applyMode() 里调用 mapResetKnob() 直接 ReferenceError（2026-11-19 现场）。
 function mapEventPoint(e) {
   const t = (e.touches && e.touches[0]) || (e.changedTouches && e.changedTouches[0]) || e;
   const r = mapJoyEl.getBoundingClientRect();
@@ -1033,6 +1459,8 @@ function mapResetKnob() {
   mapKnobEl.style.transform = 'translate(-50%,-50%)';
   mjx = 0; mjy = 0; mapJoyActive = false;
 }
+function bindMapJoystick() {
+  if (!mapJoyEl || !mapKnobEl) return;
 mapJoyEl.addEventListener('touchstart', (e) => {
   e.preventDefault(); mapJoyActive = true;
   const p = mapEventPoint(e); mapMoveKnob(p.x, p.y); sendCmd(mjx, mjy);
@@ -1071,13 +1499,19 @@ let navReadyTries = 0;
 let navReadyTimer = null;
 let restartGuard = null;
 let progressActive = false;
+let lidarWait = false;      // 建图模式下等待双雷达就绪
+let lidarBadSince = 0;      // 从什么时候开始不就绪（用于抖动去抖）
+let lastState = null;       // 最近一帧车端状态，供雷达门重算
+let progressStartedAt = 0;
 
 function startProgress(label, durationMs) {
   const bar = $('switchBar'), fill = $('switchFill'), txt = $('switchText');
   if (!bar || !fill) return;
-  bar.classList.remove('hidden');
+  bar.classList.add('active');
+  placeProgressBar();
   progressActive = true;
-  txt.textContent = label;
+  progressStartedAt = Date.now();
+  setProgressLabel(label);
   fill.style.width = '4%';
   const t0 = Date.now();
   clearInterval(progressTimer);
@@ -1090,22 +1524,43 @@ function startNavReadyWatch(prefix) {
   navSwitchPending = true;
   navReadyTries = 0;
   clearInterval(navReadyTimer);
-  navReadyTimer = setInterval(() => {
+  const tick = () => {
     if (!navSwitchPending) return;
     navReadyTries += 1;
-    if (wsReady) ws.send(JSON.stringify({type: 'nav', action: 'relocalize'}));
-    setProgressLabel(`${prefix}（第 ${navReadyTries} 次重新定位）…`);
-    if (navReadyTries > 15) {
+    // 只有车端真的在导航栈时才请求重新定位；否则服务不存在，请求只会
+    // 堆在车端队列里，把模式切换堵死（16:47 现场：一直重新定位）
+    // 2026-11-20 用户要求：导航栈没就绪时不要一直发"重新定位"。
+    // 之前的写法只看 robotMode==='nav'，栈还在重启也照发 → 请求堆在车端，
+    // 界面上看着一直在重新定位，还可能把模式切换堵死。
+    const stackUp = robotMode === 'nav' &&
+                    robotState.nav && robotState.nav !== 'unknown' &&
+                    !mapSwitching;
+    if (!stackUp) {
+      // 栈没就绪：只等，不发任何请求（用户明确要求）
+      setProgressLabel(
+        `正在等待导航栈就绪（第 ${navReadyTries} 次检查，还没开始定位）…`);
+    } else if (wsReady) {
+      // 栈确实起来了才开始重新定位
+      ws.send(JSON.stringify({type: 'nav', action: 'relocalize'}));
+      setProgressLabel(
+        `导航栈已就绪，正在重新定位（第 ${navReadyTries} 次）…`);
+    }
+    if (navReadyTries > 18) {
       clearInterval(navReadyTimer);
       navSwitchPending = false;
-      finishProgress('未就绪，请检查车端');
+      finishProgress('导航栈一直没就绪（超过 2 分钟），请检查车端');
     }
-  }, 12000);
+  };
+  // 马上检查一次（栈可能已经就绪，不用白等 12 秒），然后每 12 秒一次
+  tick();
+  navReadyTimer = setInterval(tick, 8000);
 }
 
 function setProgressLabel(label) {
   const txt = $('switchText');
   if (txt) txt.textContent = label;
+  const info = $('navInfo');
+  if (info) info.textContent = label;
 }
 function finishProgress(label) {
   progressActive = false;
@@ -1114,12 +1569,71 @@ function finishProgress(label) {
   if (label) setProgressLabel(label);
   if (fill) fill.style.width = '100%';
   setTimeout(() => {
-    if (bar) bar.classList.add('hidden');
-    if (fill) fill.style.width = '0%';
+    if (bar) bar.classList.remove('active');
   }, 1200);
 }
+// 进度条紧贴顶栏下沿（顶栏高度随 PWA 安全区变化，用实测位置）
+function placeProgressBar() {
+  const bar = $('switchBar'), hdr = $('mainHeader'), txt = $('switchText');
+  if (!bar || !hdr) return;
+  // 登录页 / 产品选择页不显示进度条（它们盖住了主界面，绿条飘在上面很怪）
+  const loginShowing = $('login') && $('login').style.display !== 'none';
+  const productShowing = $('productView') &&
+    !$('productView').classList.contains('hidden');
+  const visible = !loginShowing && !productShowing &&
+    hdr.offsetParent !== null && hdr.style.display !== 'none';
+  bar.style.display = visible ? '' : 'none';
+  if (txt) txt.style.display = visible ? '' : 'none';
+  if (!visible) return;
+  const bottom = Math.max(0, Math.round(hdr.getBoundingClientRect().bottom));
+  bar.style.top = bottom + 'px';
+  if (txt) txt.style.top = (bottom + 3) + 'px';
+}
+window.addEventListener('resize', placeProgressBar);
+window.addEventListener('load', () => { placeProgressBar(); setTimeout(placeProgressBar, 500); });
+window.addEventListener('orientationchange', () => setTimeout(placeProgressBar, 150));
 let mapSwitchTimer = null;
+// 进入建图探索后自动授权手动控制（省掉现场点「授权」那一步）
+let autoArmActive = false, autoArmTimer = null, autoArmTries = 0;
+function autoArmForMapping() {
+  autoArmActive = true;
+  autoArmTries = 0;
+  clearInterval(autoArmTimer);
+  const tick = () => {
+    if (!autoArmActive) { clearInterval(autoArmTimer); return; }
+    if (robotState.manual) {
+      clearInterval(autoArmTimer);
+      // 安全：授权生效这一刻把摇杆归零，防止切模式前残留的推杆量立刻驱动车
+      try { mapResetKnob(); } catch (e) { /* 某些手机内核对函数提升处理不一致，忽略 */ }
+      if (wsReady) sendCmd(0, 0);
+      if (lastMode === 'map') {
+        $('navInfo').textContent = '已自动授权：拖动底部摇杆开始建图探索';
+      }
+      return;
+    }
+    if (!wsReady) return;
+    if (autoArmTries >= 15) {
+      clearInterval(autoArmTimer);
+      $('navInfo').textContent = '自动授权未成功，请点「授权」重试';
+      return;
+    }
+    autoArmTries += 1;
+    ws.send(JSON.stringify({type: 'nav', action: 'manual'}));
+  };
+  setTimeout(tick, 2000);
+  autoArmTimer = setInterval(tick, 5000);
+}
+function stopAutoArm() {
+  autoArmActive = false;
+  clearInterval(autoArmTimer);
+  autoArmTimer = null;
+}
 function applyMode(mode) {
+  // 2026-11-19：必须在改 lastMode 之前记住上一模式。
+  // 原先结尾用 `lastMode !== 'map'` 判断，而 lastMode 已经被赋成新值，
+  // 导致「建图→导航」时会重复走两遍启动流程（多一次 relocalize、多一个进度条），
+  // 连点模式按钮还会重复发 mapping_start，两个 systemctl 序列互相停对方的栈。
+  const prevMode = lastMode;
   if (mode === 'manual') {
     // 切到手动模式：取消未完成的导航切换/重定位和进度条
     clearInterval(navReadyTimer);
@@ -1128,10 +1642,19 @@ function applyMode(mode) {
     navSwitchPending = false;
     progressActive = false;
     clearInterval(progressTimer);
-    $('switchBar').classList.add('hidden');
+    $('switchBar').classList.remove('active');
+    if ($('switchFill')) $('switchFill').style.width = '100%';
+    $('navInfo').classList.remove('hidden');
     $('navInfo').textContent = '手动模式';
+    // 2026-11-20 现场：重启后切导航还显示建图那张图。
+    // 根因是手动模式下把上一次建图的 SLAM 图（如 487x371）留在了 mapImg，
+    // 之后进导航时 loadMap() 见 mapImg 非空就直接 return，永远不去云端取正式地图。
+    mapImg = null;
+    mapMeta = null;
+    liveMapSeen = false;
   }
   const isMap = mode === 'map';
+  if (!isMap) stopAutoArm();
   const nav = (mode === 'nav' || isMap);
   $('manualView').classList.toggle('hidden', nav);
   $('navView').classList.toggle('hidden', !nav);
@@ -1141,16 +1664,22 @@ function applyMode(mode) {
   const reloc = $('relocBtn'), vmode = $('viewModeBtn');
   if (reloc) reloc.classList.toggle('hidden', isMap);
   if (vmode) vmode.classList.toggle('hidden', !(isMap || mode === 'nav'));
+  // 先落地模式：后面任何一步出异常都不该让 applyLiveMap 继续丢帧
+  lastMode = mode;
   if (isMap) {
     clearTimeout(switchTimer);
     clearInterval(navReadyTimer);
     navSwitchPending = false;
     liveMapSeen = false;
-    // 清掉导航残留的规划路径/局部轨迹
+    // 清掉导航残留的规划路径/局部轨迹/航点/预览
     pathPoints = [];
     localPlan = [];
+    waypoints = [];
+    previewPoints = [];
+    navWaypoints = [];
     renderDirty = true;
-    if (lastMode !== 'map') {
+    if (prevMode !== 'map' || robotMode === 'nav') {
+      try {
       viewMode = 'fixed';
       if ($('viewModeBtn')) $('viewModeBtn').textContent = '🧭';
       // 清掉导航模式的静态地图，等 SLAM 实时地图到达
@@ -1159,17 +1688,23 @@ function applyMode(mode) {
       liveMapSeen = false;
       resizeCanvas();
       render();
-      startProgress('正在切换到建图模式：停止导航栈 → 启动建图栈 → 等待 SLAM 地图…', 60000);
+      try { mapResetKnob(); } catch (e) { dbgErr = '摇杆归零失败:' + e; }
+      startProgress('正在切换到建图探索：停止导航栈 → 启动建图栈 → 等待 SLAM 地图…', 60000);
       if (wsReady) ws.send(JSON.stringify({type: 'nav', action: 'mapping_start'}));
-      $('navInfo').textContent = '正在切换到建图模式（约 40~60 秒，等待雷达地图）…';
+      autoArmForMapping();
+      $('navInfo').textContent = '正在切换到建图探索（约 40~60 秒，等待雷达地图）…';
+      } catch (e) {
+        dbgErr = '切换建图出错:' + (e && e.message ? e.message : e);
+        console.warn('切换建图出错', e);
+      }
     } else if (mapImg) {
       resizeCanvas();
       resetView();
     }
-  } else if (lastMode === 'map' && mode === 'nav') {
+  } else if ((prevMode === 'map' || robotMode === 'map') && mode === 'nav') {
     startProgress('正在切回导航模式：停止建图栈 → 启动导航栈 → 加载地图…', 120000);
     if (wsReady) ws.send(JSON.stringify({type: 'nav', action: 'mapping_stop'}));
-    startNavReadyWatch('等待导航栈就绪，正在重新定位');
+    startNavReadyWatch('等待导航栈就绪');
     $('navInfo').textContent =
       '正在重启导航栈切回导航模式（约 1~2 分钟，请稍候）…';
     mapImg = null;
@@ -1178,22 +1713,37 @@ function applyMode(mode) {
     poseDisp = null;
     poseTarget = null;
     clearTimeout(switchTimer);
+    // 必须立刻重绘：否则画布保留上一帧建图画面，看起来"切了导航还在显示建图地图"
+    try {
+      if (!canvas.width || canvas.width < 8) resizeCanvas();
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.fillStyle = '#0b0f14';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      const dpr2 = window.devicePixelRatio || 1;
+      ctx.fillStyle = '#8b949e';
+      ctx.font = `${14 * dpr2}px system-ui, sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.fillText('正在加载导航地图…', canvas.width / 2, canvas.height / 2);
+    } catch (e) { console.warn('清屏失败', e); }
     switchTimer = setTimeout(() => { loadMap(); }, 8000);
   }
-  lastMode = mode;
-  if (mode === 'nav' && lastMode !== 'map') {
-    if (mapImg) { resizeCanvas(); resetView(); }
+  if (mode === 'nav' && prevMode !== 'map' && prevMode !== 'nav') {
+    // 进导航必须重新从云端取正式地图；以前 mapImg 里如果残留建图/旧图，
+    // loadMap() 会直接 return，界面就一直显示那张旧图（2026-11-20 现场）
+    mapImg = null;
+    mapMeta = null;
+    liveMapSeen = false;
     loadMap();
     startProgress('正在连接导航栈：加载地图 → 等待定位就绪…', 60000);
     if (wsReady) ws.send(JSON.stringify({type: 'nav', action: 'relocalize'}));
     $('navInfo').textContent = '已请求重新定位，等待导航栈就绪…';
-    startNavReadyWatch('等待导航栈就绪，正在重新定位');
+    startNavReadyWatch('等待导航栈就绪');
   }
 }
 const headerEl = document.querySelector('header');
 const modeSelect = document.createElement('select');
 modeSelect.id = 'modeSelect';
-modeSelect.innerHTML = '<option value="manual">手动模式</option><option value="nav">导航模式</option><option value="map">建图模式</option>';
+modeSelect.innerHTML = '<option value="manual">手动模式</option><option value="nav">导航模式</option><option value="map">建图探索</option>';
 const hdrRefresh = document.createElement('button');
 hdrRefresh.id = 'refreshBtn';
 hdrRefresh.className = 'hdrBtn';
@@ -1201,10 +1751,50 @@ hdrRefresh.textContent = '刷新';
 headerEl.insertBefore(hdrRefresh, headerEl.querySelector('.grow').nextSibling || null);
 headerEl.insertBefore(modeSelect, headerEl.querySelector('.grow').nextSibling || null);
 headerEl.insertBefore(hdrRefresh, modeSelect);   // 刷新在“手动模式”左侧
+// 2026-11-20 用户要求：刷新的左边显示 WiFi 图标 + 当前网络延迟
+const netChip = document.createElement('span');
+netChip.id = 'netChip';
+netChip.className = 'netChip idle';
+netChip.title = '到服务器的往返延迟';
+netChip.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" ' +
+  'stroke="currentColor" stroke-width="2.2" stroke-linecap="round">' +
+  '<path d="M3 9a15 15 0 0 1 18 0"/><path d="M6.5 13a10 10 0 0 1 11 0"/>' +
+  '<path d="M10 17a4.5 4.5 0 0 1 4 0"/>' +
+  '<circle cx="12" cy="20.2" r="1.1" fill="currentColor" stroke="none"/></svg>' +
+  '<b id="netMs">--</b>';
+headerEl.insertBefore(netChip, hdrRefresh);
+
+let netPendingAt = 0;
+let netTimer = null;
+function setNetLatency(ms) {
+  const chip = $('netChip'), lbl = $('netMs');
+  if (!chip || !lbl) return;
+  if (ms === null || !isFinite(ms)) {
+    lbl.textContent = '--';
+    chip.classList.add('idle');
+    chip.style.color = '';
+    return;
+  }
+  chip.classList.remove('idle');
+  lbl.textContent = Math.round(ms) + 'ms';
+  // 用户要求：正常绿色（图标+文字一起），延迟大才变黄、再大变红
+  chip.style.color = ms <= 150 ? '#3fb950' : (ms <= 300 ? '#d29922' : '#ff7b72');
+}
+function startNetPing() {
+  clearInterval(netTimer);
+  const tick = () => {
+    if (!wsReady) { setNetLatency(null); return; }
+    netPendingAt = performance.now();
+    try { ws.send(JSON.stringify({type: 'ping', t: netPendingAt})); } catch (e) {}
+  };
+  tick();
+  netTimer = setInterval(tick, 4000);
+}
 let lastAppliedMode = 'manual';
+let userModeChangeAt = 0;   // 用户刚改过下拉框的时间（对账逻辑让路）
 modeSelect.onchange = async () => {
   const target = modeSelect.value;
-  // 设备离线时不允许进入导航/建图模式
+  // 设备离线时不允许进入导航/建图探索
   if ((target === 'nav' || target === 'map') &&
       (!wsReady || robotOnline === false)) {
     showToast('设备离线，请先开机', false);
@@ -1212,14 +1802,35 @@ modeSelect.onchange = async () => {
     $('shutdownView').classList.remove('hidden');
     return;
   }
-  const crossing = (lastAppliedMode === 'nav' && target === 'map') ||
-                   (lastAppliedMode === 'map' && target === 'nav');
+  // 模式切换确认（用户要求保留）。加 30 秒兜底：
+  // 万一弹窗点了没反应（曾导致 applyMode 永远不执行、界面卡在手动模式），
+  // 超时自动按"取消"处理并把下拉框恢复原值，不会把界面留在中间态。
+  userModeChangeAt = Date.now();
+  // 以"车端实际在跑哪个栈"为准：车端在建图栈/界面在建图，切导航必须确认；
+  // 反过来车端在导航栈、界面在导航，切建图也要确认。
+  const robotInMap = robotMode === 'map' || lastMode === 'map' ||
+                     lastAppliedMode === 'map';
+  const robotInNav = robotMode === 'nav' || lastMode === 'nav' ||
+                     lastAppliedMode === 'nav';
+  const crossing = (target === 'nav' && robotInMap) ||
+                   (target === 'map' && robotInNav);
   if (crossing) {
+    let answered = false;
+    const timer = setTimeout(() => {
+      if (answered) return;
+      answered = true;
+      if (askResolve) askClose(null);
+      modeSelect.value = lastAppliedMode;
+      showToast('切换超时，已取消', false);
+    }, 30000);
     const ok = await askOpen('切换模式',
       target === 'map'
-        ? '建图模式会停止导航栈并启动建图栈，约 1~2 分钟，确定切换吗？'
+        ? '建图探索会停止导航栈并启动建图栈，约 1~2 分钟，确定切换吗？'
         : '导航模式会停止建图栈并启动导航栈，约 1~2 分钟，确定切换吗？',
       undefined, '切换');
+    clearTimeout(timer);
+    if (answered) return;
+    answered = true;
     if (!ok) {
       modeSelect.value = lastAppliedMode;
       return;
@@ -1263,7 +1874,12 @@ function askOpen(title, msg, defVal, okText) {
       input.classList.remove('hidden');
       input.value = defVal;
       input.placeholder = defVal;
-      setTimeout(() => input.focus(), 50);
+      // 必须同步 focus（放在 setTimeout 里 iOS 会判定非用户手势 → 不弹键盘）
+      try { input.focus(); input.setSelectionRange(0, input.value.length); }
+      catch (err) { void err; }
+      if (document.activeElement !== input) {
+        setTimeout(() => { try { input.focus(); } catch (err) { void err; } }, 0);
+      }
     } else {
       input.classList.add('hidden');
       input.value = '';
@@ -1281,6 +1897,10 @@ $('askOk').onclick = () => {
   askClose(input.classList.contains('hidden') ? true : input.value.trim());
 };
 $('askCancel').onclick = () => askClose(null);
+$('askInput').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); $('askOk').click(); }
+});
+$('askInput').setAttribute('enterkeyhint', 'done');
 $('gearBtn').onclick = () => $('accountPanel').classList.remove('hidden');
 $('accountPanelClose').onclick = () => $('accountPanel').classList.add('hidden');
 $('switchProdBtn').onclick = () => {
@@ -1319,6 +1939,8 @@ $('devName').onclick = () => $('devPanel').classList.remove('hidden');
 $('devPanelClose').onclick = () => $('devPanel').classList.add('hidden');
 $('shutdownBack').onclick = () => {
   $('shutdownView').classList.add('hidden');
+  offlineOverlaySuppressed = true;   // 在产品页期间不要再自动弹离线页
+  robotOfflineSince = 0;
   showProductPage();
 };
 $('devPanel').addEventListener('click', (e) => {
@@ -1347,9 +1969,13 @@ function renderMapList(maps) {
   }
   box.innerHTML = '';
   maps.forEach((m) => {
+    const row = document.createElement('div');
+    row.className = 'mapRow';
     const b = document.createElement('button');
     b.className = 'mapItem';
-    b.innerHTML = `${m.name}<br><small>${m.path}</small>`;
+    const tag = (m.source === 'phone') ? '📱 手机保存' : '🤖 车端建图';
+    b.innerHTML = `${m.name} <span class="mapSrc">${tag}</span>`
+      + `<br><small>${m.path}</small>`;
     b.onclick = async () => {
       $('mapPicker').classList.add('hidden');
       const ok = await askOpen('切换地图', `切换到「${m.name}」？会重启导航栈，约 1~2 分钟。`, undefined, '切换');
@@ -1357,6 +1983,7 @@ function renderMapList(maps) {
       if (wsReady) {
         ws.send(JSON.stringify({type: 'nav', action: 'set_map', map: m.path}));
         pendingMapName = m.name;
+        mapSwitching = true;
         pathPoints = [];
         localPlan = [];
         previewPoints = [];
@@ -1367,19 +1994,589 @@ function renderMapList(maps) {
           `正在切换到地图 ${m.name}（约 1~2 分钟，完成后自动提示）…`;
         startProgress(`正在切换地图：${m.name}（重启导航栈）…`, 120000);
         mapLoadRetry = 0;
-        setTimeout(() => loadMap(m.name + '.yaml'), 20000);
+        // 2026-11-20：车端现在一受理切图就把新图发到云端，手机可以立刻拉，
+        // 不用再等 20 秒（用户反馈"等待云端地图更新太久"）。
+        setTimeout(() => loadMap(m.name + '.yaml'), 800);
         clearTimeout(mapSwitchTimer);
         mapSwitchTimer = setTimeout(() => {
           if (!pendingMapName) return;
           $('navInfo').textContent = `切换地图 ${pendingMapName} 超时，请刷新页面重试`;
           showToast('切换地图超时，请刷新重试', false);
           pendingMapName = '';
+          mapSwitching = false;
         }, 180000);
       }
     };
-    box.appendChild(b);
+    row.appendChild(b);
+    // 删除按钮：后端会拒绝删除"当前正在使用"的地图
+    const del = document.createElement('button');
+    del.className = 'mapDel';
+    del.textContent = '×';
+    del.title = '删除这张地图';
+    del.onclick = async (ev) => {
+      ev.stopPropagation();
+      const ok = await askOpen('删除地图',
+        `确定删除「${m.name}」吗？\n会同时删掉 .yaml 和 .pgm，无法恢复。`,
+        undefined, '删除');
+      if (!ok) return;
+      if (!wsReady) { showToast('未连接', false); return; }
+      ws.send(JSON.stringify({type: 'nav', action: 'delete_map', map: m.path}));
+      $('navInfo').textContent = `正在删除地图 ${m.name}…`;
+    };
+    row.appendChild(del);
+    box.appendChild(row);
   });
 }
+// ---------------- 地图编辑器 ----------------
+// 保存地图按钮改成"编辑地图"：打开后可在手机上擦除噪点/补画墙，再保存成导航地图。
+// 数据流：手机改栅格 → WS {type:'map_edit'} → 云端转发 → 车端写 maps/*.pgm+.yaml。
+let edit = null;          // {w,h,buf,off,undo,tool,brush,view,pointers}
+let editHistPushed = false;   // 编辑器打开时压入的历史哨兵
+let edPointer = null;
+
+function openMapEditor() {
+  if (!mapImg || !mapMeta) {
+    showToast('还没有可编辑的地图，请先建图', false);
+    return;
+  }
+  const w = mapMeta.width | 0, h = mapMeta.height | 0;
+  if (!w || !h || w !== mapImg.width || h !== mapImg.height) {
+    showToast('地图数据异常，请稍后重试', false);
+    return;
+  }
+  const src = mapImg.getContext('2d').getImageData(0, 0, w, h).data;
+  const buf = new Uint8Array(w * h);
+  for (let i = 0; i < w * h; i++) {
+    const v = src[i * 4];
+    buf[i] = v <= 10 ? 0 : (v >= 250 ? 254 : 205);   // 0 占用 / 205 未知 / 254 空闲
+  }
+  const off = document.createElement('canvas');
+  off.width = w; off.height = h;
+  // 2026-11-20 用户要求：画笔默认 1 格 = 0.05 m（就是一格地图的边长）
+  edit = { w, h, buf, off, undo: [], redo: [], tool: 'erase', brush: 1,
+           lineMode: false, pendingA: null, downAt: null, stroke: null,
+           startTimer: null,
+           view: { scale: 1, ox: 0, oy: 0, rot: 0 }, pointers: new Map() };
+  paintOff();
+  $('mapEditor').classList.remove('hidden');
+  // iOS/夸克的"屏幕左缘右滑 = 返回"是系统手势，JS 拦不住触摸本身；
+  // 但可以先压一条历史记录，让手势只弹出这条壳、页面不会被带走。
+  try {
+    history.pushState({ fwrEditor: 1 }, '');
+    editHistPushed = true;
+  } catch (err) { void err; }
+  $('edTitle').textContent = `编辑地图 · ${w}×${h} @ ${mapMeta.resolution.toFixed(2)}m`;
+  $('edErase').classList.add('on');
+  $('edWall').classList.remove('on');
+  $('edLineBtn').classList.remove('on');
+  $('edWidth').value = String(edit.brush);
+  const wp = $('edWidthPanel');
+  if (wp) wp.classList.add('hidden');
+  $('edWidthBtn').classList.remove('on');
+  updateWidthLabel();
+  $('edHint').textContent = '白=可通行 · 灰=未探索 · 黑=障碍　|　单指涂抹 · 双指缩放/平移';
+  requestAnimationFrame(() => { fitEditView(); drawEditor(); });
+}
+
+function closeMapEditor() {
+  const wp0 = $('edWidthPanel');
+  if (wp0) wp0.classList.add('hidden');
+  const wb0 = $('edWidthBtn');
+  if (wb0) wb0.classList.remove('on');
+  editHistPushed = false;
+  if (edit) clearTimeout(edit.startTimer);
+  $('mapEditor').classList.add('hidden');
+  edit = null;
+  edPointer = null;
+}
+
+function paintOff() {
+  const octx = edit.off.getContext('2d');
+  const img = octx.createImageData(edit.w, edit.h);
+  for (let i = 0; i < edit.w * edit.h; i++) {
+    const c = edit.buf[i] === 0 ? 0 : (edit.buf[i] >= 250 ? 255 : 160);
+    img.data[i * 4] = c; img.data[i * 4 + 1] = c; img.data[i * 4 + 2] = c;
+    img.data[i * 4 + 3] = 255;
+  }
+  octx.putImageData(img, 0, 0);
+  edit.img = img;
+  edit.dirty = null;
+}
+
+// 只改像素 + 记脏矩形，最后一次性 putImageData，避免每笔重建整张图
+function editSetCell(i, val) {
+  if (edit.buf[i] === val) return;
+  edit.buf[i] = val;
+  // 2026-11-20 bug：这里原来只分"黑/非黑"，254(可通行)也被画成 160(灰)，
+  // 于是"清除"擦掉墙后当场显示灰色，要重开编辑器/撤销才变白。
+  // 必须和 paintOff() 用同一套映射：0→黑, >=250→白, 其余→灰。
+  const c = val === 0 ? 0 : (val >= 250 ? 255 : 160);
+  const d = edit.img.data;
+  d[i * 4] = c; d[i * 4 + 1] = c; d[i * 4 + 2] = c; d[i * 4 + 3] = 255;
+  const x = i % edit.w, y = (i / edit.w) | 0;
+  const g = edit.dirty;
+  if (!g) edit.dirty = { x0: x, y0: y, x1: x, y1: y };
+  else {
+    if (x < g.x0) g.x0 = x;
+    if (y < g.y0) g.y0 = y;
+    if (x > g.x1) g.x1 = x;
+    if (y > g.y1) g.y1 = y;
+  }
+}
+
+function flushEdit() {
+  if (!edit || !edit.dirty) return;
+  const g = edit.dirty;
+  edit.off.getContext('2d').putImageData(
+    edit.img, 0, 0, g.x0, g.y0, g.x1 - g.x0 + 1, g.y1 - g.y0 + 1);
+  edit.dirty = null;
+}
+
+// ---- 视图变换：screen = R(rot) * (cell*scale) + (ox, oy) ----
+function editRot() { return edit.view.rot || 0; }
+
+// 旋转后内容在"未偏移"屏幕坐标里的包围盒（含 minx/miny）
+function editBBox() {
+  const sc = edit.view.scale, r = editRot();
+  const w = edit.w * sc, h = edit.h * sc;
+  const cos = Math.cos(r), sin = Math.sin(r);
+  const xs = [], ys = [];
+  for (const [x, y] of [[0, 0], [w, 0], [0, h], [w, h]]) {
+    xs.push(x * cos - y * sin); ys.push(x * sin + y * cos);
+  }
+  const minx = Math.min(...xs), miny = Math.min(...ys);
+  return { minx, miny, bw: Math.max(...xs) - minx, bh: Math.max(...ys) - miny };
+}
+
+function cellToScreen(cx, cy) {
+  const sc = edit.view.scale, r = editRot();
+  const x = cx * sc, y = cy * sc;
+  return { x: edit.view.ox + x * Math.cos(r) - y * Math.sin(r),
+           y: edit.view.oy + x * Math.sin(r) + y * Math.cos(r) };
+}
+
+function screenToCell(px, py) {
+  const sc = edit.view.scale, r = -editRot();
+  const dx = px - edit.view.ox, dy = py - edit.view.oy;
+  return { x: (dx * Math.cos(r) - dy * Math.sin(r)) / sc,
+           y: (dx * Math.sin(r) + dy * Math.cos(r)) / sc };
+}
+
+function fitEditView() {
+  const cv = $('edCanvas');
+  const cw = cv.clientWidth || 360, ch = cv.clientHeight || 480;
+  const dpr = window.devicePixelRatio || 1;
+  cv.width = Math.round(cw * dpr); cv.height = Math.round(ch * dpr);
+  if (!edit.view.rot) edit.view.rot = 0;
+  const b = editBBoxAfterScale(Math.min(cv.width / edit.w, cv.height / edit.h) * 0.95);
+  edit.view.scale = b.scale;
+  edit.view.ox = (cv.width - b.bw) / 2 - b.minx;
+  edit.view.oy = (cv.height - b.bh) / 2 - b.miny;
+}
+
+function editBBoxAfterScale(scale) {
+  const save = edit.view.scale;
+  edit.view.scale = scale;
+  const b = editBBox();
+  b.scale = scale;
+  edit.view.scale = save;
+  return b;
+}
+
+// 以画布中心为锚点缩放
+function zoomEditBy(k) {
+  if (!edit) return;
+  const cv = $('edCanvas');
+  const cx = cv.width / 2, cy = cv.height / 2;
+  const p = screenToCell(cx, cy);
+  const ns = Math.max(0.25, Math.min(80, edit.view.scale * k));
+  edit.view.scale = ns;
+  const q = cellToScreen(p.x, p.y);
+  edit.view.ox += cx - q.x;
+  edit.view.oy += cy - q.y;
+  clampEditView();
+  drawEditor();
+}
+
+// 每次转 90°，转完重新居中，避免转到屏幕外
+function rotateEditView() {
+  if (!edit) return;
+  edit.view.rot = (editRot() + Math.PI / 2) % (Math.PI * 2);
+  refitKeepingScale();
+  drawEditor();
+}
+
+// 保持当前缩放，只重新居中
+function refitKeepingScale() {
+  const cv = $('edCanvas');
+  const b = editBBox();
+  edit.view.ox = (cv.width - b.bw) / 2 - b.minx;
+  edit.view.oy = (cv.height - b.bh) / 2 - b.miny;
+}
+
+function drawEditor() {
+  if (!edit) return;
+  const cv = $('edCanvas'), g = cv.getContext('2d');
+  g.setTransform(1, 0, 0, 1, 0, 0);
+  g.fillStyle = '#0b0f14';
+  g.fillRect(0, 0, cv.width, cv.height);
+  g.imageSmoothingEnabled = false;
+  g.save();
+  g.translate(edit.view.ox, edit.view.oy);
+  g.rotate(editRot());
+  g.drawImage(edit.off, 0, 0, edit.w * edit.view.scale, edit.h * edit.view.scale);
+  g.restore();
+  if (edit.pendingA) {
+    const dpr = window.devicePixelRatio || 1;
+    const sc = edit.view.scale;
+    const pos = cellToScreen(edit.pendingA.x, edit.pendingA.y);
+    const px = pos.x;
+    const py = pos.y;
+    const r = Math.max(7 * dpr, sc * 3);
+    g.strokeStyle = '#58a6ff';
+    g.lineWidth = Math.max(2, 2 * dpr);
+    g.beginPath(); g.arc(px, py, r, 0, Math.PI * 2); g.stroke();
+    g.beginPath();
+    g.moveTo(px - r * 1.6, py); g.lineTo(px + r * 1.6, py);
+    g.moveTo(px, py - r * 1.6); g.lineTo(px, py + r * 1.6);
+    g.stroke();
+  }
+}
+
+function editCellFromEvent(e) {
+  const cv = $('edCanvas'), r = cv.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  const px = (e.clientX - r.left) * dpr, py = (e.clientY - r.top) * dpr;
+  const c = screenToCell(px, py);
+  return { x: c.x, y: c.y, px, py };
+}
+
+// 真正开始一笔涂抹（之前只是"按下"，还没有画）
+function startStrokeAt(clientX, clientY) {
+  if (!edit) return;
+  const cv = $('edCanvas'), r = cv.getBoundingClientRect();
+  // 屏幕左边缘 24px 留给系统返回手势，不在这里落笔（否则右滑会带出一道）
+  if (clientX - r.left < 24) {
+    edit.downAt = null;
+    return;
+  }
+  const dpr = window.devicePixelRatio || 1;
+  const px = (clientX - r.left) * dpr, py = (clientY - r.top) * dpr;
+  const c = screenToCell(px, py);
+  clearTimeout(edit.startTimer);
+  edit.downAt = null;
+  pushUndo();
+  edit.stroke = { cells: 1, t0: Date.now() };
+  paintAt(c.x, c.y);
+  edit.lastCell = { x: c.x, y: c.y };
+  flushEdit();
+  drawEditor();
+}
+
+// 双指手势开始时，若笔刚刚落下（<400 ms）就回退，避免缩放时留下一个点
+function revertEarlyStroke() {
+  if (!edit || !edit.stroke) return;
+  const young = Date.now() - edit.stroke.t0 < 400;
+  if (young && edit.undo.length) {
+    edit.buf = edit.undo.pop();
+    paintOff();
+    drawEditor();
+    $('edHint').textContent = '已取消缩放时误画的一笔';
+  }
+  edit.stroke = null;
+}
+
+function updateWidthLabel() {
+  if (!edit) return;
+  const m = (edit.brush * (mapMeta ? mapMeta.resolution : 0.05)).toFixed(2);
+  const txt = `${edit.brush} 格 ${m}m`;
+  const a = $('edWidthVal');
+  if (a) a.textContent = txt;
+}
+
+// 直线工具：点第一个点 → 点第二个点 → 按当前工具（绘画/清除）连成一条线
+function handleLineTap(e) {
+  const p = editCellFromEvent(e);
+  if (!edit.pendingA) {
+    edit.pendingA = { x: p.x, y: p.y };
+    $('edHint').textContent = '已选第一点，再点第二点 → 自动生成'
+      + (edit.tool === 'wall' ? '墙线' : '擦除线');
+    drawEditor();
+    return;
+  }
+  const a = edit.pendingA;
+  edit.pendingA = null;
+  drawLineSegment(a, p);
+  $('edHint').textContent = '直线已生成 · 单指涂抹继续修改 · 双指缩放/平移';
+  flushEdit();
+  drawEditor();
+}
+
+function drawLineSegment(a, b) {
+  const dist = Math.hypot(b.x - a.x, b.y - a.y);
+  const steps = Math.max(1, Math.ceil(dist / 0.5));
+  pushUndo();
+  for (let i = 0; i <= steps; i++) {
+    paintAt(a.x + (b.x - a.x) * i / steps, a.y + (b.y - a.y) * i / steps);
+  }
+}
+
+// 两帧之间插值，避免快速划动时留下断点
+function paintLineTo(a, b) {
+  const dx = b.x - a.x, dy = b.y - a.y;
+  const steps = Math.max(1, Math.ceil(Math.hypot(dx, dy) / 0.7));
+  for (let i = 1; i <= steps; i++) {
+    paintAt(a.x + dx * i / steps, a.y + dy * i / steps);
+  }
+}
+
+// 平移不能把地图整个拖出屏幕，缩放后也要保持至少一角可见
+function clampEditView() {
+  const cv = $('edCanvas');
+  if (!edit || !cv.width || !cv.height) return;
+  const b = editBBox();
+  const M = 48;
+  let left = edit.view.ox + b.minx;
+  let top = edit.view.oy + b.miny;
+  if (b.bw <= M * 2) left = (cv.width - b.bw) / 2;
+  else left = Math.max(M - b.bw, Math.min(cv.width - M, left));
+  if (b.bh <= M * 2) top = (cv.height - b.bh) / 2;
+  else top = Math.max(M - b.bh, Math.min(cv.height - M, top));
+  edit.view.ox = left - b.minx;
+  edit.view.oy = top - b.miny;
+}
+
+function paintAt(cx, cy) {
+  const { w, h, brush } = edit;
+  // 2026-11-20 用户反馈：橡皮擦会把白色改成灰色（灰=未探索，保存后那块就走不了）。
+  // 清除的含义应该是"把这里还原成可通行空地"，所以改成写 254(白)：
+  // 白→白（不变）、黑→白（擦掉墙）、灰→白（主动开放未探索区）。
+  const val = edit.tool === 'wall' ? 0 : 254;   // 清除→可通行，绘画→占用
+  const r = brush, r2 = r * r;
+  const x0 = Math.max(0, Math.floor(cx - r)), x1 = Math.min(w - 1, Math.ceil(cx + r));
+  const y0 = Math.max(0, Math.floor(cy - r)), y1 = Math.min(h - 1, Math.ceil(cy + r));
+  for (let y = y0; y <= y1; y++) {
+    for (let x = x0; x <= x1; x++) {
+      const dx = x - cx, dy = y - cy;
+      if (dx * dx + dy * dy > r2) continue;
+      editSetCell(y * w + x, val);
+    }
+  }
+}
+
+function pushUndo() {
+  edit.undo.push(edit.buf.slice());
+  if (edit.undo.length > 8) edit.undo.shift();
+  // 画了新的一笔，"下一步"就没意义了 → 清空 redo 分支
+  if (edit.redo) edit.redo.length = 0;
+}
+
+// 浏览器返回被触发（左缘右滑/后退键）：编辑器还开着就把状态补回来
+window.addEventListener('popstate', () => {
+  if (!edit || $('mapEditor').classList.contains('hidden')) return;
+  try { history.pushState({ fwrEditor: 1 }, ''); editHistPushed = true; } catch (err) { void err; }
+  const hint = $('edHint');
+  if (hint) hint.textContent = '已拦截浏览器的左缘返回手势（从屏幕中间开始滑动即可）';
+  drawEditor();
+});
+
+function bindMapEditor() {
+  const cv = $('edCanvas');
+  if (!cv || !$('mapEditor')) return;
+  $('edClose').onclick = closeMapEditor;
+  $('edErase').onclick = () => {
+    if (edit) edit.pendingA = null;
+    edit.tool = 'erase';
+    $('edErase').classList.add('on'); $('edWall').classList.remove('on');
+  };
+  $('edWall').onclick = () => {
+    if (edit) edit.pendingA = null;
+    edit.tool = 'wall';
+    $('edWall').classList.add('on'); $('edErase').classList.remove('on');
+  };
+  $('edUndo').onclick = () => {
+    if (!edit || !edit.undo.length) return;
+    edit.redo = edit.redo || [];
+    edit.redo.push(edit.buf.slice());
+    if (edit.redo.length > 8) edit.redo.shift();
+    edit.buf = edit.undo.pop();
+    paintOff(); drawEditor();
+  };
+  $('edRedo').onclick = () => {
+    if (!edit || !edit.redo || !edit.redo.length) return;
+    edit.undo.push(edit.buf.slice());
+    if (edit.undo.length > 8) edit.undo.shift();
+    edit.buf = edit.redo.pop();
+    paintOff(); drawEditor();
+  };
+  $('edSave').onclick = saveEditedMap;
+  $('edWidthBtn').onclick = () => {
+    const wp = $('edWidthPanel');
+    if (!wp) return;
+    const show = wp.classList.contains('hidden');
+    wp.classList.toggle('hidden', !show);
+    $('edWidthBtn').classList.toggle('on', show);
+  };
+  $('edZoomOut').onclick = () => zoomEditBy(1 / 1.4);
+  $('edZoomIn').onclick = () => zoomEditBy(1.4);
+  $('edRotate').onclick = rotateEditView;
+  $('edWidth').addEventListener('input', () => {
+    if (!edit) return;
+    edit.brush = parseInt($('edWidth').value, 10) || 1;
+    updateWidthLabel();
+  });
+  $('edLineBtn').onclick = () => {
+    if (!edit) return;
+    edit.lineMode = !edit.lineMode;
+    edit.pendingA = null;
+    $('edLineBtn').classList.toggle('on', edit.lineMode);
+    $('edHint').textContent = edit.lineMode
+      ? '直线模式：点两个点生成直线（用当前 绘画/清除 颜色）'
+      : '单指涂抹修改 · 双指缩放/平移';
+    drawEditor();
+  };
+
+  cv.addEventListener('pointerdown', (e) => {
+    if (!edit) return;
+    e.preventDefault();
+    try { cv.setPointerCapture(e.pointerId); } catch (err) { void err; }
+    edit.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (edit.pointers.size === 1) {
+      edPointer = e.pointerId;
+      edit.lastCell = null;
+      if (edit.lineMode) {
+        handleLineTap(e);
+      } else {
+        // 延迟 110 ms 再落笔：如果这期间第二根手指按下，就认定是缩放，
+        // 一次都不画（原来是按下立即画，缩放时必定留下一个点）
+        edit.downAt = { x: e.clientX, y: e.clientY, t: Date.now() };
+        clearTimeout(edit.startTimer);
+        edit.startTimer = setTimeout(() => {
+          if (!edit || edit.pointers.size !== 1 || !edit.downAt) return;
+          startStrokeAt(edit.downAt.x, edit.downAt.y);
+        }, 110);
+      }
+    } else if (edit.pointers.size === 2) {
+      clearTimeout(edit.startTimer);
+      edit.downAt = null;
+      revertEarlyStroke();
+      edit.pendingA = null;
+      edPointer = null;                 // 双指手势期间不画
+      edit.lastCell = null;
+      const pts = [...edit.pointers.values()];
+      const dpr = window.devicePixelRatio || 1;
+      edit.pinch = {
+        dist: Math.max(4, Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y)),
+        mid: { x: (pts[0].x + pts[1].x) / 2 * dpr,
+               y: (pts[0].y + pts[1].y) / 2 * dpr },
+        scale: edit.view.scale, ox: edit.view.ox, oy: edit.view.oy,
+      };
+    }
+  }, { passive: false });
+
+  cv.addEventListener('pointermove', (e) => {
+    if (!edit || !edit.pointers.has(e.pointerId)) return;
+    e.preventDefault();
+    edit.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+    // 双指：以手势**起点**为基准做绝对换算（不是逐帧累加，避免漂移）
+    if (edit.pointers.size >= 2 && edit.pinch) {
+      const pts = [...edit.pointers.values()].slice(0, 2);
+      const dpr = window.devicePixelRatio || 1;
+      const dist = Math.max(4, Math.hypot(pts[0].x - pts[1].x,
+                                          pts[0].y - pts[1].y));
+      const mid = { x: (pts[0].x + pts[1].x) / 2 * dpr,
+                    y: (pts[0].y + pts[1].y) / 2 * dpr };
+      const g = edit.pinch;
+      const rawScale = g.scale * (dist / g.dist);
+      const ns = Math.max(0.25, Math.min(80, rawScale));
+      // 手势起点中点下的地图内容点（含旋转反算），必须跟手到当前中点
+      edit.view.scale = g.scale;
+      edit.view.ox = g.ox; edit.view.oy = g.oy;
+      const anchor = screenToCell(g.mid.x, g.mid.y);
+      edit.view.scale = ns;
+      const after = cellToScreen(anchor.x, anchor.y);
+      edit.view.ox += mid.x - after.x;
+      edit.view.oy += mid.y - after.y;
+      clampEditView();
+      drawEditor();
+      return;
+    }
+
+    if (e.pointerId !== edPointer) return;
+    if (edit.lineMode) return;
+    // 还没落笔（等待判定单指/双指）：移动超过 12 px 说明确实是在画，立即开始
+    if (!edit.stroke && edit.downAt) {
+      const dx = e.clientX - edit.downAt.x, dy = e.clientY - edit.downAt.y;
+      if (Math.hypot(dx, dy) < 12) return;
+      startStrokeAt(edit.downAt.x, edit.downAt.y);
+    }
+    if (!edit.stroke) return;
+    const p = editCellFromEvent(e);
+    if (edit.lastCell) paintLineTo(edit.lastCell, p);
+    else paintAt(p.x, p.y);
+    edit.lastCell = p;
+    flushEdit();
+    drawEditor();
+  }, { passive: false });
+
+  const end = (e) => {
+    if (!edit) return;
+    edit.pointers.delete(e.pointerId);
+    if (edit.pointers.size < 2) edit.pinch = null;
+    if (e.pointerId === edPointer) {
+      clearTimeout(edit.startTimer);
+      // 快速轻点（没等到 110 ms 也没移动）：按一次"点一下涂抹"处理
+      if (!edit.lineMode && !edit.stroke && edit.downAt) {
+        startStrokeAt(edit.downAt.x, edit.downAt.y);
+      }
+      edPointer = null; edit.lastCell = null;
+      edit.downAt = null; edit.stroke = null;
+    }
+    if (edit.pointers.size === 0) { edPointer = null; edit.lastCell = null; }
+  };
+  cv.addEventListener('pointerup', end);
+  cv.addEventListener('pointercancel', end);
+  window.addEventListener('resize', () => {
+    if (edit) { fitEditView(); drawEditor(); }
+  });
+}
+
+async function saveEditedMap() {
+  if (!edit) return;
+  if (!wsReady) { showToast('未连接，无法保存', false); return; }
+  const { w, h, buf } = edit;
+  // 先起名字（同时弹出键盘），取消就留在编辑器里继续改
+  const def = 'map_' + new Date().toISOString().slice(0, 16)
+    .replace(/[-:T]/g, '').slice(4);
+  const inputName = await askOpen('保存地图', '给这张地图起个名字（英文/数字/下划线）',
+                                  def, '保存');
+  if (!inputName) { $('edHint').textContent = '已取消保存'; return; }
+  const name = String(inputName).replace(/[^\w\-]/g, '').slice(0, 40) ||
+               def;
+  let bytes = buf, gz = false;
+  try {
+    if (typeof CompressionStream !== 'undefined') {
+      const cs = new Blob([buf]).stream().pipeThrough(new CompressionStream('gzip'));
+      bytes = new Uint8Array(await new Response(cs).arrayBuffer());
+      gz = true;
+    }
+  } catch (e) { console.warn('gzip 失败，改用未压缩', e); bytes = buf; gz = false; }
+  let bin = '';
+  const CH = 0x8000;
+  for (let i = 0; i < bytes.length; i += CH) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CH));
+  }
+  ws.send(JSON.stringify({
+    type: 'map_edit', name, width: w, height: h,
+    resolution: mapMeta.resolution,
+    origin: { x: mapMeta.origin[0], y: mapMeta.origin[1], yaw: mapMeta.origin[2] || 0 },
+    pgm: btoa(bin), gz,
+  }));
+  $('edHint').textContent = `正在保存 ${name}.pgm（${w}×${h}，${(bytes.length / 1024).toFixed(1)} KB）…`;
+  startProgress('正在保存编辑后的地图…', 30000);
+}
+
 function bindMapButtons() {
   const arm = $('mapArmBtn'), save = $('mapSaveBtn');
   const restart = $('mapRestartBtn'), stop = $('mapStopBtn');
@@ -1388,15 +2585,10 @@ function bindMapButtons() {
     $('navInfo').textContent = '已请求授权…';
     if (wsReady) ws.send(JSON.stringify({type: 'nav', action: 'manual'}));
   };
-  save.onclick = async () => {
-    $('navInfo').textContent = '已点击保存地图';
-    const def = 'map_' + new Date().toISOString().slice(0, 16)
-      .replace(/[-:T]/g, '').slice(4);
-    const name = await askOpen('保存地图', '输入地图名字（英文/数字/下划线）', def, '保存');
-    if (!name) { $('navInfo').textContent = '已取消保存'; return; }
-    if (!wsReady) { $('navInfo').textContent = '未连接，无法保存'; return; }
-    ws.send(JSON.stringify({type: 'nav', action: 'mapping_save', name}));
-    $('navInfo').textContent = '正在保存地图：' + name + '…';
+  save.onclick = () => {
+    // 现在这个按钮是"编辑地图"：先打开编辑器，保存动作在编辑器里
+    if (!wsReady) { $('navInfo').textContent = '未连接，无法编辑地图'; return; }
+    openMapEditor();
   };
   restart.onclick = async () => {
     const ok = await askOpen('重新建图', '会清空当前地图，确定吗？', undefined, '确定');
@@ -1404,7 +2596,9 @@ function bindMapButtons() {
     if (!wsReady) { $('navInfo').textContent = '未连接，无法重新建图'; return; }
     ws.send(JSON.stringify({type: 'nav', action: 'mapping_restart'}));
     $('navInfo').textContent = '正在重新建图…';
-    liveMapSeen = false;
+    // 本地先清空画布：车端重启 SLAM 需要十几秒，不给反馈会以为没生效
+    mapImg = null; mapMeta = null; liveMapSeen = false; renderDirty = true;
+    render();
     startProgress('正在重新建图：重启建图栈…', 40000);
     clearTimeout(restartGuard);
     restartGuard = setTimeout(() => {
@@ -1429,6 +2623,7 @@ function bindMapButtons() {
   });
 }
 bindMapButtons();
+bindMapEditor();
 
 /* ---------------- 导航地图 ---------------- */
 const canvas = $('mapCanvas');
@@ -1468,8 +2663,41 @@ function resetView() {
   render();
 }
 
+// http 页面（非安全上下文）没有 DecompressionStream，
+// 由车端改发未压缩图；这里告诉车端要走哪种格式。
+// 一律向车端要"未压缩"的实时地图：
+// 夸克/微信等手机浏览器的内核对 DecompressionStream 支持不一致，
+// 而建图探索每帧只有 20~40 KB，直接发字节最稳（不再赌浏览器能力）。
+let lmapPlain = null;
+let lmapSent = null;      // 已经通知过车端的格式，避免重复发送
+function syncLiveMapFormat() {
+  // 优先用 gzip：保留 0.05 m 全分辨率，墙面不会被"变粗"。
+  // 实测夸克浏览器支持 DecompressionStream；只有确实不支持时才退回未压缩，
+  // 那时车端会对大图做 2 倍下采样（分辨率变 0.1 m，墙会变粗）。
+  const needPlain = (typeof DecompressionStream === 'undefined');
+  if (needPlain === lmapPlain) {
+    // 只在第一次/变化时发一次，避免每次连上都把车端编码开关来回翻
+    if (lmapSent !== needPlain && wsReady) {
+      lmapSent = needPlain;
+      ws.send(JSON.stringify({ type: 'lmap_plain', plain: needPlain }));
+    }
+    return;
+  }
+  lmapPlain = needPlain;
+  lmapSent = null;
+  if (wsReady) {
+    try { ws.send(JSON.stringify({ type: 'lmap_plain', plain: needPlain })); }
+    catch (e) { console.warn('发送 lmap_plain 失败', e); }
+  }
+  console.log('实时地图格式：', needPlain ? '未压缩' : 'gzip');
+}
+
+function b64ToBytes(b64) {
+  return Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+}
+
 async function gunzipB64(b64) {
-  const raw = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+  const raw = b64ToBytes(b64);
   if (typeof DecompressionStream === 'undefined') {
     throw new Error('浏览器不支持 DecompressionStream');
   }
@@ -1480,12 +2708,25 @@ async function gunzipB64(b64) {
 let liveMapSeen = false;
 let viewMode = 'fixed';   // fixed=地图固定朝向, heading=车头始终朝上
 async function applyLiveMap(m) {
-  if (!m || !m.pgm) return;
-  if (lastMode !== 'map') return;   // 只有建图模式才显示实时地图
+  if (!m) return;
+  if (lidarWait) return;    // 双雷达还没就绪，先不显示地图
+  // 车端重新建图 / 切进建图栈：主动丢弃旧图，否则看起来"没生效"
+  if (m.reset || (!m.pgm && (m.width | 0) <= 0)) {
+    mapImg = null; mapMeta = null; liveMapSeen = false; renderDirty = true;
+    render();
+    if (lastMode === 'map') $('navInfo').textContent = '地图已清空，正在等待新的 SLAM 地图…';
+    return;
+  }
+  if (!m.pgm) return;
+  if (lastMode !== 'map') return;   // 只有建图探索才显示实时地图
   try {
     const w = m.width | 0, h = m.height | 0;
-    if (w <= 0 || h <= 0) return;        // SLAM 空地图，忽略
-    const bytes = await gunzipB64(m.pgm);
+    if (w <= 0 || h <= 0) {          // SLAM 空地图：清屏
+      mapImg = null; mapMeta = null; liveMapSeen = false; renderDirty = true;
+      render();
+      return;
+    }
+    const bytes = m.plain ? b64ToBytes(m.pgm) : await gunzipB64(m.pgm);
     if (bytes.length < w * h) return;
     const off = document.createElement('canvas');
     off.width = w; off.height = h;
@@ -1500,21 +2741,24 @@ async function applyLiveMap(m) {
     octx.putImageData(img, 0, 0);
     mapImg = off;
     mapMeta = {resolution: m.resolution, origin: m.origin, width: w, height: h};
+    // 画布可能是在 navView 隐藏时测量的（1x1），那样画了也看不见 → 重新量尺寸
+    if (!canvas.width || canvas.width < 8 || !canvas.height) resizeCanvas();
     const first = !liveMapSeen;
     liveMapSeen = true;
-    if (progressActive) finishProgress('建图模式已就绪');
+    if (progressActive) finishProgress('建图探索已就绪');
     if (first) {
-      finishProgress('建图模式已就绪');
+      finishProgress('建图探索已就绪');
       resizeCanvas();
       resetView();
       if ($('navInfo')) {
-        $('navInfo').textContent = '建图模式：SLAM 地图已连接，点「授权」后拖动底部摇杆';
+        $('navInfo').textContent = '建图探索：SLAM 地图已连接，点「授权」后拖动底部摇杆';
       }
     }
     renderDirty = true;
     render();
   } catch (e) {
     console.warn('live_map 解析失败', e);
+    dbgErr = '地图解析失败:' + (e && e.message ? e.message : e);
   }
 }
 
@@ -1527,9 +2771,10 @@ async function loadMap(expectYaml) {
     if (expectYaml && data.yaml && data.yaml !== expectYaml) {
       // 云端还是旧地图，等车端重新上传
       mapLoadRetry += 1;
-      if (mapLoadRetry <= 12) {
-        $('navInfo').textContent = '等待云端地图更新…';
-        setTimeout(() => loadMap(expectYaml), 2500);
+      if (mapLoadRetry <= 20) {
+        $('navInfo').textContent =
+          `等待云端地图更新…（第 ${mapLoadRetry} 次，共 20 次）`;
+        setTimeout(() => loadMap(expectYaml), 1500);
         return;
       }
       mapLoadRetry = 0;
@@ -1568,15 +2813,22 @@ async function loadMap(expectYaml) {
       img.data[i * 4] = c; img.data[i * 4 + 1] = c; img.data[i * 4 + 2] = c;
       img.data[i * 4 + 3] = 255;
     }
-    if (lastMode === 'map') return;   // 已切到建图模式，丢弃这张导航地图
+    if (lastMode === 'map') return;   // 已切到建图探索，丢弃这张导航地图
     octx.putImageData(img, 0, 0);
     mapImg = off;
     view.scale = Math.min(canvas.width / w, canvas.height / h) * 0.9;
     view.rot = 0; view.ox = 0; view.oy = 0;
     resizeCanvas();
     resetView();
-    $('navInfo').textContent =
-      `地图已加载（${w}×${h}），等待导航栈就绪…`;
+    // 2026-11-20：切图/定位进行中不要抢提示（否则"切换中 → 已加载 → 定位中"
+    // 会被这句覆盖，用户以为卡住）。没有进度时才单独报尺寸。
+    if (progressActive && expectYaml) {
+      // 换图过程中：新图已经在手机上了，明确告诉用户"图好了，只差栈"
+      setProgressLabel(
+        `新地图已加载：${expectYaml.replace(/\.yaml$/, '')}（等待导航栈重启完成）…`);
+    } else if (!progressActive) {
+      $('navInfo').textContent = `地图已加载（${w}×${h}）`;
+    }
     resizeCanvas();
   } catch (e) {
     $('navInfo').textContent = '地图加载失败：' + e.message;
@@ -1612,7 +2864,19 @@ function render() {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.fillStyle = '#0b0f14';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
-  if (!mapImg) return;
+  if (!mapImg) {
+    // 建图栈还在初始化时画个提示，别让用户面对纯黑屏以为死机
+    if (lastMode === 'map') {
+      const dpr2 = window.devicePixelRatio || 1;
+      ctx.fillStyle = '#8b949e';
+      ctx.font = (15 * dpr2) + 'px system-ui, -apple-system, sans-serif';
+      ctx.textAlign = 'center';
+      const msg = lidarWait ? '等待双雷达就绪…' : 'SLAM 正在建图，稍候…';
+      ctx.fillText(msg, canvas.width / 2, canvas.height / 2);
+      ctx.textAlign = 'start';
+    }
+    return;
+  }
   const c = imgToScreen(mapImg.width / 2, mapImg.height / 2);
   ctx.save();
   ctx.translate(c.x, c.y);
@@ -1624,7 +2888,7 @@ function render() {
   const dpr = window.devicePixelRatio || 1;
   // 激光点（地图坐标，单位 cm）
   if (scanPoints.length && mapImg) {
-    ctx.fillStyle = '#f0c000';
+    ctx.fillStyle = '#a855f7';
     for (const pt of scanPoints) {
       const ip = worldToImg(pt[0] / 100, pt[1] / 100);
       const sp = imgToScreen(ip.x, ip.y);
@@ -1646,6 +2910,35 @@ function render() {
     ctx.setLineDash([]);
   }
 
+  // 2026-11-20 用户反馈：导航时只显示到第一个航点，后面的要走到才出现。
+  // 原因是导航按段执行，车端 /plan（实线）只包含**当前这一段**。
+  // 这里用车里记录的整条航线（navWaypoints）画一条浅蓝虚线，把剩余航点全部连出来。
+  if (lastMode !== 'map' && navWaypoints.length > 1 &&
+      robotState && robotState.nav === 'navigating') {
+    const from = Math.max(0, Math.min(navWpIdx, navWaypoints.length - 1));
+    const rest = navWaypoints.slice(from);
+    if (rest.length) {
+      ctx.beginPath();
+      ctx.strokeStyle = 'rgba(121,192,255,.6)';
+      ctx.lineWidth = 2 * dpr;
+      ctx.setLineDash([6 * dpr, 7 * dpr]);
+      let started = false;
+      if (poseDisp) {
+        const pi = worldToImg(poseDisp.x, poseDisp.y);
+        const sp = imgToScreen(pi.x, pi.y);
+        ctx.moveTo(sp.x, sp.y);
+        started = true;
+      }
+      rest.forEach((w) => {
+        const ip = worldToImg(w.x, w.y);
+        const sp = imgToScreen(ip.x, ip.y);
+        if (!started) { ctx.moveTo(sp.x, sp.y); started = true; }
+        else ctx.lineTo(sp.x, sp.y);
+      });
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }
   // 局部避障轨迹（绿色虚线）
   if (localPlan.length > 1) {
     ctx.beginPath();
@@ -1859,6 +3152,10 @@ canvas.addEventListener('touchend', (e) => {
     const dpr = window.devicePixelRatio || 1;
     const sx = (e.changedTouches[0].clientX - r.left) * dpr;
     const sy = (e.changedTouches[0].clientY - r.top) * dpr;
+    if (mapSwitching) {
+      $('navInfo').textContent = '正在切换地图，请等新地图出来再点航点';
+      touchMode = 0; return;
+    }
     const ip = screenToImg(sx, sy);
     if (lastMode === 'nav' && ip.x >= 0 && ip.x < mapImg.width &&
         ip.y >= 0 && ip.y < mapImg.height) {
@@ -1890,6 +3187,10 @@ canvas.addEventListener('mouseup', (e) => {
   if (touchMode === 1 && moved < 5 && mapImg) {
     const r = canvas.getBoundingClientRect();
     const dpr = window.devicePixelRatio || 1;
+    if (mapSwitching) {
+      $('navInfo').textContent = '正在切换地图，请等新地图出来再点航点';
+      touchMode = 0; return;
+    }
     const ip = screenToImg((e.clientX - r.left) * dpr, (e.clientY - r.top) * dpr);
     if (lastMode === 'nav' && ip.x >= 0 && ip.x < mapImg.width &&
         ip.y >= 0 && ip.y < mapImg.height) {
@@ -1918,6 +3219,30 @@ $('zoomOut').onclick = () => { view.scale /= 1.5; renderDirty = true; render(); 
 
 function sendGoal(list) {
   if (!wsReady) { $('navInfo').textContent = '未连接'; return; }
+  // 2026-11-20：导航栈刚起来时 collision_monitor 要 40~50 s 才 active，
+  // 这期间发目标 → Nav2 15 s 后 "Failed to make progress" 放弃 → 车停一下。
+  // 现在先等安全链一通再发（最多 60 s）。
+  if (robotState.chain === false) {
+    let tries = 0;
+    $('navInfo').textContent = '等待安全链（碰撞监控）就绪…';
+    const wait = setInterval(() => {
+      tries += 1;
+      if (robotState.chain !== false) {
+        clearInterval(wait);
+        sendGoal(list);
+        return;
+      }
+      $('navInfo').textContent =
+        `等待安全链（碰撞监控）就绪…（第 ${tries} 次检查）`;
+      if (tries >= 30) {
+        clearInterval(wait);
+        $('navInfo').textContent =
+          '安全链未就绪（碰撞监控未启动），请稍后重试或点「重新定位」';
+        showToast('安全链未就绪，请稍后再试', false);
+      }
+    }, 2000);
+    return;
+  }
   const points = list.map(w => [+w.x.toFixed(3), +w.y.toFixed(3)]);
   navWaypoints = points.map(p => ({x: p[0], y: p[1]}));
   // 从离车最近的航点开始编号（继续导航时不会跳回 1 号）
@@ -1930,12 +3255,14 @@ function sendGoal(list) {
     });
   }
   lastNavMovingAt = Date.now();   // 避免刚下发就被误判为“已停止”
-  ws.send(JSON.stringify({type: 'goal', points}));
+  // 带上"这些点是按哪张地图算的"，车端会校验，防止切图后旧航点乱跑
+  ws.send(JSON.stringify({type: 'goal', points, map: robotState.map || ''}));
   $('navInfo').textContent = `已发送 ${points.length} 个航点，等待车端确认…`;
 }
 
 // 点完航点只请求“路径预览”，不执行；按“开始导航”才真正走
 function requestPreview() {
+  if (mapSwitching) return;
   if (!wsReady || !waypoints.length) return;
   const pts = waypoints.map(w => [+w.x.toFixed(3), +w.y.toFixed(3)]);
   ws.send(JSON.stringify({type: 'preview', points: pts}));
@@ -1966,6 +3293,7 @@ $('stopNav').onclick = () => {
   render();
 };
 $('startNav').onclick = () => {
+  if (mapSwitching) { showToast('正在切换地图，请等新地图出来', false); return; }
   if (!waypoints.length) { $('navInfo').textContent = '请先在地图上点选航点'; return; }
   sendGoal(waypoints);
 };
@@ -2006,11 +3334,6 @@ $('refreshBtn').onclick = () => {
 };
 if ($('logoutBtn')) $('logoutBtn').onclick = logout;
 $('stop').onclick = () => { resetKnob(); if (wsReady) ws.send(JSON.stringify({type: 'stop'})); };
-$('testBtn').onclick = () => {
-  if (!wsReady) { $('dbg').textContent = '未连接'; return; }
-  ws.send(JSON.stringify({linear: 0, angular: 0}));
-  $('dbg').textContent = '已发送测试指令（零速）';
-};
 $('doLogin').onclick = () => login(false);
 if ($('doRegister')) $('doRegister').onclick = () => login(true);
 $('toRegister').onclick = () => login(true);

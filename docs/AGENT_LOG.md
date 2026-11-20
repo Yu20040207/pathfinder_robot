@@ -6806,3 +6806,2241 @@ motion_enabled / manual_enabled 重启后被重置为 false
    该障碍物是否被标记；缺就查 `obstacle_layer` 的 marking 与局部→全局更新
 2. 死胡同多跑几趟不同宽度，标定 `turn_need_m`（0.38~0.42）与 `backup_max_m`（0.80）
 3. 碰撞监控假活：考虑每 3 s 主动验输出，而不只是"静默 2 s 才重启"
+
+## 2026-11-19 09:35 · 手机端双雷达适配 + 建图模式残留清理 + 雷达重复进程
+
+### 会话目标
+1) 手机页面适配双雷达；2) 建图模式下不该出现导航规划路径；3) 建图模式只有单雷达。
+
+### 仓库改动
+- `ros2_ws/src/fwr_bringup/fwr_bringup/mqtt_bridge.py`
+  - 新增 `scan_merged_topic`（默认 `/scan_merged`），**BEST_EFFORT** 订阅（scan_merger 发布为 BEST_EFFORT，用默认 RELIABLE 收不到）。
+  - `_on_scan_merged` → `_handle_scan(merged=True)`；`_on_scan_front` 仅在合并扫描 >1 s 无数据时兜底。
+  - 合并扫描**不做后方 ±50° 遮罩**（360° 圈无车身自击）；单雷达兜底仍遮。
+  - `scan_points` 180 → **360**。
+  - 新增 `/scan_rear` 订阅与 `_front_at/_rear_at`，状态里输出 `lidar_front`/`lidar_rear`。
+  - QoS 相关 import 提到模块顶层（原先在 `__init__` 内局部 import，合并订阅用到时未定义）。
+- `ros2_ws/src/fwr_bringup/launch/real_mapping.launch.py`
+  - 前/后两只 `sllidar_node` 加 `respawn=True, respawn_delay=2.0`（串口偶发 `SL_RESULT_OPERATION_TIMEOUT` 自愈）。导航/定位模式通过 include 复用本文件，因此两条链路都生效。
+- `cloud/web/car.html`
+  - 进入建图模式时清空 `pathPoints/localPlan/waypoints/previewPoints/navWaypoints`；`preview_path` 在建图模式直接忽略。
+  - 设备面板新增 `#lidarRow`：`雷达 前 ✓ · 后 ✓（360°）`，单雷达时橙色 `（单雷达）`。
+  - 8080 端口（boat 项目静态服务器，无 /api、/ws）自动跳转到 `http://<host>/car/`。
+- `cloud/api/app.py`
+  - 修 `publish_cmd` 里 `ttl_ms` **重复键**（先 800 后又 300 → JSON 后者覆盖，800 ms 从未生效）。
+
+### 已验证
+- 桥接单测：`PYTHONPATH=ros2_ws/src/fwr_bringup .venv/bin/python -m pytest -q ros2_ws/src/fwr_bringup/test/test_mqtt_bridge.py` → **9 passed**。
+- 云端实收 scan：点数 **269~273**，四象限 `前右 57 / 前左 71 / 后左 68 / 后右 73`，最远 5.25 m → **360° 成立**。
+- 状态字段：`lidar_front=True lidar_rear=True`。
+- 建图模式话题：`/scan` 10.0 Hz、`/scan_rear` 10.0 Hz、`/scan_merged` 10.0 Hz、`/slam_map` 1.0 Hz；雷达进程恰好 2 个。
+- 建图模式下云端 10 s 内只收到 `state/scan/live_map/map/online`，**无 path/local_plan**。
+- 页面三入口：`80 /car/` 200、`80 /api/login` 200、`8443 /car/` 200。
+
+### 未验证 / 遗留
+- 手机端肉眼确认（需用户刷新页面）。
+- 雷达 `respawn` 只在本次冷重启验证 90 s 无 `process has died`，未做长跑。
+- `scan` 上云约 3.8 Hz（桥接限 5 Hz，TF 偶发失败丢帧），未深究。
+- 8080 仍由 boat 项目的 `python3 -m http.server` 占用，未动（非本项目）。
+
+### 当前运行状态
+实机处于**建图模式**（`fwr-map` active，`fwr-nav` inactive）；两只 C1 均在线；`lidar_watchdog.py` 已停（其会自行 `ros2 run` 起重复雷达，与 launch 的 respawn 冲突）。
+
+### 下一步
+让用户刷新手机页面确认：建图模式无导航路径、激光点为完整一圈、设备面板双雷达 ✓。
+
+## 2026-11-19 09:53 · 双雷达"跑一会儿变单雷达"根因：sllidar_node 静默卡死
+
+### 现象
+建图模式启动时是双雷达（360°），约 10~15 分钟后后雷达点消失，只剩前雷达。
+
+### 根因（实测证据）
+- 后雷达进程**还活着**（`Sl`，运行 19 min），持着 `/dev/ttyUSB2`，`/scan_rear` 有 1 个 publisher，
+  但**0 帧输出**；`ros2 topic hz /scan_rear` 无输出（BEST_EFFORT 探针同样 0 帧）。
+- 主线程 `wchan = futex_wait_queue`，无 dmesg USB 异常、无节点报错 —— 与 `run_navigation.sh`
+  注释里记过的"sllidar_node 死锁在 futex 上"是同一个 bug。
+- 因此 `respawn=True` 无效：进程没退出，launch 不会重启它。
+- `scan_merger` 的 `fallback_single` 于是用前雷达单独发布 → 手机端看起来"变回单雷达"。
+
+### 修复
+- `tools/lidar_watchdog.py` **重写为双雷达版**：
+  - 分别监控 `/scan` 与 `/scan_rear`（`qos_profile_sensor_data`）；
+  - 断流 2.5 s（或时间戳落后 >1.5 s）判定卡死 → `SIGKILL` **对应那一个**进程，交给 launch 的 `respawn` 拉起；
+  - 不再自己 `ros2 run`（旧版会造出重复雷达抢串口）；只有"杀完 6 s 仍无数据"才兜底自启；
+  - 进程匹配限定为真正的可执行文件 `/lib/sllidar_ros2/sllidar_node`，避免误杀命令行里含 `sllidar_node` 的 shell；
+  - 保留断流现场 dump（`/tmp/fwr_runs/lidar_stall_<front|rear>_*.txt`）与代价地图清理。
+- 新增 `fwr-lidar-watchdog.service`（enabled，`Restart=always`，User=manbaout）。
+
+### 已验证（命令 + 结果）
+1. 真实卡死（09:51）：`/scan_rear 已静默 20.0s → 重启 sllidar_node_rear`，kill pid 12634 →
+   `0.5 s 后 /scan_rear 已恢复（launch respawn 生效）`。
+2. 人工冻结（09:52，`kill -STOP 15244` 模拟 futex 卡死）：
+   `2.5 s` 检出 → kill → respawn → **0.5 s 恢复**。
+3. 恢复后频率：`/scan 10.04 Hz`、`/scan_rear 10.01 Hz`、`/scan_merged 10.01 Hz`；
+   进程恰好 2 个；云端 `lidar_front=True lidar_rear=True`，scan 272 点。
+4. 进程匹配自检：`_matching_pids("sllidar_node")=[12630]`、`_matching_pids("sllidar_node_rear")=[15244]`（不交叉）。
+
+### 未验证 / 遗留
+- 卡死根因（SDK futex 死锁）**未修**，只做了自愈；复现周期约 10~15 min，需长时间观察是否还复发。
+- 若卡死频率高到影响建图，下一步考虑换 `sllidar` 启动参数（如 `scan_mode`/`baudrate`）或换成官方
+  `rplidar_ros` 驱动做 A/B。
+
+### 当前运行状态
+实机建图模式；`fwr-lidar-watchdog` active+enabled；两只 C1 均 10 Hz。
+
+## 2026-11-19 10:05 · 顶栏进度条改为贴边细绿条 + 「建图模式」改名「建图探索」
+
+### 仓库改动
+- `cloud/web/car.html`
+  - 「建图模式」→「建图探索」共 13 处（下拉框、状态栏、切换提示、确认弹窗、注释）。
+  - 切换进度条由"深色块 + 文字 + 5px 轨道"改为**紧贴顶栏下沿的 3px 细绿条**：
+    - 平时满格绿色（`#switchBar` 不再初始 `hidden`，`.barFill` 默认 `width:100%`）；
+    - 切换时 `4% → 92%` 走条，完成后 100% 并 1.2 s 后只收起文字；
+    - 文字（`#switchText`）仅在切换期间显示在绿条下方；
+    - 新增 `placeProgressBar()`：用 `#mainHeader.getBoundingClientRect().bottom` 实测定位，
+      兼容 PWA 安全区/横竖屏；产品页/登录页顶栏隐藏时自动隐藏进度条。
+
+### 已验证
+- `node --check` 通过；线上 `curl http://8.163.69.109/car/car.html` 确认 CSS/JS 已更新。
+- 未做手机肉眼确认（需用户刷新页面）。
+
+### 未验证 / 遗留
+- 进度条在手机上的实际观感（粗细 3px 是否合适、是否被安全区/Safari 工具栏遮挡）待用户确认。
+
+## 2026-11-19 10:15 · 导航模式"一直在重新定位"：模式切换竞态
+
+### 现象
+切换到导航模式后，页面进度条停在「等待导航栈就绪，正在重新定位（第 N 次）」，一直循环。
+
+### 根因（两条叠加）
+1. **页面 `applyMode()` 用了被覆盖后的 `lastMode`**：先 `lastMode = mode` 再判断
+   `if (mode === 'nav' && lastMode !== 'map')` → 条件恒真，
+   「建图→导航」会**跑两遍启动流程**（多一次 relocalize、多一个进度条）。
+   连点模式按钮时还会重复发 `mapping_start`。
+2. **车端切换栈不串行**：10:08:37 两次 `mapping_start` + 10:08:57 `mapping_stop` 并发，
+   两个 `systemctl` 序列互相 stop 对方的栈，**最终停在建图栈**（`fwr-map` active，
+   `fwr-nav` inactive，没有 AMCL）→ 页面每次 relocalize 都失败 → 12 s 后重试，最多 15 次。
+
+### 修复
+- `cloud/web/car.html`：`applyMode()` 开头保存 `const prevMode = lastMode`，
+  三处判断改用 `prevMode`；「建图→导航」「手动→导航」不再重复触发，
+  「已在建图再点建图」「已在导航再点导航」不再重复下发。
+- `mqtt_bridge.py`：`_run_service_action` **串行化**
+  - 新增 `_active_stack()`（`systemctl is-active` 查当前栈）；
+  - 新增 `_mode_lock / _mode_running / _mode_pending`：切换执行期间新请求只记"最后一个想要的"，
+    完成后执行；`mapping_start`/`mapping_stop` 若目标栈已是当前栈则直接返回成功。
+
+### 已验证
+- 单测：`test_mqtt_bridge.py` → **9 passed**。
+- 手动切回导航栈后：`fwr-nav active / fwr-map inactive`；
+  `amcl_pose = (0.740, -0.950)`；`auto_initial_pose: 重新定位成功: (0.74,-0.92,154°) 残差 0.047 m 贴墙 76%`。
+- MQTT `relocalize` → `goal_result {kind:nav, accepted:true, reason:"定位成功: (0.74,-0.96,154°) 残差 0.044 m", action:relocalize}`。
+
+### 未验证 / 遗留
+- 手机端连点模式按钮的竞态需用户实际点一遍确认（页面需强制刷新）。
+- `chain_watchdog` 仍在报 `collision_monitor_forward activate=失败，输出仍静默`（老问题，未处理）。
+
+## 2026-11-19 11:05 · 碰撞监控看门狗 A+B 改造（用户批准）+ 启动期 TF 竞态
+
+### 目标（用户："开始做 A+B，已经乱掉的监控状态清干净"）
+A：修掉看门狗把"空闲"误判成"卡死"。
+B：给恢复加分级链路，卡死时不用人工。
+
+### 已实现（`tools/chain_watchdog.py`）
+1. **误判修复**：原来 `in_n > 0` 就判卡死。空闲时 Nav2 仍有 20 帧/秒零速在流，
+   监控不发布被当成"假死" → 今天误触发 172 次 deactivate/activate。
+   现在要求 `in_n >= 5` 且**连续流动 ≥2 s**（`_in_run`）才判定。
+2. **冷却**：同一监控 30 s 内只动一次（`FWR_WATCHDOG_FIX_COOLDOWN_S`）。
+3. **启动宽限期**：`_health()` 原来不受 45 s 宽限期约束，栈刚起来就升级重启，
+   已补上；并且"从未发布过输出"（`_ever_out`）时只做"再激活一次"（最多 3 次），
+   **不升级到重启栈** —— 这是 10:29/10:31 两次把栈重启掉的直接原因。
+4. **三级恢复**：一级 deactivate/activate → 二级 cleanup/configure/activate →
+   三级 `pkill -9` 监控 + 它的 lifecycle_manager，交给 launch respawn（约 3+2 s），
+   respawn 后若仍是 inactive 再用 CLI 补 configure/activate。
+   **整栈重启改成显式开关** `FWR_WATCHDOG_ALLOW_STACK_RESTART=1`（默认关）。
+
+### launch 改动（`real_navigation.launch.py`，非冻结参数）
+- `collision_monitor` / `lifecycle_manager_collision` 加 `respawn=True`（三级恢复依赖它）。
+- 碰撞监控激活**延后 25 s**（`TimerAction`）。依据：现场日志
+  `getTransform: laser_front->base_footprint, requested ...963.58 但 buffer 最早 ...964.58`，
+  即激活时 odom→base_footprint 的 TF 还没出现（launch 后约 13 s 才有），
+  节点报错后**不再发布** `/cmd_vel_auto_forward_filtered`。
+
+### 现场验证与踩坑（重要）
+- 列表化验证：12 s 延迟仍太早（激活 963.66 / TF 964.58），改 25 s。
+- 三级"杀进程"时 SIGTERM 无效（10:47 manager 没死，新旧两个 manager 抢同一个监控，
+  新监控停在 unconfigured）→ 改 `pkill -9` + respawn 后补 CLI 激活。
+- 监控清理时进程段错误（exit code -11）一次（10:48:58），属 Nav2 老问题。
+- 每次重启后 1~2 分钟内又会静默，状态 active、订阅 `/scan` 正常、前方 0.535 m 无障碍，
+  仍未定位根因；本次只保证"能自愈"，未治本。
+
+### 当前状态（11:05）
+- `fwr-nav` active、`fwr-map` inactive；`/cmd_vel_auto_forward_filtered` 20.0 Hz。
+- 看门狗新版本已部署并在跑（三级默认关闭整栈重启）。
+- 本会话期间多次重启导航栈，定位需重新就绪。
+
+### 下一步建议
+1. **自研轻量前停节点替换 Nav2 `collision_monitor`**（读 `/scan` + `/cmd_vel_auto_unchecked`
+   → 输出 `/cmd_vel_auto_forward_filtered`，沿用 front_stop/front_slow 几何，无生命周期）
+   —— 今天证据表明该节点的"active 但不发布"无法通过生命周期恢复。
+2. 若保留 Nav2 监控，需要抓 rosbag（/scan、/tf、/cmd_vel_*）复现静默瞬间再定位。
+
+## 2026-11-19 11:56 · 建图探索黑屏（两处根因）+ 模式对账
+
+### 现象
+手机选「建图探索」后一直黑屏不出图，顶部只显示"导航已停止"。
+
+### 根因 1：切换请求丢了，页面不知道车端还在导航栈
+- 页面本地 `lastMode='map'`，但车端 `fwr-nav` active、`fwr-map` inactive。
+- 11:41 有一次导航任务，11:44 切建图时桥接日志里**根本没有 `mapping_start`**
+  → 页面认为已经在建图模式，再点也不会重发。
+- 修复：
+  1. `mqtt_bridge` 状态里新增 **`mode`**（`map`/`nav`，来自 `_sync_mapping_mode` 的真实 systemctl 结果）。
+  2. 页面 `updateStatus()` 记录 `robotMode`；`applyMode()` 判断从 `prevMode !== 'map'`
+     改为 `prevMode !== 'map' || robotMode === 'nav'`（车端不在建图栈就重发）。
+  3. 新增每秒执行的 `modeReconcileTick()`：页面模式与车端 `mode` 不一致时，
+     每 15 s 重发一次 `mapping_start`/`mapping_stop`，最多 5 次。
+
+### 根因 2：桥接收不到 SLAM 地图（真正的黑屏原因）
+- `/map` 的发布者是 `maperaser`，QoS = **TRANSIENT_LOCAL**，且**只在变化时发布**。
+- 桥接用默认 volatile 订阅：如果它比 maperaser 晚订阅，那唯一一帧就永远收不到
+  → `_live_map` 一直是 None → `live_map` 不上行 → 手机黑屏。
+- 修复：`/slam_map` 和 `/map` 改为 TRANSIENT_LOCAL（RELIABLE, depth 1）订阅。
+
+### 踩坑记录
+- `build_state_payload` 返回的是**已编码 bytes**，直接 `payload['mode']=...` 会
+  `TypeError: 'bytes' object does not support item assignment` → 改成函数参数。
+- `__init__` 里写 `from rclpy.qos import QoSProfile` 会造成**局部变量遮蔽**，
+  同一函数里更早的 `QoSProfile(...)` 报 `UnboundLocalError` → 用模块顶部已有的导入。
+
+### 已验证
+- 人工发 `mapping_start`：`fwr-map active`，`/scan` 10.16 Hz、`/scan_rear` 10.01 Hz、
+  `/scan_merged` 10.00 Hz、`/odom` 30.02 Hz、`/tf` 87 Hz。
+- MQTT `robot/car-001/live_map`：8 s 内 6 帧，内容 `width=152 height=138 resolution=0.05` → 真实地图在流。
+- MQTT state：`mode=map`、`lidar_front=True lidar_rear=True`。
+
+### 未验证 / 遗留
+- 手机端刷新后是否立即出图（需现场确认）。
+- 建图模式 `ready=False`（`base_bridge` 的 `_sensors_ready` 要求 `motion_enabled`），
+  页面自动授权后才会变 True —— 属预期，但如果授权后仍 False 需要再查。
+- 期间出现过一次前雷达 `SL_RESULT_OPERATION_TIMEOUT` 退出（11:50:00），
+  `respawn` 3 s 内恢复，`scan_merger` 自动从单路回到 360°。
+
+## 2026-11-19 14:12 · 建图探索黑屏的最终根因：http 页面没有 DecompressionStream
+
+### 根因（终于定位）
+页面 `gunzipB64()` 依赖 `DecompressionStream`，而它是**安全上下文专属 API**；
+手机访问 `http://8.163.69.109/car/`（非 https）时 `DecompressionStream === undefined`
+→ 抛异常 → `applyLiveMap` 直接进 catch → **live_map 永远画不出来**。
+`/map` 由 maperaser 以 TRANSIENT_LOCAL 发布，桥接已能收到（前面已修），
+数据一直在上行，只是页面解不开。
+
+### 修复（不依赖浏览器 API 的降级链路）
+1. **桥接**新增 MQTT 主题 `robot/<device>/lmap_plain`：页面发 `{"plain":true}` 后改发
+   **未压缩**地图（0=占用 / 160=未知 / 254=空闲，base64），超过 80000 格自动 2 倍下采样。
+   格式切换时用缓存的最后一帧 `_last_occ` **立刻重发**（车不动就没有新地图帧，否则要等到车动）。
+2. **API** WS 新增 `lmap_plain` 类型转发。
+3. **页面** `syncLiveMapFormat()`：`typeof DecompressionStream === 'undefined'` 时
+   连上 WS 就发 `plain:true`；`applyLiveMap` 里 `m.plain` 走 `b64ToBytes` 直解。
+4. 页面左下角新增常驻诊断条 `#dbgPill`：`界面<mode>/车<mode>/选<select>/图<WxH>/布<WxH>`，
+   渲染异常时直接把错误写进去（省得只能看 console）。
+5. `applyLiveMap` 里画布若仍是 1x1（曾在隐藏状态测量）则重新 `resizeCanvas()`。
+
+### 踩坑
+- ROS 主题名**不允许 `-`**（`robot/car-001/lmap_plain` 直接 `InvalidTopicNameException`），
+  所以开关走 MQTT 分发（`_on_mqtt_message`），不要建同名 ROS 订阅。
+- `self._topic_lmap_plain` 必须在用到它的订阅/分发之前初始化。
+
+### 已验证
+- 发布 `{"plain":true}` 后 `live_map`：`plain=True, 152x138, 原始字节 20976 = 152*138`（解码正确）。
+- 桥接日志：`实时地图格式：未压缩`。
+- 车端 `fwr-map active`、`mode=map`、`manual=True`。
+
+### 待现场验证
+- 手机刷新后是否出图（左下角诊断条能一眼看出卡在哪一层）。
+- 若仍黑屏，看诊断条是「图无」还是「布1x1」还是「解析失败」。
+
+## 2026-11-19 14:35 · 建图出图了 + 充电判定修复 + 模式切换弹窗恢复
+
+### 建图探索黑屏：最终定位并已出图 ✅
+- 现场诊断条（页面左下角，`#dbgPill`，每 5 s 回传云端 `/opt/jc/logs/diag.log`）抓到：
+  `切换建图出错:Can't find variable:mapResetKnob | 界面map/车map/选map/图152x138/布1206x2007/gzip`
+- 即 `applyMode('map')` 在建图分支里调用 `mapResetKnob()` 时抛异常，
+  **导致后面的 `lastMode = mode`、进度条、自动授权全被跳过**，而地图帧又被
+  `applyLiveMap` 的 `if (lastMode !== 'map') return` 全部丢弃 → 一直黑屏。
+- 修复：
+  1. `lastMode = mode` **提前到 applyMode 开头**（可见性切换之后），异常不再丢帧；
+  2. 建图分支整段 `try/catch`，错误文字写进诊断条（`dbgErr`）；
+  3. `mapResetKnob()` 调用全部加保护（部分手机内核对函数提升处理不一致）；
+  4. 自动对齐不再只在 `mode` 变化那一刻判断一次（之前首次失败后永不重试）；
+  5. 实时地图改走**未压缩**通道（见上一条 14:12 条目），不再依赖 `DecompressionStream`。
+- 现场截图确认：建图模式已出图（`图152x138`、紫色雷达点、车头朝上视角）。
+
+### 充电不显示：判定规则错误（已修）
+- 症状：车在充电，手机不显示充电中；`/base/battery.power_supply_status = 2`（DISCHARGING）。
+- 原因：`battery_modbus._publish()` 只在"电压比近 10 分钟峰值高 0.15 V"时判充电。
+  92% 满电 CV 阶段电压基本不动（实测 24.70~24.76 V 来回晃、电流稳定 +0.75~0.84 A），
+  永远升不到 +0.15 V → 一直判未充电。低电量时电压爬升快，所以"以前能显示"。
+- 修复：**以电流方向为主判据**（充电器接入时实测正电流），电流接近 0 时才用
+  电压趋势兜底（`ref_v + 0.05 / -0.08`，10 分钟窗口）。
+- 已验证：`power_supply_status = 1 (CHARGING)`，MQTT `charging=True, 24.73V, 0.76A, 92.2%`。
+- ⚠️ 注意：电流符号是**实测推断**（充电为正）。若在行驶时误显示"充电中"，说明
+  传感器接线方向相反，把 `battery_modbus.py` 里 `i_now >= 0.20 / <= -0.20` 两个判断对调。
+
+### 模式切换弹窗（用户要求恢复）
+- 之前为绕开"弹窗 promise 不 resolve 导致界面卡住"把弹窗删了，用户反馈没有确认提示。
+- 现在恢复弹窗，但加 **30 秒超时兜底**：超时按取消处理、下拉框恢复原值并提示。
+- 同时修正自动对齐：只有**下拉框仍停在「建图探索」**时才把界面切回建图，
+  不再覆盖用户主动切到导航的选择（之前切导航会被立即拉回建图探索）。
+
+### 关于"只有 180 度"
+- 车端 `/scan_merged` 360°（-π~π，720 点，10 Hz）正常；
+  以车体为中心每 30° 统计点数：0-30°:23 30-60°:20 60-90°:10 90-120°:25 120-150°:24
+  150-180°:18 180-210°:22 210-240°:28 240-270°:31 270-300°:25 300-330°:20 330-360°:31
+  → **全向都有点**，手机收到的 `scan` 也覆盖整周。
+- 截图里地图只长成半个扇形，是 11:50 前雷达超时（`SL_RESULT_OPERATION_TIMEOUT`）
+  单雷达运行那段时间留下的；雷达 respawn 后新扫区域会补上。移动/转动一圈即可验证。
+
+### 当前运行状态
+- `fwr-map active`、`fwr-nav inactive`、`fwr-battery active`、`fwr-mqtt-bridge active`
+- `mode=map`、`manual=True`、`ready=True`、`charging=True`
+- 页面：`http://8.163.69.109/car/`（左下角诊断条常驻，可远程排查）
+
+### 遗留
+- `mapResetKnob` 报 "Can't find variable" 的根因未查明（函数是顶层声明，理论应提升）；
+  已用 try/catch 兜住，不再影响功能。若后续其它函数出现同类报错，优先怀疑夸克浏览器内核。
+- 实时地图未压缩通道的流量：152x138≈21 KB/帧@1 Hz；大地图自动 2 倍下采样。
+
+## 2026-11-19 14:45 · 「重新建图」看不出变化（已修）
+
+### 现象
+建图探索里点「重新建图」，等一会儿地图还是原来那张，用户以为按钮没生效。
+
+### 原因
+- 车端其实**重启了建图栈**（`mapping_restart` → `systemctl restart fwr-map`），
+  桥接 `_live_map` 缓存没有清，手机端 `applyLiveMap()` 遇到空地图又直接 `return`
+  （注释写着"SLAM 空地图，忽略"）→ 旧图一直留在画布上。
+- 而且车没动时，新地图和旧地图长得一样，光看画面更分不出。
+
+### 修复
+1. 桥接：`mapping_start` / `mapping_restart` 时清空 `_live_map`，
+   并向 `live_map` 发一帧 `{"reset": true}`；
+2. 页面：收到 `reset` 或空尺寸地图 → 清空 `mapImg/mapMeta` 并立即重绘，
+   提示"地图已清空，正在等待新的 SLAM 地图…"；
+3. 页面：点「重新建图」时**本地先清空画布**，立刻有反馈。
+
+### 已验证（MQTT 实测，`/tmp/rmtest.py`）
+```
++ 0.0s  map 152x138      （旧图）
++ 0.8s  RESET            （新：立刻通知手机清空）
++ 1.1s  goal_result: {"accepted": true, "reason": "mapping_restart 完成"}
++27.0s  map 167x103      （新 SLAM 地图，尺寸已变）
++29.0s~ 每 1.5 s 一帧
+```
+→ 重新建图确实产生**新的地图**，手机现在会先清屏再长出来。
+
+### 遗留
+- 重启建图栈约 25 s 才出第一帧，期间页面显示"正在重新建图…"，属正常。
+
+## 2026-11-19 14:55 · 建图画面"错位" + 车不居中 + 摇杆归零报错（都已修）
+
+### 1. 摇杆归零 `ReferenceError: Can't find variable: mapResetKnob`
+- 真相：`mapEventPoint / mapMoveKnob / mapResetKnob` 三个函数被写在
+  **`bindMapJoystick()` 函数体内部**（1134~1174 行），属于局部作用域；
+  `applyMode()` 在顶层调用 `mapResetKnob()` 自然找不到。
+- 修复：三个函数提到顶层，`bindMapJoystick()` 只保留事件绑定。
+
+### 2. 地图"错位"（雷达点和墙对不上）—— **上下镜像**
+- 根因在我新加的未压缩实时地图通道 `_plain_live_map()`：
+  OccupancyGrid 的 `data` 是**从下往上**的行序，
+  gzip 版编码时有 `top_down = reversed(rows)`，
+  我写的 plain 版**漏了翻转** → 地图上下镜像，
+  而雷达点按 `worldToImg()`（上往下）换算 → 点与墙错位。
+- 修复：plain 版按 `grid_y = h - 1 - (oy*step + dy)` 取行，与 gzip 版一致。
+- ⚠️ 教训：任何"把 OccupancyGrid 转图像"的代码都必须显式处理行序，
+  且两条通道（gzip / plain）必须逐点一致。
+
+### 3. 小车不在地图中间
+- `resetView()` 优先按 `poseDisp`（车）居中，但页面刚打开时 `poseDisp` 还是
+  `null`，于是按"地图中心"居中；等车位置到了不会重新居中。
+- 修复：`updateStatus()` 里检测 `poseDisp` 第一次由空变成可用且处于建图模式时，
+  调用 `resetView()` 重新居中到车。
+
+### 验证
+- `node --check` 通过；页面已部署到 `/opt/jc/web/car.html`。
+- 桥接已重建并 `fwr-mqtt-bridge active`。
+- 待现场：刷新页面后雷达点应与墙体对齐、车位于画面中心。
+
+## 2026-11-19 14:45 · 「建图栈已启动，等待 SLAM 地图」卡住 = 模式对账与确认弹窗打架
+
+### 现场日志（bridge）
+```
+14:39:57  执行 mapping_stop  （用户切导航）
+14:40:07  执行 mapping_start （用户切建图）
+14:40:08  mapping_stop 排队（mapping_start 正在切换栈）
+14:40:09  mapping_start 完成
+14:40:09  执行排队中的 mapping_stop → stop fwr-map; start fwr-nav
+→ 车最终停在导航栈，桥接不再发 live_map，页面永远"等待 SLAM 地图"
+```
+
+### 根因（页面侧竞态，都是我今天新加的对账逻辑引入的）
+1. 用户选「建图探索」→ 弹确认框（还等着点）。
+2. 与此同时 `modeReconcileTick()` 发现 `下拉框=map` 而 `lastMode=nav`，
+   **绕过弹窗直接 `applyMode('map')`**（并发发送 mapping_start）。
+3. 用户在弹窗点「取消」→ 处理器 `modeSelect.value = lastAppliedMode`（= nav）。
+4. 下一秒 tick 又看到 `下拉=nav` 而 `lastMode=map` → 发 `mapping_stop`
+   → 正好排在 mapping_start 后面 → 建图栈被自己停掉。
+
+### 修复
+- `modeReconcileTick()`：**弹窗未回答（`askResolve`）时直接 return**；
+  切换进行中（`progressActive`）也不插手，但超过 **120 秒**视为卡死允许接管。
+- `updateStatus()` 的自动对齐同样加 `!askResolve && !progressActive` 守卫。
+- `startProgress()` 记录 `progressStartedAt` 供上面的超时判断用。
+
+### 恢复
+- 手动发 `mapping_start`，已确认：`fwr-map active`、`fwr-nav inactive`、
+  `live_map 130x211 @0.05 m`、`charging=True`。
+- `manual=False`（重新起栈后底盘运动门关闭），页面刷新后 `autoArmForMapping()` 会重新授权。
+
+### 教训
+**任何"自动纠正"逻辑都必须让位给用户正在进行的操作**（弹窗、切换中），
+否则会出现"自动逻辑把用户的选择改回去"的鬼畜循环。
+
+## 2026-11-19 14:50 · 建图/导航切换改为"先停确认，再起"（用户明确要求）
+
+### 用户要求
+> 在确认切换的时候，你需要先关闭另外一边，确认关闭之后再打开这边
+
+### 改动（`mqtt_bridge._run_service_action`）
+原来是一条 shell 串：`stop 另一边; sleep 2; start 这边` —— **sleep 2 是瞎猜**，
+停不下来也照起，两套节点同时占用 `/scan`、`/tf`、`/cmd_vel` → "建图和导航打架"。
+
+现在改成显式状态机：
+1. `systemctl stop <另一边>`；
+2. **轮询 `systemctl is-active` 直到变成 `inactive/failed`（最多 30 s）**，
+   30 s 还没停就**放弃启动**并回报“未能停止，已取消启动”；
+3. 停稳后 `sleep 2`（给 DDS 回收节点的时间）；
+4. `reset-failed` + `start <这一边>`，再轮询到 `active`（25 s），
+   失败重试一次，仍失败就回报“启动失败”。
+
+实测日志：
+```
+mapping_start: 先停 fwr-nav.service
+mapping_start: fwr-nav.service 已停止
+mapping_start 完成（fwr-nav.service 已停，fwr-map.service 已起）
+mapping_stop: 先停 fwr-map.service → 已停止 → 完成（fwr-map 已停，fwr-nav 已起）
+```
+
+### 顺带修掉一个大坑：动作队列 `_busy` 卡死
+- `_drain_actions()` 里 `if self._busy: return`，而 `_busy` 由各种 future 回调复位。
+  只要有一个回调没回来（例如地图保存/导航目标），**之后所有手机指令都静默排队**，
+  现象就是"点了完全没反应"，日志里也什么都没有（14:45 现场发了 3 条 mapping
+  指令，桥接一条都没执行、一条都没记录）。
+- 修复：`_busy` 超过 **30 秒**强制解锁并告警。
+
+### 页面侧
+- `goal_result` 收到 `mapping_start/mapping_stop` 结果时，**同步下拉框和界面模式**，
+  避免"下拉框写导航、顶部写建图栈已启动"的自相矛盾画面。
+
+### 当前状态
+- `fwr-map active` / `fwr-nav inactive`，页面刷新后自动进入建图探索。
+
+## 2026-11-19 15:05 · 「授权一直卡在已请求授权」的根因：动作队列 _busy 卡死
+
+### 现象
+建图探索里点「授权」一直停在"已请求授权"，`/base_bridge` 的
+`manual_enabled/motion_enabled` 始终 False，桥接日志里**没有任何授权记录**。
+
+### 根因
+`_drain_actions()` 开头 `if self._busy: return`。
+`_busy` 只在各种 ROS future 回调里复位，**只要有一个回调没回来，
+之后所有手机指令（授权、切模式、保存地图）全部静默排队**，
+界面上就是"点了没反应"。
+
+### 修复
+1. `_busy` 超过 30 秒强制解锁并告警。
+2. **nav 类动作（切模式/授权）可以插队**：即使 `_busy` 为 True，
+   也优先从队列里取出 nav 动作立刻处理——它们和 ROS 服务忙不忙无关。
+
+### 已验证
+```
+发送 {action: manual} → 桥接日志：运动门设置 motion=True manual=True mixed=True
+/base_bridge: manual_enabled=True  motion_enabled=True
+```
+
+### 关于"建图一开始只有半圈"
+- 排查结论：`/scan_merged` 360°（720 点，各 30° 扇区均有 28~57 个有效点），
+  slam_toolbox 订阅的确实是 `/scan_merged`，双雷达都在 10 Hz。
+- `/slam_map` 实测：`91x231 @0.05`，已知格 1642（空闲 1567 / 占用 75），
+  包围盒 `x[-4.10,0.10] y[-2.35,4.85]`，机器人位于 x≈0 的东边界。
+- 关键机制：`minimum_travel_distance=0.5`（**冻结参数，不能动**）意味着
+  slam_toolbox **只在车移动 0.5 m 后才加新节点更新地图**；
+  车不动时地图就冻结在"首次处理的那一帧"。
+- 已做缓解：`real_mapping.launch.py` 里 slam_toolbox 用 `TimerAction` 延后 25 s 启动，
+  等双雷达 + scan_merger 稳定后再开始吃扫描。
+- **待现场验证**：授权后推车走 0.5~1 m，地图应立刻补满一圈；
+  如果移动后仍缺一半，再查 scan_merger 的合并掩码（前/后雷达 ±80° 遮罩是否遮错方位）。
+
+## 2026-11-19 15:20 · 「早没充电了还显示充电中」= 只看电流方向分不清自耗和充电
+
+### 实测两组数据（同一块表 JSY-MK-1031）
+| 状态 | 电压 | 电流 | 旧规则判定 |
+| --- | --- | --- | --- |
+| 真在充电（92%） | 24.73~24.76 V | +0.76 A | 充电 ✅ |
+| 拔掉充电器后 | 24.46 V | +0.74 A | **充电 ❌（其实在放电）** |
+
+24.46 V × 0.74 A ≈ **18 W**，正好是主控 + 双雷达 + 底盘的静态自耗。
+也就是说：这块表把"车自己耗电"读成了正电流，**电流方向完全分不开充电和自耗**
+（0.76 与 0.74 差 20 mA，是噪声量级）。上一版"只看电流"的修法因此必然误报。
+
+### 新规则（`battery_modbus._publish`）
+```
+充电 := 电流 ≥ 0.20 A  且 电压 ≥ 24.60 V   （两个条件同时成立）
+退出 := 已经在充电时，电压掉到 24.55 V 以下才退出（50 mV 迟滞）
+兜底 := 其余情况看 10 分钟电压趋势（+0.10 V 上升 → 充电，-0.10 V → 放电）
+```
+门限是 `charge_min_voltage` 参数（默认 **24.60**），可直接改不用改代码。
+
+### 验证
+```
+重启 fwr-battery 后，MQTT state: charging=False, voltage=24.49, current=0.77
+（旧规则下这里是 charging=True）
+```
+充电时的 24.73 V 高于 24.60 门限 → 插上充电器仍会正常判为充电。
+
+### 教训
+电池状态不能只靠单一量：**电流会被负载污染、电压有滞后**，
+必须"电流 + 电压门限 + 趋势兜底"三层，且退出走迟滞。
+
+## 2026-11-19 15:35 · 建图显示加"双雷达就绪门"（用户要求）
+
+> 用户原话：你直接等两个雷达都确定就绪了然后再显示建图不就好了
+
+### 现状盘点（已经有一半了）
+- `scan_merger` 早有 `require_both` + `wait-first-frame`：两路雷达没都出数据时
+  **不发布** `/scan_merged`，所以 slam 收到的第一帧一定是完整 360°（代码在
+  `scan_merger._tick`，注释就写着"第一帧必须已经是完整 360°，否则地图永久缺半圈"）。
+- `mqtt_bridge` 的 state 里本来就带 `lidar_front` / `lidar_rear`
+  （时间戳 2 s 内为 True）。
+
+### 这次补的是界面侧
+`cloud/web/car.html` 新增 `syncLidarGate(state)`：
+- 建图模式下 `lidar_front && lidar_rear` 不成立时：
+  - 进度条显示 **「等待双雷达就绪：前雷达…/✓ 后雷达…/✓」**（带对勾实时更新）
+  - `applyLiveMap()` 直接丢弃地图帧（`if (lidarWait) return;`），不画半圈图
+- 两路都就绪后：`finishProgress('双雷达已就绪，等待 SLAM 地图…')`，
+  随后第一帧地图到达 → 「建图探索已就绪」。
+- 进建图时如果雷达本来就没起来，最长等 **180 秒**，不会像以前那样无限挂"等待 SLAM 地图"。
+
+### 实测
+```
+MQTT state: lidar_front=True  lidar_rear=True  mode=map  charging=False
+```
+（当前双雷达都在 10 Hz，门是开的，页面不会卡）
+
+### 仍未解决
+"车不动时地图只有半圈"= `minimum_travel_distance=0.5`（冻结参数）导致的地图冻结，
+属于 slam_toolbox 的既有行为，雷达就绪门**不能**解决它。
+需要现场推车走 0.5~1 m 验证地图是否补满；若仍缺，下一步抓 `/scan_merged` 的
+rosbag 查合并几何（前/后雷达 ±80° 遮罩方位）。
+
+## 2026-11-19 15:45 · 「已就绪↔等待双雷达」刷屏：单帧抖动没有去抖
+
+### 现象
+上一版雷达门只看当前这一帧状态：`s.lidar_front && s.lidar_rear`。
+状态帧 10 Hz 推送，只要其中一帧标记为不可用（雷达丢一两帧、或 2 s 新鲜度窗口
+刚好卡在边界），界面就会 `就绪 → 等待 → 就绪` 反复。
+
+### 修复
+1. **页面去抖**（`syncLidarGate`）：
+   - 就绪 → 直接清掉计时；
+   - 不就绪 → 先记 `lidarBadSince`，**必须连续 6 秒都不就绪**才重新显示"等待"；
+   - 单帧抖动（<6 s）完全不理。
+2. **车端新鲜度窗口 2 s → 3 s**（`build_state_payload` 的 `lidar_front/lidar_rear`），
+   从源头减少边界抖动。3 s 内没数据仍会如实报 False，不影响真故障检测。
+
+### 验证
+```
+连续采样 20 秒、201 帧 state：不就绪帧 0 个
+```
+（说明现在两路都稳，之前是边界抖动 + 没有去抖放大成了刷屏）
+
+### 教训
+**任何"就绪/未就绪"的界面提示都必须带去抖**，否则状态流一抖就是闪烁；
+去抖要用"持续时间"而不是"连续帧数"（帧率会变）。
+
+## 2026-11-19 15:20 · 建图黑屏根因：双雷达 USB 超时死后 slam 地图卡在 0×0
+
+### 现象
+手机建图探索全黑，diag 频道连刷 `图无图`。
+
+### 证据
+```
+15:10:53 sllidar_node   SL_RESULT_OPERATION_TIMEOUT → process died (255)
+15:10:56 scan_merger    只用 ['b'] 一路雷达（另一路掉线）→ 降级
+15:10:59 sllidar_node_rear  RCLError → died (-6/-9)
+15:10:51 slam_toolbox   Message Filter dropping message ... 'queue is full'
+                        Registering sensor: [Custom Described Lidar]（之后就再没有处理过扫描）
+/slam_map  →  width: 0 height: 0 （手机当然全黑）
+```
+即：建图栈 15:10:25 起，slam 15:10:50（延后 25 s）启动时**正好撞上两只雷达
+集体 USB 断流**，首帧扫描队列被丢空，slam 之后再没初始化地图，一直发 0×0。
+
+### 处理
+1. 重启 `fwr-map`（`systemctl restart`），等 55 s：
+   ```
+   /slam_map → width: 173 height: 193   （8.65 × 9.65 m，基本居中）
+   live_map  → 173x193 @0.05            （手机端确认能收到）
+   ```
+   **这也反证了之前"只建半圈"就是首帧不完整导致的地图冻结**：
+   这次首帧正常，地图直接是接近方形的 173×193。
+2. 新增自愈（`mqtt_bridge._check_slam_map_health`，5 s 定时）：
+   - 建图模式下 `/slam_map` 宽度持续 **90 秒** 为 0 → 自动执行 `mapping_restart`
+   - 冷却 **600 秒**，避免重启风暴
+   - 手机端不需要人肉点"重新建图"
+
+### 遗留
+雷达 USB 断流本身还没根治（`SL_RESULT_OPERATION_TIMEOUT`），
+目前靠 launch 的 respawn + `fwr-lidar-watchdog` 兜底。若频繁复发需要查
+USB 供电/线缆（双雷达同时断 = 更像供电或 hub 问题，不是单个雷达故障）。
+
+## 2026-11-19 15:30 · 黑屏二连：建图栈启动时雷达集体 USB 超时 → slam 首帧失败 → 0×0 永久
+
+### 现场（15:21 这次）
+```
+15:21:14 scan_merger  等待第二路雷达就绪（已有 []）   ← 两路都还没出数据
+15:21:17 sllidar_node        SL_RESULT_OPERATION_TIMEOUT → died(255)
+15:21:17 sllidar_node_rear   RCLError → died(-6)
+15:21:21/26 前雷达 respawn 又连续死两次
+15:21:25 scan_merger  只用 ['b'] 一路 → 降级发布
+15:21:28 scan_merger  两路雷达恢复，回到完整 360°
+15:21:39 slam_toolbox 启动（25 s 延后）→ 但地图一直是 0×0
+15:22:49 桥接健康检查：90 s 0×0 → 自动 mapping_restart
+15:23:17 重启后 slam 正常，/slam_map = 299×189，live_map 5 帧/8 s 正常
+```
+**关键规律**：建图栈刚起时两只雷达几乎同时超时（USB 重新枚举/端口未释放），
+`scan_merger` 先降级、后恢复；slam_toolbox 若在这个窗口吃到首帧，
+会因为没有有效扫描而永远不建节点（`minimum_travel_distance=0.5` 车又不动），
+地图就永久 0×0 → 手机黑屏。
+
+### 改动
+1. slam 启动延后 **25 s → 35 s**，给"雷达 respawn 风暴"留足恢复时间。
+2. 手机端空地图不再纯黑：`render()` 在无地图时画居中提示
+   `等待双雷达就绪…` / `SLAM 正在建图，稍候…`。
+3. 上一轮已加的 `_check_slam_map_health`（90 s 0×0 自动重启建图栈，冷却 600 s）
+   本次实测生效：15:22:49 触发→15:23:17 恢复。
+
+### 当前状态
+```
+fwr-map active
+/slam_map  299x189 @0.05
+live_map   299x189，约 0.6 Hz
+charging=False  lidar_front=True lidar_rear=True
+```
+
+### 待办（根因）
+**雷达 USB 断流没根治**：每次重启建图栈，两只雷达几乎同一秒
+`SL_RESULT_OPERATION_TIMEOUT`/`RCLError`，然后 respawn 2~4 次才稳住。
+看起来是"旧进程还没释放串口 + USB 重新枚举"，建议：
+- 查是否两只雷达共用一个 USB hub（供电/带宽）
+- 在 launch 前加 1~2 s 延时或先 `pkill` 残留 sllidar 再起
+- 观察 `/dev/serial/by-id/` 在重启瞬间是否短暂消失
+
+## 2026-11-19 15:38 · slam 节点间距 0.5 → 0.25（用户批准，冻结参数变更 #1）
+
+### 用户批准
+> 0.25试试
+
+### 改动
+`config/real_slam.yaml`
+```yaml
+minimum_travel_distance: 0.5 → 0.25
+minimum_travel_heading:  0.5 → 0.25
+```
+效果：每 **0.25 m 或 14.3°** 加一个节点（原来 0.5 m / 28.6°），地图粒度翻倍。
+风险档位：0.05/0.1 曾实测 mapper abort；0.25 离崩溃值还有 5 倍余量。
+
+### 验证（已做）
+```
+ros2 param get /slam_toolbox minimum_travel_distance → 0.25  ✅
+ros2 param get /slam_toolbox minimum_travel_heading  → 0.25  ✅
+fwr-map active，slam 15:33:50 启动正常
+/slam_map  327x165 @0.05（重启后已建出地图）
+live_map   327x165，约 0.75 Hz 正常推送
+静止 6 秒两次采样仍为 327x165（符合预期：不动不加节点）
+```
+CPU：`async_slam_toolbox_node` 约 **60% 单核**（静止状态，2 Hz 相关匹配的固有开销，
+与节点间距无关；没有 0.5 时的同期基线，需在走动时对比观察）。
+
+### 回滚
+```bash
+# 改回 0.5 / 0.5
+sed -i 's/^    minimum_travel_distance: 0.25/    minimum_travel_distance: 0.5/;s/^    minimum_travel_heading: 0.25/    minimum_travel_heading: 0.5/' \
+  ros2_ws/src/fwr_bringup/config/real_slam.yaml
+cd ros2_ws && colcon build --packages-select fwr_bringup --symlink-install && sudo -n systemctl restart fwr-map
+```
+备份：`/tmp/real_slam.yaml.bak`
+
+### 待现场验证
+慢速走 10~15 米 + 转两圈：
+1. 地图是否比之前更连续（0.25 一跳 vs 0.5 一跳）
+2. slam 进程 CPU 是否长期 >85%
+3. 有无 `Mapper FATAL ERROR` / 节点死亡
+4. 建图完成后保存地图，确认 `.pgm` 正常
+
+任一异常 → 立即按上面命令回滚。
+
+## 2026-11-19 15:42 · 「授权一直已请求授权」复发：桥接 QoS1 订阅静默失效
+
+### 关键证据
+1. 从云端直接发 `{"action":"manual"}` → 桥接**日志里什么都没有**（连"收到"都没有）。
+2. 同一时刻往 `robot/car-001/cmd` 发非法内容 → 桥接**立刻**打
+   `收到非法控制指令，已丢弃`（QoS0，正常）。
+3. 在机器人上用独立客户端订阅 `robot/car-001/nav` → **能收到**消息
+   （说明 broker 到车端的链路没问题，是桥接自己的订阅没了）。
+4. `lmap_plain`（QoS1）也在正常收（页面每 5 s 的格式协商有日志）。
+
+### 结论
+桥接的 **QoS1 订阅会静默失效**：`nav / goal / power / lmap_plain` 中
+nav（授权、切模式、保存地图、重新定位全靠它）收不到了，而 QoS0 的 `cmd`
+仍然工作 —— 于是表现为"摇杆能动，但点授权/切模式完全没反应"。
+之前看到的 `_busy` 卡队列是另一个独立问题，两者叠加让人误判。
+
+### 修复
+1. **重启 `fwr-mqtt-bridge`**（立即恢复，实测 manual 立刻生效）。
+2. 新增 `收到 nav 动作: <action>` 日志 —— 以后再出现能一眼分清
+   "消息没到" 还是 "队列卡住"。
+3. 新增 `_on_mqtt_subscribe`：SUBACK 返回码 ≥128 时打 ERROR
+   （话题被拒会表现为"某类指令永远收不到"）。
+4. 新增 `_resubscribe()`，在 30 s 的 `_ensure_connected` 定时器里
+   **幂等重订阅全部上行话题**，静默掉订阅 30 s 内自愈。
+
+### 验证
+```
+收到 nav 动作: manual
+运动门设置 motion=True manual=True mixed=True
+/base_bridge manual_enabled=True
+state: mode=map manual=True charging=False lidar_front=True lidar_rear=True
+fwr-map active / fwr-nav inactive
+```
+
+### 教训
+**MQTT 订阅失效不会报错**。凡是"某个手机按钮没反应"，
+第一步应该看车端有没有"收到 xxx"日志，而不是先怀疑队列或业务逻辑。
+
+## 2026-11-19 15:52 · 前雷达换屏蔽线后**完全无数据**（换线效果 = 变差）
+
+### 实测对比（换线时间点 15:46:47，15:47:34 重新枚举为 ttyUSB3）
+```
+15:46:47  cp210x ttyUSB3: device disconnected          ← 拔线
+15:47:34  usb 3-4: CP2102N 重新枚举（序列号 e00a...5431f1 不变）
+15:47:34  之后前雷达进程启动 16 次，每次都是：
+          SLLidar running ... → 2 秒后 SL_RESULT_OPERATION_TIMEOUT → died(255)
+          → launch respawn → 再超时（无限循环）
+当前 /scan：**没有数据**（ros2 topic hz 无输出）
+后雷达：/scan_rear 10 Hz 正常，0 次超时
+```
+USB 层没有 `-19/-71` 之类错误、也没有 over-current —— 适配器本身正常，
+**是串口那头（雷达侧）没有数据回来**，典型原因：
+1. 雷达端 4 针端子没插到底 / 插反
+2. 新线线阻大 → 雷达 5 V 不足 → 电机没转（所以 SDK 等不到首包）
+3. 新线只通数据不通电，或屏蔽层短接造成干扰
+
+### 待用户现场确认
+- 雷达本体是否在转（不转就是供电）
+- 换回旧线做 A/B：旧线能出数据 → 新线问题；旧线也不行 → 雷达/端子问题
+- 修线期间建议先 `systemctl stop fwr-map`，否则 watchdog（`--stale 2.5`）
+  每 15 秒杀一次进程，日志会被刷爆
+
+### 磁环问题（用户提问）
+两端各加一个**可以**，但要：贴紧接头 3~5 cm、1 圈、用适合线径的扣式磁环；
+屏蔽层**单端接地**（一般接主机端），两端都接会形成地环流反而更糟。
+磁环只能抑制高频共模噪声，**治不了断线/供电不足**。
+
+## 2026-11-19 16:00 · 前雷达复测：重新插好后已恢复，与后雷达基本持平
+
+### 复测结果（换线/重插之后）
+```
+/scan         10.46 Hz      /scan_rear   9.86 Hz     /scan_merged  10.00 Hz
+前雷达进程已连续运行 577 s（约 9.6 分钟未再重启）
+```
+
+单帧质量对比（同一时刻各取一帧，720 点）：
+
+| 项目 | 前雷达 `/scan` | 后雷达 `/scan_rear` |
+| --- | --- | --- |
+| 有效点 | 560 / 720 = **78%** | 561 / 720 = **78%** |
+| 最小距离 | 0.41 m | 0.43 m |
+| 中位距离 | 2.41 m | 2.66 m |
+| 最大距离 | 14.06 m | 14.28 m |
+| 车身自击(<0.2 m) | **0 个** | **0 个** |
+
+近 10 分钟稳定性：
+
+| 项目 | 前雷达 | 后雷达 |
+| --- | --- | --- |
+| `SL_RESULT_OPERATION_TIMEOUT` | **4 次** | **0 次** |
+| 进程启动次数 | 5 次 | 3 次 |
+| watchdog 杀进程 | 2 次 | 1 次 |
+
+### 结论
+- 换线之后一路完全无数据的状态（15:47~15:50）**已恢复**，现在两路都正常出图。
+- 点云质量两者**没有明显差异**（78% 有效、无车身自击、量程一致）。
+- 稳定性上前雷达仍略差：10 分钟内超时 4 次（后雷达 0 次），有过 2 次 watchdog 强杀。
+  说明**屏蔽线还没把它做到和后雷达一样稳**，但已从"完全不可用"回到"基本可用"。
+
+### 下一步建议
+1. 继续观察 30~60 分钟，记下前雷达超时的时刻（是否与某个动作/位置相关）
+2. 磁环按"两端各 1 个、贴紧接头、1 圈"加；屏蔽层确认**单端接地**
+3. 若超时仍在，交换两只雷达的线/口做 A/B，把"雷达本体"和"线材/端口"区分开
+
+## 2026-11-19 16:10 · 加磁环后复测：两路雷达 12 分钟零超时（前雷达问题基本解决）
+
+### 硬件现状
+| 雷达 | 线材 | 磁环 |
+| --- | --- | --- |
+| 前雷达 | **屏蔽线**（新换） | USB/适配器端 1 个（16:05 加） |
+| 后雷达 | 普通 USB 线 | USB 端 1 个（此前已有） |
+
+### 复测数据（16:10）
+```
+/scan        10.47 Hz      /scan_rear    10.02 Hz     /scan_merged  10.005 Hz
+
+最近 12 分钟：
+  前雷达 SL_RESULT_OPERATION_TIMEOUT : 0 次
+  后雷达 SL_RESULT_OPERATION_TIMEOUT : 0 次
+  前雷达 进程重启 : 0 次
+  后雷达 进程重启 : 0 次
+两路进程均已连续运行 17 分钟
+
+超时时间分布（近 20 分钟）：
+  15:48:4x~15:50:3x  前雷达集中超时（换线/重插过程中，共 16 次）
+  15:50 之后         0 次
+`watchdog` 近 10 分钟无任何强杀动作
+```
+
+### 结论
+- 15:47 换线后那段"完全无数据 + respawn 风暴"是**端子没插好**造成的，重插后恢复。
+- 加磁环后前雷达与后雷达**表现持平**：12 分钟 0 超时、0 重启，合并扫描稳定 10 Hz。
+- 屏蔽线 + 磁环 vs 普通线 + 磁环：目前**没有可测出的差异**，两者都干净。
+  之前"屏蔽线更差（7 次超时）"是统计口径错了——那些超时全在 15:48~15:50 的换线过程中。
+
+### 遗留观察
+- `--stale 2.5` 的看门狗阈值偏激进（2.5 s 无数据就杀进程重启），
+  偶发单次抖动会放大成重启风暴；目前未改，先观察。
+- 建议再跑 30~60 分钟确认长时间稳定，再做一次建图+导航实测。
+
+## 2026-11-19 16:15 · 手机端地图编辑器：「保存地图」→「编辑地图」
+
+### 需求（用户）
+> 直接把保存地图按键改为编辑地图，点击之后打开编辑界面，里面有保存地图按键
+
+### 页面（`cloud/web/car.html`）
+- 建图工具栏按钮 `mapSaveBtn` 文案改为 **编辑地图**；点击打开全屏编辑器：
+  - 顶部：`编辑地图 · 宽×高 @ 分辨率` + 关闭
+  - 画布：地图按比例铺满，**单指涂抹、双指缩放/平移**
+  - 工具栏：**橡皮**（涂成未知 205）/ **画墙**（涂成占用 0）/ **撤销**（8 步）/
+    **保存地图**（编辑完再存）
+- 保存时把栅格用 `CompressionStream('gzip')` 压缩 + base64，
+  通过 WS 发 `{type:'map_edit', name, width, height, resolution, origin, pgm, gz}`。
+
+### 云端（`cloud/api/app.py`）
+- WS 新增 `type == 'map_edit'` 分支：校验宽高/数据后转发到 MQTT
+  `robot/<device>/map_edit`（不落盘、不解析，只做搬运）。
+
+### 车端（`mqtt_bridge.py`）
+- 新增订阅 `map_edit`，`_on_map_edit()`：
+  1. base64 + gunzip 解出栅格字节（0 占用 / 205 未知 / 254 空闲）
+  2. 校验 `len(raw) == w*h`，不匹配直接回报失败（防止半个图写进去）
+  3. 写 `maps/<name>.pgm`（补 `P5\n<w> <h>\n255\n` 头）+ `<name>.yaml`
+     （image/resolution/origin/negate/occupied_thresh/free_thresh）
+  4. 更新 `~/.config/fwr/last_navigation_map` 指针、刷新地图列表
+  5. 回报 `goal_result` 的 `action='map_edit'`，页面据此 toast + 关编辑器
+
+### 已验证（端到端，用 8×8 测试图）
+```
+发送 map_edit（gzip+base64，中间一行涂成墙）
+→ 车端日志：编辑地图已保存: zz_edittest.pgm 8x8 @0.050m
+→ 文件：zz_edittest.pgm 75 字节，头 `P5 8 8 255`，内容 205/0 正确
+→ yaml：image/resolution/origin 正确
+→ 指针写入后已回滚为 1A_map_door2.yaml，测试文件已删除
+```
+
+### 注意
+- 保存的是**导航地图**（pgm+yaml），可以用「选择地图」选它跑导航；
+  **不保存 posegraph**（`.posegraph/.data`），所以不能用这张图"继续建图"。
+  需要继续建图的场景仍应使用原来的 `mapping_save` 流程（目前页面入口已移除）。
+- 编辑器依赖 `mapImg` 画布；没有实时地图时会提示"请先建图"。
+
+## 2026-11-19 16:30 · 编辑器手势修正：双指缩放/平移改为绝对锚点 + 脏矩形重绘
+
+### 用户反馈
+> 双指缩放和平移操作有点问题
+
+### 原实现的三个毛病
+1. **逐帧累加**（`ox -= 中点位移`、`scale = 上帧 * k`）→ 误差累积，缩放久了地图会飘走
+2. **缩放没有锚点**：以画布左上角为基准缩放，指尖下的位置会跑，观感"地图乱跳"
+3. **每画一笔重建整张 ImageData**（928×605 = 56 万像素）→ 大图上涂抹卡顿，
+   触碰后拖动会有明显延迟，双指手势也会被拖慢
+
+### 现在的做法
+1. **绝对换算**：手势开始时记录 `(scale, ox, oy, 起点中点, 起点距离)`，
+   之后每帧用"起点中点下的地图内容点"重新解算
+   `ox = 当前中点 - 内容点 × 新scale` —— 缩放围绕**指尖中点**，且不会累积误差。
+2. **缩放范围夹取** 0.25 ~ 80 倍像素/格；**平移夹取**保证地图至少一角留在屏幕内
+   （`clampEditView`），不会拖丢。
+3. **脏矩形重绘**：`editSetCell()` 只改像素并累计 bbox，`flushEdit()` 一次
+   `putImageData(img, 0, 0, x0, y0, w, h)`，大图涂抹不再整帧重建。
+4. **笔画插值**：`paintLineTo()` 按 0.7 格步长补点，快速划动不再断点。
+5. 双指抬起剩一指时**不接管绘制**，必须重新按下才画（避免抬手划一道）。
+6. 去掉 `pointerleave` 监听（`setPointerCapture` 已覆盖边界情况，否则贴边画会被误判结束）。
+
+### 未验证
+浏览器端的实际手感需要用户实测（我无法在手机上操作）。刷新
+`http://8.163.69.109/car/?v=17` 后验证：
+- 双指缩放是否围绕指尖、不漂
+- 单指涂抹是否跟手、无断点
+- 拖到边上是否还有地图可见
+
+## 2026-11-19 16:42 · 编辑器新增：笔画粗细调节 + 两点直线（画/擦）
+
+### 需求（用户）
+> 添加笔画的宽度调节，还有添加功能，连点按键，之后选择两个点自动生成线或者自动擦除这两点之间
+
+### 改动（`cloud/web/car.html`，仅页面）
+1. **粗细滑块**：工具栏上方新增一行
+   `粗细 [1────●────24] 6 格 0.30m` + `直线` 按钮。
+   滑块值直接写 `edit.brush`（单位=栅格，1 格 = 分辨率 0.05 m），
+   右侧实时显示"格数 + 米"，避免用户对像素/米没概念。
+2. **直线工具**（`edLineBtn`）：
+   - 开启后**单指不再涂抹**，点一下选第一点（画布上画蓝色十字 + 圆环标记）
+   - 再点第二点 → 按**当前颜色**自动连成直线：
+     - 当前是「画墙」→ 生成墙线（0 占用）
+     - 当前是「橡皮」→ 擦除两点之间的区域（205 未知）
+   - 线宽 = 当前粗细滑块值；沿线段每 0.5 格插值一次，保证连续
+   - 每画一条线**压一次撤销**（可整条回退）
+3. 切「橡皮/画墙」或开始双指缩放时，会清掉未完成的待选点，避免误连。
+4. `#mapEditor` 去掉整层的 `touch-action:none`（只保留画布上的），
+   否则 iOS 上粗细滑块的拖动会被吞掉；改成 `user-select:none`。
+
+### 已验证
+- `node --check` 通过（提取 `<script>` 后校验）
+- 已部署到 `/opt/jc/web/car.html`（`?v=18` 起生效）
+
+### 未验证（需用户实测）
+- 滑块在手机上是否顺滑（iOS range 的 pointer 行为）
+- 直线在斜向长距离（300+ 格）时是否连续无锯齿空缺
+- 擦除线是否会误伤相邻墙面（取决于粗细值，默认 6 格 = 0.3 m）
+
+## 2026-11-19 16:52 · 编辑器三项修正：保存弹键盘重命名 / 双指误画 / 缩放与旋转按钮
+
+### 用户反馈
+1. 保存地图时**没弹键盘**，不能重命名
+2. **两指缩放时第一根手指被当成单指涂抹**，留下一个点
+3. 要加**加号/减号**和**90° 旋转**按钮
+
+### 修正
+**① 保存前重命名（弹键盘）**
+- `saveEditedMap()` 先 `await askOpen('保存地图', ...)`，默认名 `map_MMDDHHMM`，
+  取消则留在编辑器继续改，确认后清洗非法字符（只留 `\w-`，≤40 字）再发送。
+- `askOpen()` 的 `focus()` 从 `setTimeout(50)` 改为**同步调用**
+  （iOS 只在用户手势的同一任务里 focus 才弹键盘），并 `setSelectionRange` 全选；
+  仍失败时用 `setTimeout(0)` 兜底。
+- `#askDialog` 的 z-index 31 → **80**（必须压过编辑器层的 60）。
+- 输入框加 `enterkeyhint="done"` + 回车即确定。
+
+**② 双指缩放不再留点**
+- 单指按下后**延迟 110 ms 才落笔**；这期间若第二根手指按下 → 判定为缩放，一笔都不画。
+- 但如果移动超过 12 px 或按住超过 110 ms，则立即落笔（不牺牲正常涂抹手感）。
+- 兜底：若第二根手指在**落笔后 400 ms 内**到达，自动 `revertEarlyStroke()`
+  回退这一笔（恢复撤销快照 + 重绘），并提示"已取消缩放时误画的一笔"。
+- 快速轻点（<110 ms 且没移动）仍然按"点一下涂抹"处理，不会点不出东西。
+
+**③ 缩放 + 旋转按钮**
+- 顶栏新增 `－` `＋` `⟳90°` 三个按钮，紧挨"关闭"。
+- 视图模型升级为 `screen = R(rot)·(cell·scale) + (ox,oy)`：
+  - `cellToScreen` / `screenToCell` 支持任意角度反算
+  - `+/-` 以**画布中心**为锚点缩放（1/1.4、1.4 倍，范围 0.25~80 px/格）
+  - `⟳90°` 每次 +90°，转完自动重新居中（`refitKeepingScale` 保持缩放）
+  - 包围盒（`editBBox`）按旋转计算，`clampEditView` 和 `fitEditView` 都改成基于该包围盒
+- 平移/缩放/落笔坐标全部走反算，旋转后仍能正确涂抹。
+
+### 已验证
+- `node --check` 通过；旋转矩阵在 node 里做数值自检：
+  `(0,0)/(10,5)/(39,19)/(20,10)` 经 cell→screen→cell 往返误差 0；90° 时 bbox = (minx −40, miny 0, 40×80) ✔
+- 已部署 `/opt/jc/web/car.html`
+
+### 未验证（需用户实测）
+- iOS 上是否真的弹键盘（同步 focus 是关键，但 Safari 版本差异大）
+- 90° 旋转后涂抹位置是否仍然跟手
+- 延迟 110 ms 后涂抹手感是否可接受（觉得"画不出来"就把阈值调小）
+
+## 2026-11-19 17:00 · 编辑器：屏蔽"左缘右滑返回"手势 + 顶栏溢出
+
+### 现象（用户截图）
+在编辑地图界面里单指右滑，页面被浏览器当成"返回"，出现 iOS/夸克 的
+左缘返回动画（左侧露出上一屏快照 + 绿色返回箭头），编辑界面被推走。
+
+### 根因
+这是**系统级手势**（WebKit 的 swipe-back / 夸克的内置返回手势），
+发生在页面 JS 之外的合成层，`preventDefault()`、`touch-action:none` 都拦不住。
+
+### 处理（三件事）
+1. **历史哨兵**：打开编辑器时 `history.pushState({fwrEditor:1})`，
+   把当前页面垫在一条"壳记录"后面。手势触发时只会弹出这条壳。
+2. **popstate 兜底**：如果返回真的发生了，`popstate` 里立刻 `pushState` 补回，
+   并提示"已拦截浏览器的左缘返回手势（从屏幕中间开始滑动即可）"，编辑器不关闭。
+3. **左缘 24 px 不落笔**：`startStrokeAt()` 里如果触点距画布左边缘 <24 px 就直接放弃，
+   避免"右滑想返回"时顺手在图上划出一道。
+
+另外把顶栏收紧（标题单行省略、按钮 padding 减小），避免标题换行把
+`⟳90°`/`关闭` 挤出屏幕。
+
+### 已验证
+- `node --check` 通过；已部署 `/opt/jc/web/car.html`
+
+### 未验证 / 说明
+- iOS Safari 与夸克的返回手势**动画**仍会出现一瞬（系统动画无法阻止），
+  但现在页面不会被带走、编辑器状态自动恢复。
+- **最彻底的办法是"添加到主屏幕"以 standalone 模式运行**：没有浏览器工具栏，
+  也就没有左缘返回手势。页头已有 `apple-mobile-web-app-capable=yes`。
+
+## 2026-11-19 17:10 · 加到主屏幕（PWA）打通：manifest MIME、图标、安全区
+
+### 背景
+仓库里 2026-11-16 就已经有 PWA 文件（`manifest.webmanifest`/`sw.js`/三张图标），
+页面也已引用，但**一直没真正生效**，原因有两个：
+
+1. **nginx 没给 `.webmanifest` 配 MIME**，返回 `application/octet-stream`
+   → Chrome/Android **直接忽略 manifest**（iOS 用 apple meta 不受影响，所以"看着能用"）。
+2. **没有安全区适配**：`standalone` 模式下 `black-translucent` 会让内容顶到刘海下，
+   底部被 Home 指示条压住。页面里 `env(safe-area-inset-*)` 一处都没用。
+
+### 改动
+**nginx（`/etc/nginx/nginx.conf`，备份 `~/nginx.conf.bak.*`）**
+```
+include /etc/nginx/mime.types;
+types { application/manifest+json webmanifest; }   # 新增
+```
+`nginx -t` 通过后 reload。验证：
+```
+HTTP  /car/manifest.webmanifest → Content-Type: application/manifest+json
+HTTPS /car/manifest.webmanifest → Content-Type: application/manifest+json
+```
+
+**图标（`cloud/web/*.png`）**
+三张图都有透明通道（alpha 0~255），iOS 会把透明区渲染成**黑底**。
+已合成到 `#0b0f14` 背景并转成 RGB：180×180 / 192×192 / 512×512。
+
+**页面（`cloud/web/car.html`）**
+- `body` 加 `padding: env(safe-area-inset-top/right/bottom/left)`
+- `.edTop` 上边距 `calc(8px + env(safe-area-inset-top))`
+- `.edHint` 下边距 `calc(12px + env(safe-area-inset-bottom))`
+（普通浏览器里 `env()` 取 0，不影响现有布局）
+
+### 已验证
+- `node --check` 通过；页面已部署 `/opt/jc/web/car.html`
+- `curl` 校验两种协议下的 Content-Type 与 manifest 内容
+- 图标尺寸/模式：180/192/512，RGB
+
+### 现状与限制
+- **iOS**：用 Safari「分享 → 添加到主屏幕」即可，靠
+  `apple-mobile-web-app-capable=yes` 进入 standalone（全屏、无浏览器栏、
+  无左缘返回手势）。HTTP 也能用。
+- **Android Chrome**：需要 HTTPS + Service Worker 才会出现"安装应用"；
+  当前 `https://8.163.69.109:8443` 的证书 **2026-10-15 已过期**
+  （`jccontrol.xyz`，certbot 在机器上，`certbot renew --dry-run` 卡住没跑通），
+  所以 Android 目前只能"添加到主屏幕"建快捷方式。
+- `sw.js` 只在 `location.protocol === 'https:'` 时注册，HTTP 下不注册（无离线缓存）。
+
+### 下一步（待用户决定）
+续期 `jccontrol.xyz` 证书（certbot），然后走 HTTPS 即可获得完整 PWA 安装 + 离线外壳。
+
+## 2026-11-19 17:20 · 界面四项修正 + 证书续期受阻（阿里云 ICP 拦截）
+
+### 用户反馈（一次四条）
+1. 登录时偶发**误报设备离线**
+2. 手动模式**摇杆/按键往下放，急停贴底**
+3. 删掉**「发送一条测试指令」**按钮
+4. 切导航模式**没弹确认**，且**仍显示建图时的地图**
+
+### 界面改动（`cloud/web/car.html`）
+1. **离线误报**：新增 `lastStateAt`（每条 state 更新）+ `pageBootAt`。
+   `offlineTick()` 现在要求：登录后 **25 s 宽限**、且 **20 s 内没收到 state** 才可能判离线；
+   WS 断了但数据还新（8 s 内）也再等。指标徽标仍实时反映 online 字段。
+2. **排版**：`.joyWrap` 由居中改 `align-items:flex-end`（摇杆下移），
+   `#stop` 改 `margin: auto 12px calc(10px + env(safe-area-inset-bottom))` 贴到最底。
+3. **删测试按钮**：`#testBtn` 的 HTML/CSS/JS 三处全删（`grep testBtn` = 0）。
+4. **模式切换**：
+   - `crossing` 判定改为看**车端/界面的实际栈**（`robotMode`/`lastMode`/`lastAppliedMode`），
+     不再只看 `lastAppliedMode` → 车端在建图栈时选导航一定会弹确认。
+   - 新增 `userModeChangeAt`：用户改下拉框后 **8 秒内对账逻辑让路**，
+     避免 `modeReconcileTick` 抢先把界面切走（弹窗还没出来模式就变了）。
+   - `applyMode` 的建图→导航分支条件加上 `robotMode === 'map'`，
+     保证车端还在建图栈时也会发 `mapping_stop`。
+   - 清 `mapImg` 后**立即重绘**并显示"正在加载导航地图…"，
+     修复"切了导航还显示建图画面"（原来只是把 canvas 留在上一帧）。
+
+### 证书续期：失败，原因是阿里云 ICP 备案拦截
+- 现象：Let's Encrypt HTTP-01 校验返回 **403**，响应体是
+  `Non-compliance ICP Filing`（阿里云对**未备案域名**的 80 端口拦截页）。
+- 本机 `curl -H "Host: jccontrol.xyz"` 返回 200，**外网访问同一路径返回 403** →
+  证明拦截发生在云厂商边缘，不在 nginx。
+- 443 从外网直连（`curl -sk --resolve`）返回 **000（连接被断）**，HTTPS 同样被拦。
+- 已给 nginx 的 80 server 加了 `location ^~ /.well-known/acme-challenge/ { root /var/www/certbot; }`
+  （备份 `/root/jccontrol.xyz.bak.*`），路径本身是对的，但**域名没备案就出不去**。
+- `certbot renew --dry-run` 之前"卡住"其实是 certbot 的**随机延迟 180~200 s**，
+  加 `--no-random-sleep-on-renew` 才能立刻跑。
+
+### 结论
+- **iOS `添加到主屏幕` 不受影响**（走 `apple-mobile-web-app-capable`，用 IP + HTTP 即可）。
+- **Android 完整"安装应用"需要 HTTPS**，而 HTTPS 域名被 ICP 拦截 →
+  需要备案（或换已备案域名）才能做真 PWA。
+
+## 2026-11-19 17:00 · 「导航模式一直重新定位」：两个真 bug
+
+### 现象
+手机切到导航模式后进度条一直转，车端日志每 12 秒一条 `收到 nav 动作: relocalize`，
+但 `fwr-nav` 一直是 `failed`，导航栈根本没起来。
+
+### 根因 1：动作队列被 relocalize 饿死（`mqtt_bridge.py`）
+旧逻辑里 `relocalize` 遇到 `/localization/reseed` 未就绪就 `appendleft` 重排：
+```
+nav 动作队列: [relocalize(重排)..., mapping_stop]   ← 永远轮不到 mapping_stop
+```
+于是 `mapping_stop`（= 停建图栈 → 起导航栈）被无限推迟 → 导航栈永远不启动
+→ 服务永远不就绪 → 手机永远"重新定位"。
+
+修复：
+1. `_handle_nav` 对 `relocalize` **去重**（队列里只留一条）
+2. `_drain_actions` 的 busy 插队改为**按优先级**：
+   `mapping_start/stop/restart`（0）> 其它 nav（1）> `relocalize/stop/resume`（2）
+3. `relocalize` 服务未就绪时**直接丢弃**并回一条失败结果（不再重排）
+4. 开始切栈时清掉排队中的 `relocalize/stop/resume`（旧栈上的请求毫无意义）
+
+页面侧（`car.html`）：`startNavReadyWatch` 只在 `robotMode === 'nav'` 时才发
+`relocalize`，否则只更新"导航栈启动中"文案；收到失败结果也不收进度条。
+
+### 根因 2：清除区掩码缓存不随地图更新（`auto_initial_pose.py`）
+修好队列后导航栈起来了，但 reseed 报：
+`匹配失败: index 390 is out of bounds for axis 0 with size 235`
+
+原因：`self._mask_cache` **只在第一次收到 /map 时计算**，换地图（尺寸不同）后
+仍拿旧掩码去索引新地图。实测上一张是 480×235（手机刚编辑保存的 `1.pgm`），
+新地图是 928×605，`valid_mask[iy=390]` 直接越界。
+
+修复：
+1. `_on_map()` 里尺寸/分辨率变化 → `_mask_cache = None`
+2. `_clearance()` 取用前校验 `mask.shape == (height, width)`，不符就重算
+3. `auto_seed_core.refine_pose._ok()` 加形状兜底：形状不符直接返回 False，不崩
+
+### 已验证（实机）
+```
+fwr-map inactive / fwr-nav active
+/map: 480×235 @0.05 origin(-13.37,-8.25)   ← 手机刚编辑保存的 1.pgm
+relocalize → 定位成功: (0.38, -1.12, -139°) 残差 0.048 m 贴墙 78%
+state: mode=nav x=0.375 y=-1.127 yaw=-2.423
+无 IndexError、无"匹配失败"
+```
+
+### 说明
+- `ready` 字段仍为 False（来自 `/base/ready`，本任务不影响导航使用）
+- 手机端"编辑地图 → 保存"的图**已经生效为导航地图**（`1.yaml`）
+
+## 2026-11-19 17:05 · 登录页/产品页不显示进度条
+
+`#switchBar` 是 `position: fixed; z-index: 25`，而登录页 `#login` 是 `z-index: 20`，
+所以绿条会浮在登录页上面。
+
+`placeProgressBar()` 新增两个可见性条件：登录页显示中、产品或页显示中 → 直接
+`display: none`（进度文字 `#switchText` 一起隐藏），并在 `showLogin()` 里立刻重算。
+
+## 2026-11-19 17:15 · 「导航到第一个航点中途卡一下」根因：碰撞监控启动期 TF 竞态
+
+### 现象
+用户实车：从起点走向第 1 个航点途中，车停住约 2 分钟才继续（17:01:00 到达）。
+
+### 时间线（`journalctl -u fwr-nav`）
+```
+16:58:27  collision_monitor_forward 激活（栈启动后 25 s）
+16:58:27  ERROR getTransform: laser_front->base_footprint
+          requested 707.319927 / earliest 708.319927   ← 差 1.00 s
+16:58:48  WARN  failed to send response to /collision_monitor_forward/get_state (timeout)
+          → 节点执行器卡死，之后不再发布 /cmd_vel_auto_forward_filtered
+16:58:59  看门狗判"输出静默" → deactivate
+          → lifecycle_manager: Have not received a heartbeat
+          → CRITICAL FAILURE: SERVER collision_monitor_forward IS DOWN
+          → Resetting managed nodes（监控被打回 unconfigured）
+17:00:43  一级（deactivate/activate）无效
+17:00:51  二级（cleanup/configure/activate）无效 → 三级杀进程
+17:00:56  进程 respawn，重新 configure
+17:01:00  controller_server: Reached the goal   ← 车才继续走
+```
+**车速指令链路**：`/cmd_vel_auto_unchecked → 碰撞监控 → /cmd_vel_auto_forward_filtered
+→ 选择器 → /cmd_vel_auto_safe → base_bridge`。
+监控静默 = 选择器收不到任何指令 = 输出 0 = **车原地停住**，但 Nav2 侧看着"还在导航"。
+
+### 根因
+1. **激活太早**：nav 栈启动后 25 s 激活，而 `base_footprint→odom` 的 TF 到
+   26 s 才出现（这次恰好差 1 s）→ 监控第一次查变换就抛 extrapolation，
+   然后卡在首次查询里（Nav2 collision_monitor 已知卡死问题）。
+2. **看门狗救不回来**：卡死时节点不再处理 lifecycle 服务，deactivate/activate
+   必然失败；而且在"已 bonded"状态下 deactivate 会让 lifecycle_manager 判
+   bond 丢失 → CRITICAL FAILURE 重置节点 → 再 activate 更不可能成功。
+   只能靠"换进程"，但旧逻辑要先走完一级/二级（约 2 分钟）。
+
+### 已改（文件已同步车端，**需重启 fwr-nav 才生效**）
+1. `launch/real_navigation.launch.py`：碰撞监控激活延迟 **25 s → 40 s**
+2. `tools/chain_watchdog.py`：启动期无输出时**跳过 deactivate/activate**，
+   直接 `_kill_safety_processes()`（SIGKILL 监控 + lifecycle_manager，
+   靠 launch respawn 重拉）→ 恢复时间从 ~2 分钟降到 ~6 秒
+
+### 未验证
+- 两处改动都要重启 `fwr-nav` 才加载；**尚未在实车导航中复测**。
+- 若 40 s 仍早于 TF，看门狗现在会在 6 秒内重拉进程兜底。
+
+## 2026-11-20 09:05 · 碰撞监控排查续（昨晚改动 + 今早结论）
+
+### 昨晚（11-19 17:10~17:35）改了这些
+| 文件 | 改动 | 状态 |
+| --- | --- | --- |
+| `launch/real_navigation.launch.py` | 碰撞监控激活 25 s → **40 s**（manager autostart 保持 True） | 已同步车端 |
+| `tools/chain_watchdog.py` | ①跟 lifecycle `transition_event` 判状态，未 active 不判故障 ②启动宽限 45 → **70 s** ③静默判定 2 s → **10 s** ④静默时**不再 deactivate**（会丢 bond → CRITICAL FAILURE），改为杀进程让 launch respawn ⑤新增 `_revive()`：按状态 configure → 等 12 s → activate → 再等 8 s 判定 | 已同步车端 |
+
+### 关键教训（别再试的方向）
+- **`deactivate/activate` 一定会把 bond 弄丢**：lifecycle_manager 报
+  `CRITICAL FAILURE: SERVER ... IS DOWN` 后把节点 reset 成 unconfigured，
+  之后 activate 全失败 → 车停着不动。17:11 / 17:13 / 17:16 三次复现。
+- **manager 的 autostart 是 configure→activate 同一秒内完成**，
+  监控 tf 缓冲还没有 1 秒前的数据 → `extrapolation` → 首次激活即静默。
+  改 `autostart: False` + CLI 分两步做**会和 manager 抢**，表现更差，已回退。
+- 手动 `configure → 12 s → activate` 曾经成功过一次（输出 20 Hz），
+  但在 manager 未参与时不可复现，**不能作为方案**。
+
+### 11-20 早上 08:55 实测状态
+```
+fwr-nav active（08:54 重启过，机器整机重启 uptime 4 min）
+/collision_monitor_forward: active [3]
+/cmd_vel_auto_forward_filtered: 20 Hz（注入 0.05 m/s 测试指令后）
+  ↑ 但内容恒为 0：auto_command_gate 也在以 20 Hz 发零速，
+    与测试指令交错 → 采样到的是 gate 的零速，**不能据此判断监控卡死**
+/scan: 10 Hz，车头 ±28° 内无障碍点
+motion_enabled=False / manual_enabled=False（未动过）
+```
+
+### 结论 / 下一步
+- 安全链本身是通的（监控在 20 Hz 转发），昨晚那次卡死是**启动期 TF 竞态 + 看门狗救错方式**。
+- 现在的兜底：启动期不误判；真静默时杀进程重拉（约 20 s 恢复，不再是 2 分钟）。
+- **需要在实车上跑一次导航复测**：若再卡，记录时间点，`journalctl -u fwr-nav` 里
+  看 `chain_watchdog` 是"输出静默"还是"假活"，以及有没有 `getTransform` 报错。
+
+## 2026-11-20 09:10 · 开机后手机「授权一直请求中」根因 + 开机可用性
+
+### 现象
+重启主控后，手机手动模式点「授权」一直"请求中"，运动门始终 false。
+
+### 根因：`_set_gate` 把 mqtt_bridge 的执行器饿死（自锁）
+旧代码：
+```python
+if not self._param_client.wait_for_service(timeout_sec=0.3):
+    self._pending.appendleft(('nav', {'action': 'manual'}))   # 重排
+    return
+```
+- 开机时 `base_bridge` 还没起来（它在**导航栈**里，要 60~90 秒）
+- 0.1 s 的 drain 每轮阻塞 0.3 s + 重排 → 执行器 100% 占满
+- `wait_for_service` 依赖图事件，被自己的阻塞卡住 → **永远返回 False** → 自锁
+- 日志表现：`等待 /base_bridge 参数服务，授权稍后重试` 每 3 秒一条，无限重复
+- 而 `base_bridge` 服务其实 09:06 就已经在 ROS 图里（`ros2 service list`
+  能看到 `/base_bridge/set_parameters`，新建客户端 `wait_for_service` 立刻 True）
+
+### 修复（`mqtt_bridge.py`）
+1. `_set_gate` 改**非阻塞**：服务没就绪只记 `_desired_gate`，绝不重排、不阻塞
+2. 新增 1 Hz 定时器 `_apply_pending_gate()`：服务一出现就补发
+3. `_send_gate()` + `_on_gate_done()`：发送后回结果给手机
+   （`手动授权已开启` / `运动门设置失败`），手机不再无反馈地转圈
+
+### 页面（`car.html`）
+离线宽限期：**从没收到过 state 时 90 秒**（车刚开机），
+收到过再丢仍是 30 秒 + 15 秒去抖。开机期间不再误报"设备离线"。
+
+### 已验证（实机，09:07~09:10）
+```
+发送 {action:manual} → goal_result: accepted=True "手动授权已开启"
+/base_bridge motion_enabled = True
+/base_bridge manual_enabled = True
+连发 3 次 → 3 次都立刻返回 accepted=True（不再自锁）
+```
+⚠️ 测试把运动门打开了（motion=True / manual=True），车现在可被手机摇杆控制。
+
+### 开机自启检查
+`systemctl list-unit-files --state=enabled`：`fwr-battery / fwr-lidar-watchdog /
+fwr-mqtt-bridge / fwr-nav` 均为 enabled；`base_bridge`、雷达、EKF 都在 fwr-nav 里。
+开机 → 网络 → mqtt_bridge（立即）→ 导航栈（60~90 s，含 base_bridge）。
+
+## 2026-11-20 09:25 · 「传感器未就绪但能控制」根因：前雷达根本没启动
+
+### 现象
+手机手动模式显示「传感器未就绪」，但摇杆能控制车。
+
+### 根因
+`fwr-nav.service` 的 ExecStart 带 `--no-lidar`：
+```
+run_navigation.sh --no-rviz --no-lidar    → START_LIDAR=false
+```
+设计意图是"雷达交给外部看门狗独占"，但重启后：
+- 前雷达节点 **完全没起来**（`ros2 topic info /scan` → Publisher count: 0）
+- `fwr-lidar-watchdog` 会兜底拉起，但拉起后 15 s 又判定断流，反复重启
+- `/scan` 空 → `base_bridge._scan.ready()` = False → `/base/ready` = False
+- 页面 `manual && !ready` → 「传感器未就绪」
+- 手动控制**照常能用**，因为 `manual_requires_scan=False`（手动不要求雷达）
+
+### 修复
+1. **`/etc/systemd/system/fwr-nav.service`**：去掉 `--no-lidar`
+   （备份 `/root/fwr-nav.service.bak.*`），让导航栈自己拉起前雷达，
+   `real_mapping.launch.py` 里该节点本来就是 `respawn=True, respawn_delay=2.0`
+   → 被杀后 2 s 自动拉回，看门狗只负责"杀卡死进程"
+2. 页面文案：`已授权（雷达未就绪）` / `已授权（等待传感器）`，不再笼统写"传感器未就绪"
+
+### 验证（实机）
+```
+/sllidar_node + /sllidar_node_rear 都在
+/scan: 10 Hz, 720 点, 568 个有效距离, stamp 延迟 0.10 s, frame=laser_front
+授权后 state: ready=True  manual=True  lidar_front=True  lidar_rear=True
+```
+⚠️ 测试把运动门又打开了（motion=True / manual=True），车可被摇杆控制。
+
+## 2026-11-20 09:35 · 顶部 WiFi 延迟图标 + 设备面板温度/雷达改为卡片
+
+### 1) WiFi 延迟图标（`car.html` + `cloud/api/app.py`）
+- 顶栏「刷新」左边新增 `.netChip`：内联 SVG WiFi 图标 + 实时延迟数字
+- 延迟来源：**WebSocket 往返**（不是 ICMP，手机不需要任何额外权限）
+  - 页面每 4 秒发 `{type:'ping', t: performance.now()}`
+  - `cloud/api/app.py` 的 `control_ws` 原样回 `{type:'pong', t}`
+  - 页面算 RTT 并上色：≤120ms 绿 / ≤300ms 黄 / >300ms 红 / 未连接灰 `--`
+- 断线（onclose）时清空显示为 `--`
+
+### 2) 设备 car-001 面板（`car.html`）
+原来温度/雷达是两行文字：
+```
+CPU 55°C · SSD 48°C · WiFi 46°C
+雷达 前 ✓ · 后 ✓（360°）
+```
+现在改成和「电量 / 电压」一样的 `.card` 卡片（2 列网格）：
+电量 · 电压 · CPU 温度 · SSD 温度 · WiFi 温度 · 前雷达 · 后雷达
+- 温度颜色：<70 绿 / 70–85 黄 / ≥85 红
+- 雷达：`✓ 正常` 绿 / `✗ 断开` 红
+- 顺带把这两个更新从 `if (typeof s.percentage === 'number')` 里**挪出来**，
+  以前电量字段缺失时温度和雷达就不会刷新
+
+### 已验证
+```
+服务端：/opt/jc/api/app.py 部署 + jc-api 重启，health=200
+WS 实测：发送 {"type":"ping","t":12345} → 收到 {"type":"pong","t":12345}
+页面：node --check 通过；线上 /opt/jc/web/car.html 含 netChip/cpuTemp/lidarF
+备份：/root/app.py.bak.*
+```
+
+## 2026-11-20 09:45 · 顶部延迟/面板配色微调 + 雷达合并成一张卡片
+
+用户要求：
+1. **正常显示用白色字体**，不要绿色
+2. **前雷达/后雷达合并成一个「雷达」**，状态里显示两个勾
+
+改动（`car.html`）：
+- `.netChip` 默认色 + 正常值 → `#e6edf3`（白）；仅 >150ms 黄、>300ms 红
+- 设备面板 7 张卡片 → 6 张：电量 / 电压 / CPU 温度 / SSD 温度 / WiFi 温度 / **雷达**
+  - 雷达卡片内容：`前 ✓ 后 ✓`，两个都正常时白色，任一断开变红
+- 温度正常（<70°C）也是白色，70–85 黄、≥85 红
+
+## 2026-11-20 09:55 · 顶栏去掉导航状态徽标，右侧设置齿轮重新可见
+
+用户反馈：顶栏东西太多，最右边的 ⚙ 设置被挤出屏幕；「那个 stopped 删掉」。
+
+- 删除 `#navBadge`（它显示 `s.nav` 原始值，就是 `stopped`/`navigating` 那个小徽标）
+  - 标记结构 + `if (s.nav) $('navBadge')...` 一行 JS 一起删
+- 新增 `@media (max-width: 400px)`：header gap 6→4、padding 8→6、刷新/模式下拉/
+  延迟徽标都缩小一档，`#devName` 超长省略号 → **窄屏也保证 ⚙ 可见**
+
+部署验证：线上 `/opt/jc/web/car.html` 里 `navBadge` 出现 0 次，`gearBtn` 仍在。
+
+## 2026-11-20 10:10 · 建图进度条提前满格（雷达就绪 ≠ 建图就绪）
+
+用户反馈：建图模式画面还写着「SLAM 正在建图，稍候…」，顶部进度条已经 100% 了。
+
+根因在 `syncLidarGate()`：双雷达从"等待"变成"就绪"时调了
+`finishProgress('双雷达已就绪，等待 SLAM 地图…')` —— `finishProgress` 会把
+进度条一下子撑到 100%，但此时 SLAM 第一帧地图还没到，画布仍是等待文案。
+
+修复：雷达就绪只**换文案**，不再收条；进度条保持 active（最高 92%），
+直到 `applyLiveMap()` 收到 SLAM 第一帧地图才真正 `finishProgress('建图探索已就绪')`。
+
+```js
+if (progressActive) setProgressLabel('双雷达已就绪，等待 SLAM 地图…');
+```
+
+## 2026-11-20 10:20 · 地图编辑器：白/灰含义说明 + 按钮改图标/返回 + 画笔默认 0.05 m
+
+### 编辑器三种颜色的含义（`openMapEditor` / `paintOff`）
+编辑器把地图栅格读进 `edit.buf`，三种值：
+| 值 | 显示 | 含义 | 保存回 PGM |
+| --- | --- | --- | --- |
+| `0` | 黑 | **障碍/墙**（不可通行） | 0 |
+| `205` | 灰 | **未知/未探索**（SLAM 没扫到，导航默认不通行） | 205 |
+| `254` | 白 | **空闲/可通行**（已确认空地） | 254 |
+
+灰度映射：`buf 0→0`、`>=250→255(白)`、其余→`160(灰)`。
+
+### 改动
+1. `⟳90°` → **旋转图标**（内联 SVG 圆弧+箭头，`title="旋转 90°"`），功能不变
+2. `关闭` → **返回**（同样调用 `closeMapEditor`）
+3. 画笔粗细默认 **1 格 = 0.05 m**（`value=6→1`、`brush: 6→1`、兜底 `|| 1`）
+4. 底部提示加上图例：`白=可通行 · 灰=未探索 · 黑=障碍`
+
+## 2026-11-20 10:32 · 地图编辑器布局重排（右侧竖排缩放/旋转 + 上一步/下一步）
+
+用户要求：
+- 顶部只留「返回」在原位；`－ ＋ ⟳` 竖着排到画面右侧
+- 「橡皮」→「清除」，「画墙」→「绘画」
+- 删掉文字「撤销」，换成 **↶ 返回上一步 / ↷ 返回下一步** 两个符号键
+
+改动（`car.html`）：
+1. `.edTop` 只保留 `#edClose`（返回）；新增 `.edRight`（`position:absolute; right:10px;
+   top:50%; flex-direction:column`）放 `－ / ＋ / ⟳`，42×42 圆角按钮
+2. 底栏：`清除 | 绘画 | ↶ | ↷ | 保存地图`（符号键 `.sym` 固定 56px、字号 22px）
+3. 新增 redo 栈：`edit.redo = []`
+   - 撤销：当前 buf 压入 redo → 弹出 undo
+   - 重做：当前 buf 压入 undo → 弹出 redo
+   - `pushUndo()` 里**清空 redo**（画了新的一笔后"下一步"没意义）
+4. 文案同步：注释和直线模式提示里的「画墙/橡皮」改为「绘画/清除」
+
+## 2026-11-20 10:40 · 画笔粗细滑条改为「粗细」按钮开关（浮到右侧）
+
+- 底栏 `.edSize` 行现在是：`[粗细]  1 格 0.05m  ......  [直线]`
+- 滑条移进 `#edWidthPanel`（`position:absolute; right:10px; bottom:168px`，
+  168px 宽浮层，默认 `.hidden`）
+- 点「粗细」→ 面板浮到画面右侧；再点一次 → 收起，按钮同步 `.on` 高亮
+- 打开/关闭编辑器都会自动收起面板
+- `updateWidthLabel()` 同时更新面板内 `#edWidthVal` 和行内 `#edWidthValInline`
+
+## 2026-11-20 10:50 · 编辑器再排：右侧竖排贴底 + 直线符号 + 粗细画笔图标
+
+- `.edRight` 从垂直居中改为 **贴底**（`bottom:172px`，4 个 42px 按钮）
+- 右侧竖排顺序：`－  ＋  ⟳  🖌(画笔=粗细)`，画笔在最下面
+- 「粗细」文字按钮删除 → 换成画笔 SVG 图标按钮（`#edWidthBtn` 位置从底栏挪到右侧竖排）
+- 粗细浮层位置随之上移（`bottom:384px`）
+- 「直线」按钮 → **`/` 符号**（仍带 `.on` 高亮），放在保存左边
+- 「保存地图」→ **「保存」**
+- 底栏最终：`清除 | 绘画 | ↶ | ↷ | / | 保存`
+- `.edSize` 行只显示当前画笔宽度：`画笔 1 格 0.05m`
+
+## 2026-11-20 11:05 · 重启后导航模式显示建图那张图（地图残留 bug）
+
+### 现象
+主控重启后，手机切「导航模式」，画面还是建图时那张 SLAM 图（不完整），
+但提示「重新定位成功」。
+
+### 取证
+手机诊断条（`/opt/jc/logs/diag.log`）每 5 秒上报：
+```
+1795139373 car-001 界面nav/车nav/选nav/图487x371/布1206x2016/gzip
+```
+`图487x371` = `mapImg` 的实际尺寸，而正式导航地图是 **928×605**
+（云端 `/api/devices/car-001/map` 返回 `1A_map_door2.yaml 928x605`，
+车端 `~/.config/fwr/last_navigation_map` 也指向同一个文件，上传日志 09:48 正常）。
+
+### 根因
+`loadMap()` 开头：
+```js
+if (mapImg && !expectYaml) { resizeCanvas(); return; }   // 有图就不去云端取
+```
+而 `applyMode('manual')` **不清 mapImg**。重启后页面先落回手动模式时，
+上一次建图的 SLAM 图（487×371）还留在 `mapImg` 里；再切导航时
+`loadMap()` 见 mapImg 非空直接 return → 永远显示旧图。
+
+### 修复（`car.html`）
+1. `applyMode('manual')`：清 `mapImg / mapMeta / liveMapSeen`
+2. 进导航分支（`mode==='nav' && prevMode!=='map' && prevMode!=='nav'`）：
+   **先清空再 `loadMap()`**，双保险
+
+## 2026-11-20 11:20 · 产品页加人形机器人/水上表演机器人 + 桌面图标换成公司 logo
+
+### 产品页（`car.html` `#productView`）
+现在是四张卡片：
+| 卡片 | 状态 |
+| --- | --- |
+| 🛞 底轮机器人 | 可进入控制页 |
+| 🦾 机械臂 | 点击提示「即将上线」 |
+| 🤖 人形机器人 | 点击提示「即将上线」（本次新增）|
+| 🚤 水上表演机器人 | 「无人船」改名（本次），点击提示「即将上线」|
+
+工厂产品位先亮出来，控制页做好后只需把 `showToast` 换成跳转。
+
+### 桌面图标（PWA）
+用户提供公司 logo（`849×794` PNG，底部 MINGTIAN TECHNOLOGY 字样）：
+- 用 PIL 自动裁出 logo 本体（去掉底部文字，按非白像素 bbox `177,201,722,626`），
+  居中成正方形（1.16 倍留白）再缩放出三张：
+  `icon-512.png`(98 KB) / `icon-192.png`(21 KB) / `apple-touch-icon.png`(19 KB, 180)
+- `manifest.webmanifest` 图标 src 加 `?v=2`
+- `sw.js` 缓存名 `jc-car-v1 → jc-car-v2`，外壳列表同步带 `?v=2`
+- `car.html` 的 `<link rel=apple-touch-icon/icon>` 也带 `?v=2`
+- 部署到 `/opt/jc/web/`，`curl -I` 返回 200
+
+⚠️ iOS 会把主屏图标缓存，**必须删掉桌面图标重新「添加到主屏幕」**才会变成新图。
+
+## 2026-11-20 11:30 · 桌面图标改用深色版 logo（保留英文，去水印）
+
+用户提供了深色背景版 logo（1536×1536，右下角有"豆包 AI 生成"水印），
+要求**保留 MINGTIAN TECHNOLOGY 英文**，整张方图做图标。
+
+处理：
+1. 用周边背景色 `(8,8,10)` 涂掉右下角水印区域（`x>0.70w, y>0.86h`）
+2. **不裁英文**，整张方图直接 LANCZOS 缩放：512 / 192 / 180
+3. 版本号 `?v=2 → ?v=3`（manifest、car.html 的 icon/apple-touch 链接）
+4. `sw.js` 缓存名 `jc-car-v2 → jc-car-v3`
+5. 部署 `/opt/jc/web/`
+
+⚠️ iOS/Android 会缓存主屏图标，需删除旧图标后重新「添加到主屏幕」。
+
+## 2026-11-20 11:38 · 桌面图标定为最终版（1138×1138 无水印深色 logo）
+
+用户发来无水印的最终版 logo（1138×1138），整张方图直接做图标（保留英文）：
+- LANCZOS 缩放 → `icon-512.png`(218 KB) / `icon-192.png`(37 KB) / `apple-touch-icon.png`(33 KB)
+- 版本号 `?v=3 → ?v=4`（manifest + car.html icon 链接）
+- `sw.js` 缓存名 `jc-car-v3 → jc-car-v4`
+- 部署 `/opt/jc/web/`，`curl -I icon-512.png?v=4` → 200
+
+⚠️ 主屏图标会被系统缓存，仍需删除旧图标重新「添加到主屏幕」。
+
+## 2026-11-20 11:50 · 导航时路径只显示到第一个航点（页面补画剩余航线）
+
+### 现象
+导航中，实线/虚线只画到第一个航点；车到了第一个航点后，第二段才出现。
+
+### 根因
+- 页面实线来自车端 `/plan`（`mqtt_bridge._on_plan` → `robot/+/path`）
+- 导航是**逐段执行**的（`frontier_explorer` 多点导航在终点近/闭环时改逐段），
+  `/plan` 只包含**当前这一段** → 页面自然只画一段
+- 剩余航点没有任何数据源，所以看不到
+
+### 修复（`car.html` render）
+在 `navWaypoints`（开始导航时页面记下的整条航线）基础上，导航中补画一条
+浅蓝虚线 `rgba(121,192,255,.6)`，从当前车位经过**所有剩余航点**：
+```js
+if (lastMode !== 'map' && navWaypoints.length > 1 &&
+    robotState.nav === 'navigating') { ... navWaypoints.slice(navWpIdx) ... }
+```
+- `navWpIdx` 由既有状态逻辑随车推进，走过的航点自动从虚线上消失
+- 实线仍是车端的真实 `/plan`（当前段），两者叠加显示完整路线
+
+## 2026-11-20 12:00 · 地图编辑器「清除」写成灰色是 bug（改成写白=可通行）
+
+用户反馈：用橡皮擦会把白色区域变成灰色。
+
+原因：`paintAt()` 里 `const val = edit.tool === 'wall' ? 0 : 205;`
+——「清除」写的是 **205 = 未知（灰）**。后果：
+- 白区被扫一下 → 变灰 → 保存后那块**不可通行**（导航默认不进未知区）
+- 擦噪点反而把门洞堵死
+
+修复：清除写 **254 = 可通行（白）**
+```js
+const val = edit.tool === 'wall' ? 0 : 254;
+```
+效果：白→白（不变）、黑→白（擦掉墙/噪点）、灰→白（主动开放未探索区）。
+
+## 2026-11-20 12:05 · 编辑器实时上色 bug：清除后仍显示灰色
+
+用户反馈：绘画（黑）之后用清除擦掉，结果变成**灰色**而不是白色。
+
+根因在 `editSetCell()`（笔画实时上色）：
+```js
+const c = val === 0 ? 0 : 160;      // ← 只分"黑/非黑"，254(可通行)也画成灰
+```
+而全量重绘 `paintOff()` 是正确的：`0→黑, >=250→白, 其余→灰`。
+所以笔画当场显示灰，撤销/重开编辑器后同一格又变白 —— 典型的"两处映射不一致"。
+
+修复：`editSetCell` 与 `paintOff` 用同一套映射
+```js
+const c = val === 0 ? 0 : (val >= 250 ? 255 : 160);
+```
+
+## 2026-11-20 15:10 · 重启后"还没有地图或激光数据"：两处问题（已修）
+
+### 现象
+重启后切导航模式，手机提示「还没有地图或激光数据」，定位一直失败。
+
+### 问题 1：选错了地图（直接原因）
+`~/.config/fwr/last_navigation_map` 指向 **`test1.yaml`**（653×760，**今天 10:33 保存的**），
+而不是一直在用的 `1A_map_door2.yaml`（928×605）。
+- map_server 正常加载了 test1，但车实际还在 1A 的场景里
+- 自动定位匹配到 0.08 m，但 **scan-in-unknown 21~23%**（扫描点落在新图未知区）
+  → 被 `max_unknown_frac=0.2` 拒绝 → 一直"定位失败"
+- 把它改回 `1A_map_door2.yaml` 后立刻成功：
+  `match 0.052 m -> base (0.38,-0.60,74°) [贴墙 77%，未知 0%]`
+
+### 问题 2：auto_initial_pose 开机竞态（真 bug）
+14:03 那次开机日志：
+```
+auto_initial_pose: waiting for map and scan            ← 14:03:48.79 建节点
+map_io: Read map ... test1.pgm                          ← 14:03:48.96 map_server 才发图
+auto initial pose: no map/scan after 30 s ...           ← 14:04:18 永久放弃
+```
+- 节点比 map_server 早 0.2 s 创建 `/map` 订阅，**TRANSIENT_LOCAL 的历史没补发**
+  （之后几小时 `_map` 一直是 None，而新起的订阅者立刻能收到）
+- 30 s 后 `_tick` 直接 `_gave_up = True`，从此手机点"重新定位"永远回
+  「还没有地图或激光数据」
+
+修复（`auto_initial_pose.py`）：
+1. 保存订阅句柄，新增 `_resubscribe_missing()`：缺地图/激光就
+   `destroy_subscription` + 重新 `create_subscription`（重建后立刻收到历史）
+2. `_tick`：缺数据时每 **8 s** 重建一次，**不再永久放弃**（180 s 只报一次错）
+3. `/localization/reseed` 遇到缺数据时先重建订阅，再回
+   「还没有地图或激光数据（已重新订阅，请 3 秒后再点一次）」
+
+### 验证（15:08 重启导航栈）
+```
+Read map 1A_map_door2.pgm: 928 X 605
+auto initial pose: 重建 /scan_merged 订阅（还没收到激光）   ← 新逻辑生效
+auto initial pose: match 0.052 m -> base (0.38,-0.60,74 deg) [贴墙 77%，未知 0%]
+auto initial pose: AMCL seeded
+/localization/reseed → 定位成功: (0.38, -0.60, 74°) 残差 0.054 m
+```
+
+## 2026-11-20 15:25 · 导航"动一下就停"：collision_monitor 又冻死
+
+### 现象
+开始导航后车动一小段就停；controller_server 反复 `Failed to make progress` + `Aborting handle`。
+
+### 取证
+- `ros2 lifecycle get /collision_monitor_forward` → **inactive [2]**（15:17 现场）
+- `/cmd_vel_auto_forward_filtered` 无输出 → 后面的 directional_safety_selector 输出 0
+- 15:12:03 chain_watchdog：`collision_monitor_forward 三级（重启进程）也失败`
+  （15:11:47 配置时 `change_state` 响应超时 → CM 卡在配置阶段）
+- 15:17:36 base_bridge 满屏 `disarm tick-sensors`（速度链没有输入，门虽然开着也不动）
+
+### 处理
+`systemctl restart fwr-nav`，等生命周期管理器拉起 CM：
+```
+15:21:37 collision_monitor_forward: Activating + bond connected
+```
+随后看门狗又误判一次（15:22:22 杀了进程），launch respawn 后 15:22:41 重新 activate。
+
+### 恢复后实测（速度链）
+```
+/cmd_vel_auto_unchecked          19.5 Hz   （auto_command_gate）
+/cmd_vel_auto_forward_filtered   15.5 Hz   （collision_monitor，已恢复）
+/cmd_vel_auto_safe               19.2 Hz   （directional_safety_selector）
+collision_monitor_forward        active [3]
+motion_enabled=False / manual_enabled=False  ← 导航栈重启后默认关，点开始导航才开
+```
+
+### 结论
+`collision_monitor` 激活瞬间偶发冻结（Nav2 已知问题，之前 16:58 也遇到一次，
+表现是内部 TF 查询卡住、不再转发速度）。看门狗能自愈但过程要 20~60 s，
+期间速度链断开 → 车"动一下就停"。
+
+## 2026-11-20 15:30 · 看门狗加速：导航中输出静默 4 s 就重启监控（用户批准）
+
+### 背景
+`collision_monitor` 冻死后原来要等 **10 s**（`out_silent_s`）才判定，
+`_check` 还有 20 s 激活盲等窗口 → 车"走一下就停"最长要 20~60 s 才恢复。
+
+### 改动（`tools/chain_watchdog.py`）
+- `_on_in` 记录最近一次**非零**速度指令时刻 `self._last_in_nz`
+- 新增 `nav_active = (now - _last_in_nz) < 2.0`（Nav2 真的在要车动）
+- 判定阈值分场景：
+  | 场景 | 静默阈值 | 激活后盲等 |
+  | --- | --- | --- |
+  | **导航中**（有非零指令） | **4 s**（`FWR_WATCHDOG_FAST_SILENT_S` 可调） | 8 s |
+  | 空闲/刚启动 | 10 s（`out_silent_s`） | 20 s |
+- `_health`（5 s 定时器）同步采用同一阈值，避免两处判断不一致
+- 日志会写明 `导航中阈值 4s` / `空闲阈值 10s`，便于现场判断
+
+### 为什么不会误杀
+空闲时 Nav2 只发零速帧，`_last_in_nz` 不会更新 → 仍走 10 s；
+`in_n >= 5`（≥5 帧/秒）+ `_in_run` 连续秒数 + `_fix` 30 s 冷却都保留。
+
+### 验证
+```
+15:28:20 看门狗启动（自动重启）：/cmd_vel_auto_unchecked → /cmd_vel_auto_forward_filtered
+collision_monitor_forward: active [3]
+/cmd_vel_auto_unchecked 15.2 Hz → filtered 16.8 Hz → safe 13.8 Hz（链通）
+```
+未验证：真实卡死场景下的 4 s 触发（需要下次现场复现时确认日志）。
+
+## 2026-11-20 15:45 · 换地图不生效（nav_restart 是空操作）+ 看门狗误杀两处
+
+### 现象
+导航模式里换新地图 → 页面提示切换成功 → 重新定位仍按**旧图**算。
+
+### 根因（`mqtt_bridge._run_service_action`）
+```python
+'nav_restart': ('fwr-map.service', 'fwr-nav.service')   # 旧
+# worker 里：systemctl start fwr-nav —— 栈已在跑时 start 是**空操作**
+```
+所以只写了 `~/.config/fwr/last_navigation_map`，`map_server` 仍挂着旧图：
+15:31 现场 `yaml_filename=1A_map_door2`（928×605），状态文件却是 `test1`（653×760）。
+
+### 修复
+1. `nav_restart` 改成**先停自己再起**：`('fwr-nav.service', 'fwr-nav.service')`，
+   `run_navigation.sh` 启动时会重读状态文件
+2. 换图后**验证 `/map` 真刷新**：60 s 内没收到新的 `/map` 帧就回报
+   「地图没有刷新，请重试」，不再假装成功
+3. 看门狗两处误杀：
+   - `_cm_active_at` 初值 0.0 → `now-0` 几十万秒，激活盲等窗口失效 →
+     栈刚起来监控还没输出就被杀。改为初始化为启动时刻 + 从未 active 过时不判静默
+   - 前方**真有障碍**且最后输出是零速时，静默是 `stop_pub_timeout` 的正常行为
+     （Nav2 停止重复发零）→ 不再判卡死（`_blocked_pts>=3 and _last_out_zero`）
+
+### 验证
+```
+map_server yaml_filename = .../maps/test1.yaml
+/map 653x760
+auto initial pose: match 0.038 m -> base (-0.41,0.32,158 deg) [贴墙 97%，未知 12%]
+auto initial pose: AMCL seeded
+/cmd_vel_auto_unchecked 20.0 Hz → filtered 19.8 Hz → safe 20.0 Hz
+collision_monitor_forward active
+```
+
+### 遗留
+`collision_monitor` 触发过 stop 后仍会**停止发布** cmd_vel（Nav2 已知 bug，
+`stop_pub_timeout=18 s` 后静默），看门狗只能靠重启恢复（约 15~20 s）。
+拟改 `stop_pub_timeout` 18 → 600（让输出永不静默，卡死由"持续压零"分支处理），
+**属冻结参数，需用户批准**。
+
+## 2026-11-20 15:55 · stop_pub_timeout 18 → 600（用户批准，治"走一下就停"的根）
+
+### 决策依据（读数来自今天日志）
+```
+collision_monitor 被杀 50 次 / lifecycle_manager_collision 被杀 50 次（exit -9）
+Failed to make progress 4 次 / Aborting handle 4 次
+getTransform 报错 36 次
+```
+根因：CM 进入停车状态后 `stop_pub_timeout=18 s` 到点**完全停止发布** cmd_vel，
+速度链静默 → 看门狗判卡死 → SIGKILL CM + lifecycle_manager → 链路长时间断开。
+
+### 改动
+- `config/real_collision_monitor_forward.yaml`: `stop_pub_timeout: 18.0 → 600.0`
+  - 零速持续流动：Nav2 的 15 s 进度检查照旧能放弃目标（原设计意图不变）
+  - 看门狗改用"持续压零 + 前停区无真实障碍"识别真卡死（误报率低）
+- 护栏测试 `test_real_auto_mapping_config.py`：上限 20 → 600，**下限 17 保留**
+- 9 个相关测试通过（`test_real_auto_mapping_config` + `test_sim_auto_mapping_config`）
+
+### 验证
+```
+ros2 param get /collision_monitor_forward stop_pub_timeout → 600.0
+collision_monitor_forward → active
+看门狗动作数（近 3 分钟）→ 0
+/cmd_vel_auto_unchecked 20.0 Hz → filtered 19.1 Hz → safe 13.9 Hz（连续）
+AMCL seeded: match 0.056 m [贴墙 74%，未知 0%]
+```
+
+### 顺带验证：换地图链路已在现场跑通
+```
+15:51:12 收到 nav 动作: set_map → 导航地图已切换为 1A_map_door2.yaml
+15:51:32 nav_restart: fwr-nav.service 已停止      ← 修复前这里根本不会停
+15:51:34 nav_restart 完成
+15:54:01 map_io: Read map 1A_map_door2.pgm: 928 X 605
+```
+
+### 待办
+- `AGENTS.md` §3.97 冻结表里 `stop_pub_timeout 18.0` 需在收尾时同步为 600.0
+- 真卡死场景（CM 停发）的 4 s 快速恢复仍需实车复现确认
+
+## 2026-11-20 16:10 · 电量/地图来源/手机地图独立目录+删除/换图后停住（四件事）
+
+### 1) 导航状态行电量
+- 车端实测：`/base/battery` 1 Hz，`percentage=0.6925`，MQTT state 里也有 `percentage`
+- 页面 `updateNavStatus()` 原来只认 `robotState.percentage`，现加兜底 `batteryPct`
+- 诊断条新增 `/电NN%/链通断`，下次手机端问题可直接看 `/opt/jc/logs/diag.log`
+- 状态行在安全链未通时追加「安全链等待中」
+
+### 2) 手机里的地图从哪来
+```
+车端 maps/*.yaml+.pgm
+   → mqtt_bridge._publish_map()（gzip + PGM/YAML 头，retained）
+   → MQTT robot/car-001/map
+   → 云端 API 存 MAP_CACHE（**仅内存**）
+   → 页面 GET /api/devices/car-001/map
+```
+手机不落地保存，只存在浏览器内存；云端重启后要等车端重发（bridge 连上就发）。
+
+### 3) 手机地图独立目录 + 删除按钮
+- 新目录 `ros2_ws/src/fwr_bringup/maps/phone/`：**手机编辑/保存**的图存这里
+  （`_on_map_edit` 改存 `MAPS_ROOT/phone`），SLAM 图仍存 `maps/`
+- `_map_files()` 返回 `(名字, 路径, 来源)`，`maps` 列表带 `source: robot|phone`
+- 新动作 `delete_map`：删 `.yaml/.pgm/.json`；
+  **拒绝**当前正在使用的地图和越界路径；成功后自动重发地图列表
+- 页面地图列表每行右侧「删除」按钮（红框），二次确认后发送
+
+验证（真机+Mqtt 实测）：
+```
+state.chain = True  state.percentage = 0.692   state.map = test1
+地图列表 51 张，phone 来源条目被正确识别
+删除 zz_dummy → .yaml/.pgm 都被删掉
+```
+
+### 4) 换地图之后"导航又停住一下"——根因是碰撞监控激活太晚
+```
+15:58:35 导航栈重启
+15:58:52 AMCL seeded            ← 手机此时就可以点"开始导航"
+15:59:02 收到目标 leg 1/2
+15:59:17 Failed to make progress → Aborting（15 s 进度检查）
+15:59:27 collision_monitor 才 Configuring/Activating   ← 安全链慢了 25 s
+```
+`real_navigation.launch.py` 里 `TimerAction(period=40.0)` 才拉起
+`lifecycle_manager_collision`，加上 configure+activate 约 50 s 才 active；
+这期间 `/cmd_vel_auto_forward_filtered` 没有输出 → 选择器输出 0 → 车不动。
+
+修复（前端等待，不动安全时序）：
+- bridge 状态新增 `chain`（过滤后速度 2 s 内有帧）
+- 页面 `sendGoal()` 在 `chain === false` 时先等（每 2 s 检查，最多 60 s），
+  提示「等待安全链（碰撞监控）就绪…」
+
+### 为什么 RViz 上没这些问题
+RViz 直接连 ROS 图：不经过"运动门 → 碰撞监控 → 方向选择器 → 手机链路"，
+也不会在**导航栈刚重启**时立刻发目标；手机端还会经过云端 1~2 s 延迟，
+于是把"监控还没 active 就发目标"这个竞态暴露出来。
+
+### 测试
+`test_nodes_attributes_defined`（补充 destroy_subscription 等继承方法白名单）、
+`test_real_auto_mapping_config` 全绿。
+
+## 2026-11-20 16:30 · 「地图已切换」提示早于地图真正生效
+
+### 现象（用户反馈）
+切图时手机立刻弹「地图已切换」，可画面/定位还是旧图。
+
+### 根因
+`_current_map_name()` 每次读 `~/.config/fwr/last_navigation_map`，
+而 `_apply_map_choice()` **一开始就写了这个文件**（然后才去重启导航栈）。
+于是状态里的 `map` 字段在重启还在跑的时候就已经变成新名字，
+页面 `if (pendingMapName && r.map === pendingMapName)` 立刻弹提示。
+
+### 修复（`mqtt_bridge.py`）
+把"选中"和"已加载"拆成两个概念：
+
+| 字段 | 含义 |
+| --- | --- |
+| `_active_map_path` | map_server 真正加载的那张（页面只认它） |
+| `_pending_map_path` | 刚选好、等重启完成才生效的那张 |
+
+- `_init_active_map()`：bridge 启动时把状态文件记为"已加载"
+- `_apply_map_choice()`：只写 `_pending_map_path`，状态里的 `map` 保持旧值
+- `nav_restart` worker：确认 `/map` 真刷新后，才把 pending 提升为 active
+- 顺带：选的就是当前已加载的图 → 直接回报成功、**不重启导航栈**（省 90 s）
+
+### 实测（真机 MQTT）
+```
+切换前 = 1A_map_door2
++  2s = 1A_map_door2        ← 重启期间仍报旧图（正确）
++ 22s = test1               ← /map 刷新后才变新图（提示此时才弹）
+提示时机正确（先旧后新）= True
+之后已恢复 1A_map_door2（+42s）
+```
+
+## 2026-11-20 16:35 · 小车原地左右打转（航点用的是旧地图坐标）
+
+### 现象
+车一直在左转/右转循环，导航反复失败。
+
+### 证据链
+```
+16:09:53 / 16:11:29 / 16:11:52 / 16:12:22  连续 4 次切图（每次重启导航栈）
+16:12:22 最后切到 1A_map_door2（手机截图里还显示 test1）
+16:14~16:16 explorer 派 leg 5/6：x=3.20 y=0.39 / x=-1.22 y=-1.19（按 test1 点的）
+每 15 s：controller_server "Failed to make progress" → Aborting → 重派
+selector 每秒交替：rotate-clear / zero-angular-reply
+底盘下发：v 55.475 -55.475 ↔ v -19.527 19.527（左右轮反号来回）
+16:17:28 explorer status=succeeded enabled=False（自己结束了，车已停）
+```
+**根因**：手机上的 6 个航点是在 **test1** 地图坐标系里点的，车端已切到 **1A_map_door2**。
+同一 (x,y) 在新地图里是别的位置（甚至墙里）→ Nav2 走不到 → 15 s 判"没前进"放弃重派
+→ 方向安全选择器在纯旋转帧上反复允许/取消 → 车原地左右打转。
+
+### 修复（两层防呆）
+1. **页面**：`mapSwitching` 标志。切图开始 → 禁止点航点、禁止「开始导航」/预览，
+   提示"正在切换地图，请等新地图出来再点航点"；切图成功/超时才解锁。
+2. **车端**：目标里带 `map` 字段（页面发的），`_handle_goal` 校验：
+   `declared != _current_map_name()` → 直接拒绝并回 `地图已切换为 X，请重新点航点`，
+   不进队列、不驱动车。
+
+### 已验证
+- 页面 `node --check` 通过，已部署 `/opt/jc/web/car.html`
+- bridge 重启后 `active`
+- 实测当时 `/cmd_vel_auto_safe` 全 0、`/odom` ≈ 0（车已停），explorer enabled=False
+
+### 遗留
+- 用户需刷新页面（`?v=45`）才能拿到两层防呆
+- 连续切图 4 次 = 4 次导航栈重启（每次约 90 s），操作上应一次切到位
+
+## 2026-11-20 16:45 · 「正在前往 N 号航点」编号不准
+
+### 为什么不准（三个来源都在"猜"）
+1. **段号 vs 手机编号不是一回事**：`/explore/progress` 的 `leg/total` 是**探索器自己
+   路线**的编号（会剔除距车 0.6 m 内的点、闭环路线拆成逐段、切图后重排）。
+   手机有 2 个航点、车端却报 `6/6` → 直接显示错。
+2. **按路径反推**：沿实线路径找"0.6 m 内的航点"，路径绕行/回折时会把后面的点
+   匹配上 → 跳号。
+3. **本地单调前进**：到点 0.5 m 才 +1，遇到跳点/超时重派就漂。
+
+### 修复：让车端直接说"现在去哪个坐标"
+- `frontier_explorer._publish_progress()`：进度里加 `x/y`（来自 `_active_target`）
+- `mqtt_bridge`：`_on_progress` 存 `_leg_x/_leg_y`（3 s 内有效），状态帧加 `leg_x/leg_y`
+- 页面 `updateNavProgress()` 优先级改为：
+  1. **车端真实目标坐标** → 在手机航点里找 1.5 m 内最近点 → 显示 `N/M 号航点`；
+     找不到（切图/换路线）→ 如实显示 `(x, y)`，不再瞎编编号
+  2. 路径反推（保留作为旧固件兜底）
+  3. 段号——**只有 `legs === navWaypoints.length` 时才用**
+  4. 本地单调前进
+
+### 已验证
+- `colcon build` 退出码 0（顺手清掉 `build/fwr_bringup/maps` 里已删除地图的残留，
+  之前会报 `can't copy ... doesn't exist`）
+- 假进度消息 `{"leg":2,"total":5,"x":1.5,"y":-2.5}` → 状态帧出现
+  `leg_x=1.5 leg_y=-2.5` ✅
+- 页面 `node --check` 通过并已部署；`fwr-nav` 已重启加载新探索器
+
+### 注意
+- 导航栈重启后运动门=关，需要重新点「开始导航」
+- 手机需刷新到 `?v=46` 才有新的显示逻辑
+
+## 2026-11-20 16:55 · 等待中就绪前不再乱发"重新定位"
+
+### 用户要求
+「重新定位等导航栈就绪之后再开始，现在等待中的时候也一直在重新定位」
+
+### 原因
+`startNavReadyWatch()` 只判断 `robotMode === 'nav'` 就每 12 s 发一次 `relocalize`。
+栈还在重启（或正在切图）时也照发 → 请求堆在车端队列，界面看着一直"重新定位"，
+还会挤占模式切换。
+
+### 改动
+**页面**（`startNavReadyWatch`）：
+- 新判据 `stackUp = robotMode==='nav' && robotState.nav && nav !== 'unknown' && !mapSwitching`
+- 栈没就绪 → 只显示「等待导航栈启动，第 N 次检查」，**不发任何请求**
+- 栈就绪后才发 `relocalize`；收到 accepted 立即结束循环（原有逻辑）
+- 重试上限 15 → 12 次（约 144 s）
+
+**车端**（`mqtt_bridge`）：
+- `_apply_map_choice()` 和 `_run_service_action()` 一开始就把 `self._nav = 'unknown'`
+  → 重启窗口里手机立刻知道"栈没就绪"，不会拿旧值误判
+
+### 已验证
+- `py_compile` / `node --check` 通过；页面已部署（`?v=47`）；bridge 重启 `active`
+- 逻辑判据来自状态帧：`nav` 由 `/explore/state` 驱动，`unknown` 表示探索器还没起来
+
+## 2026-11-20 17:00 · 又左转右转：实车顶在墙前 0.41 m
+
+### 实测（雷达，按 AGENTS.md 约定：0° = 车头）
+```
+正前 0.41 m | 车尾 1.12 m | 左 1.63 m | 右 1.28 m
+```
+`directional_safety_selector.forward_block_m = 0.45` → 前进被判"被挡" →
+分支 `blocked_rotate_*` 把"前进+转向"改成**原地转**；车在墙角，转过去还是墙 →
+每秒来回 → 就是看到的左转右转。
+
+### 其它证据
+- 定位正常：`重新定位成功 (1.06,-1.52,66°) 残差 0.036 m 贴墙 81%`
+- 当前 `nav=stopped`、`/odom` 线速度 0.008、底盘指令在 `v 55 -55 ↔ v -158 158` 之间翻转
+- `Failed to make progress` 每 15 s 一次（原地转不算位移）
+- 车在 (1.0,-0.47)，路线最后目标 (1.18,-0.12)——只差 **0.4 m**，但目标在墙/膨胀区里
+
+### 结论
+不是导航"坏了"，是**车头顶墙**：前停距离 0.45 m > 实际 0.41 m，前进被拦，
+只能原地转；而目标点又落在墙那侧，永远到不了 → 无限重试。
+
+### 处理
+1. 用户：停止导航 → 手动模式倒车 ≥0.5 m → 重新点航点（离墙留余量）
+2. 可选改进（需用户批准，未实机验证）：开启 `trail_reverser`
+   （前进被挡 + 车尾空旷 ≥0.5 m → 自动沿轨迹倒 0.4 m 再走），
+   或让探索器在"前进被挡且车尾空"时主动倒车让位
+
+## 2026-11-20 17:15 · 后退让位（trail_reverser）为什么没介入
+
+### 用户疑问
+「昨天在主控调好后退让位，手机导航怎么没开这个功能？」
+
+### 实查结论：功能一直是开的
+- `real_navigation.launch.py` 默认 `trail_reverser:=true`，日志有
+  `后退让位已启动（0.08 m/s，退到左右都 >= 0.9 m 为止）`
+- 节点参数：`enabled=True`、`backup_front_clear_m=0.6`
+
+### 真正原因（两个判据缺口）
+1. **"被挡"只在完全停住时才成立**：`_maybe_start` 用
+   `stopped = |filt| < 0.01`。现场车头顶墙 0.41 m 时，方向安全选择器把
+   "前进+转向"改判成**纯原地转**（只有角速度、不为 0）→ stopped 永远 False
+   → `blocked_for_s` 不累计 → `wants_backup` 永远给 `no-need`，车就在墙前左右转。
+2. **收工条件只留 4 cm**：`backup_done` 用 `can_turn(front>=0.45)` 判定结束，
+   退 4 cm 就"能转了"立刻收工 → 又贴回墙。
+
+### 改动
+- `trail_reverser._maybe_start`：新增 `no_forward`（raw 想前进但 filtered 线速度 ≈0）
+  也算被挡 → `blocked_now = wants_motion and (stopped or no_forward)`
+- `maneuver_core.backup_done`：新增可选参数 `front_clear_m`，
+  站到"车头 >= max(front_need, front_clear) = 0.60 m"才收工
+- `trail_reverser`：新参数 `backup_front_clear_m 0.60` 并接线
+
+### 已验证
+```
+现场数字离线跑判据：前 0.41 / 左 1.63 / 右 1.28 / 后 1.12
+  blocked_acc 1.5 s → 触发后退: True  front-about-to-hit
+  前方 0.45/0.50/0.59 → 不停；0.61 → 停（can-turn-now）
+单测：test_maneuver_core / test_nav_reverse / test_trail_reverser_core /
+      test_trail_reverser_rearm / test_turn_backup  共 74 passed
+构建退出码 0；fwr-nav 已重启；节点参数 enabled=True、backup_front_clear_m=0.6
+```
+
+### 未验证
+- 实车触发效果（需要开到墙前 0.4 m 验证退 0.2 m 后能继续规划）
+
+## 2026-11-20 17:20 · 切图提示"地图已加载"提前了
+
+### 现象（用户反馈）
+切换地图时，一开始就显示「地图已加载」，实际地图还没出来。
+
+### 根因
+`_apply_map_choice()` 在**启动重启前**就发了
+`_publish_result('nav', True, <name>, action='set_map')`，
+页面收到 accepted 立刻显示「地图已加载：xxx，正在等待定位…」。
+可这时导航栈才刚开始重启，map_server 还没加载新图。
+
+### 改动
+把"受理"和"加载完成"拆成两条回报：
+
+| 回报 action | 时机 | 页面显示 |
+| --- | --- | --- |
+| `set_map_ack` | 刚受理、准备重启栈 | 「地图切换中：xxx（导航栈重启中，请等待…）」 |
+| `set_map_done` | worker 确认 `/map` 已刷新后 | 「地图已加载：xxx，正在等待定位…」 |
+| `set_map_done`（同图） | 选的就是当前已加载的图 | 直接算已加载，**不重启栈** |
+
+页面同时兼容旧车端的 `set_map`（只显示"切换中"）。
+
+### 已验证
+```
+MQTT 实测（选当前图 1A_map_door2）：
+{"kind":"nav","accepted":true,"reason":"1A_map_door2","action":"set_map_done"}
+日志：已经是当前地图 1A_map_door2.yaml，不重启   ✅
+```
+
+### 未验证
+- 真实换图（不同图）路径：应依次看到「切换中」→「已加载」→「地图已切换」toast
+- 期间为验证做过两次同图 set_map（旧版无同图守卫），触发过导航栈重启
+
+## 2026-11-20 17:35 · 切图后卡在"等待导航栈就绪"，重新定位也不报成功
+
+### 根因（页面时序）
+`set_map_done` 里原来是 `if (pendingMapName) startNavReadyWatch(...)`，而
+地图名变化的状态帧往往**先到**，已经把 `pendingMapName` 清空 →
+就绪监听根本没启动 → 页面永远停在 `loadMap()` 写的
+「地图已加载（w×h），等待导航栈就绪…」，也不会发 relocalize。
+
+### 改动
+1. `set_map_done` 收到就**无条件** `startNavReadyWatch()`（函数内部幂等）
+2. `startNavReadyWatch` 先**立即检查一次**（栈已就绪时不用白等 12 秒），再每 12 秒一次
+3. 诊断条加 `/栈${nav}`，下次手机端问题能直接看车端栈状态
+
+### 未验证
+- 真实换图路径（需一次完整切换：切换中 → 已加载 → 等待定位 → 定位成功）
+
+## 2026-11-20 17:00 · "等待云端地图更新"太久（三处一起治）
+
+### 慢在哪
+1. **车端上传太晚**：`_publish_map()` 只在导航栈重启完、`/map` 刷新后才发，
+   换图 40~60 s 内云端一直是旧图；页面又等到 +20 s 才开始拉、每 2.5 s 重试。
+2. **`mqtt_bridge` 被导航脚本 SIGKILL**：`tools/start_mapping.sh` 的
+   `stop_all()` 里有 `'/install/fwr_'` 模式，而 bridge 的进程名是
+   `.../install/fwr_bringup/lib/fwr_bringup/mqtt_bridge` → **每次换图都被杀**
+   （今天 31 次，systemd 报 status=247 "Killed"），云端链路断 5~10 s，切图回报丢失。
+3. **换图成功判据太严**：要求 `_nav_map_msgs > before + 1`（至少 2 帧新 /map），
+   但 `map_publish_period=0.0`，map_server 只锁存发 **1 帧** → 明明换成功也判失败，
+   还会把旧图发回云端。
+
+### 改动
+- `mqtt_bridge._publish_map_file(path)`：抽出单文件发布；
+  `_apply_map_choice()` 受理切换时**立刻**把新图推到云端（几十毫秒）
+- `_pending_map_size`：记下"应该加载"的图尺寸；刷新判据改为
+  `至少 1 帧新 /map` **或** `_nav_map_size == _pending_map_size`
+- 失败时把"真正在用的旧图"发回云端，避免手机显示未生效的图
+- `tools/start_mapping.sh`：`stop_all()` 增加 `PROTECT = ('mqtt_bridge',)` 白名单
+- 页面：切图后 **0.8 s** 就开始拉图（原来 20 s），重试 1.5 s × 20 次
+
+### 实测（真机，切 1A → test1）
+```
+bridge PID: 39792 -> 39792            ← 换图不再杀 bridge ✅
+map 0.1 s  test1.yaml                 ← 新图 0.1 秒到云端 ✅
+set_map_ack 0.1 s  test1
+set_map_done 52.0 s test1             ← 栈真加载完才报"已加载" ✅
+nav_restart 完成 52.0 s
+```
+页面对比：以前要等 20 s 才开始拉、最坏 30 s 放弃；现在 1 s 内就能出图。
+
+### 当前状态
+- 车端地图 = test1（测试结束时切回的）
+- bridge MainPID 稳定；`fwr-nav` active
+
+## 2026-11-20 17:05 · 切图后永远停在「等待导航栈就绪」（第二处真因）
+
+### 现象
+用户截图：地图已经画出来了（653×760 = test1），但顶部一直写着
+「地图已加载（653×760），等待导航栈就绪…」，也从不出现「重新定位成功」。
+
+### 两个原因
+1. **那句话是 `loadMap()` 在画完图后自己写的**，会把后面所有定位进度提示覆盖掉，
+   而且内容本身是错的（这时栈可能已经就绪）→ 改成只报尺寸「地图已加载（W×H）」。
+2. **切图锁 `mapSwitching` 漏解除**：`relocalize` 成功分支只清 `pendingMapName`，
+   没清 `mapSwitching`；而就绪监听的 `stackUp` 条件里有 `!mapSwitching`
+   → 永远认为"还在切图" → 一次 relocalize 都不发。
+   现在 `set_map_done` 和定位成功时都解除。
+
+### 其他调整
+- 就绪监听：立即检查一次，之后 **8 s** 一次，最多 18 次（原来 12 s × 12）
+- 诊断条已带 `/栈<nav>`，可远程看到车端栈状态
+
+### 已验证（车端链路本身）
+```
+MQTT relocalize → {"accepted":true,"reason":"定位成功: (-0.09, 0.48, 23°) 残差 0.021 m"}
+/cmd_vel_auto_forward_filtered = 20 Hz，collision_monitor active [3]
+```
+即"重新定位"这条路是通的，之前是页面压根没发。
+
+### 未验证
+- 手机端完整一次切图（需用户刷新 v52 实测）
+
+## 2026-11-20 17:10 · 切图提示互相覆盖（"看着卡住"）
+
+### 现象（用户反馈）
+切图加载确实快了，但状态栏一直只显示「地图已加载」，后续信息（切换中 / 等待定位 /
+定位成功）被它覆盖掉，看起来像卡死。
+
+### 原因
+`loadMap()` 画完图后会无条件写 `navInfo`，而 `navInfo` 同时是进度提示行 →
+把 `set_map_ack` / 就绪监听的文案全冲掉了；而且这句本身内容也是旧的
+（"等待导航栈就绪"）。
+
+### 改动
+1. `loadMap()` 只在**没有进行中的进度**时才写 `navInfo`（`if (!progressActive)`）
+2. 进度条计时器每秒把「（已等 N 秒）」缀到当前文案上（3 秒后才出现，避免闪）——
+   导航栈重启要 40~60 秒，界面一直有数字变化就不会被当成卡死
+3. `setProgressLabel` 记住基文案 `progressLabelBase`，计时器只改显示不改语义
+
+### 现在的提示链（一次换图）
+```
+地图切换中：XXX（导航栈重启中，请等待…）（已等 3 秒）
+…（已等 41 秒）
+地图已加载：XXX，正在等待定位…（已等 52 秒）
+正在等待导航就绪，重新定位（第 1 次重新定位）…（已等 53 秒）
+重新定位成功：定位成功: (x, y, θ°) 残差 ….
+地图已切换：XXX（toast）
+```
+
+### 未验证
+- 手机端实测（需刷新 v53）
+
+## 2026-11-20 17:15 · 切图提示按下真实阶段分层
+
+### 现象
+地图其实已经切好了（新图 1 秒内就画出来），状态栏却一直写"正在切换地图/重启导航栈"，
+切换完成时还写"切换地图成功，正在重启导航栈"，前后矛盾像卡住。
+
+### 改动（提示按真实阶段走，不再一句话到底）
+| 阶段 | 时机 | 文案 |
+| --- | --- | --- |
+| 受理 | 0.1 s | 地图已切换：XXX（正在重启导航栈，约 40~60 秒）…（已等 N 秒） |
+| 新图画出来 | ~1 s | 新地图已加载：XXX（等待导航栈重启完成）…（已等 N 秒） |
+| 车端确认生效 | ~52 s | 地图已生效：XXX（导航栈已就绪，正在定位）… |
+| 定位成功 | ~55 s | 重新定位成功：定位成功: (x, y, θ°) 残差 … |
+| 收尾 | | 进度条满 + toast「地图已切换：XXX」 |
+
+### 时间都花在哪（实测 52 s）
+`systemctl stop fwr-nav` 约 18 s（Nav2 优雅退出）→ 起栈并激活 map_server 约 10 s
+→ 碰撞监控 `TimerAction(40 s)` → `/map` 刷新后才回报 set_map_done。
+
+### 想更快只能换实现（未做，需用户决定）
+用 `/map_server/load_map` 热切换 + lifecycle deactivate/activate，不重启整个栈；
+但此前实测该服务在本版本"返回 false 且不重发地图"，需要先验证。
+
+## 2026-11-20 17:20 · "等待导航栈就绪"和"正在重新定位"混在一句话
+
+### 现象
+用户：显示「等待导航栈就绪，正在重新定位」，既然叫等待，怎么又在重新定位？
+
+### 原因
+`startNavReadyWatch()` 的模板是 `${prefix}（第 N 次重新定位）…`，
+而调用方传的前缀本身是「等待导航栈就绪，正在重新定位」——两个含义被拼到一起。
+
+### 改动（页面）
+1. 等待 → 「正在等待导航栈就绪（第 N 次检查，还没开始定位）…」——**不发任何请求**
+2. 就绪 → 「导航栈已就绪，正在重新定位（第 N 次）…」——这时才发 relocalize
+3. 车端回 `accepted=false`（服务没就绪）时视为"等"，不显示"重新定位失败"，
+   继续循环；超时（2 分钟）才收进度条并提示检查车端
+4. 调用前缀统一为「等待导航栈就绪」
+
+### 车端行为（本来就这样，已核对）
+`_on_nav` 的 relocalize：`service_is_ready()` 为 false 时**不发服务调用**，
+直接回 `{accepted:false, reason:'导航栈未就绪，请稍候'}`，不会堆请求。
+
+### 未验证
+- 手机端实测（v55）
+
+## 2026-11-20 17:25 · 建图时前雷达"没数据"排查
+
+### 结论：是**短断流**，不是 USB 掉线
+- 内核日志自 14:03 开机后**没有** USB 断开/复位记录；两只雷达的
+  `power/control = on`（没被 USB 自动挂起）→ 线/供电不是这次的主因。
+- `sllidar_node` 进程还活着，但 `/scan` 2.6~3.0 秒没有新帧
+  （已知的"驱动静默卡死"，2026-11-12 记录过）。
+- 建图期间真正发生的断流：**17:19:50、17:20:12 各一次，都只有前雷达**；
+  其余"前后同时静默"其实是导航栈被我反复重启（同一秒、前后成对），不是掉线。
+- 看门狗杀掉后 launch respawn，约 0.5~2 s 恢复 → 手机上表现为激光点断一下。
+
+### 顺带修掉一个真 bug（看门狗自己会崩）
+`tools/lidar_watchdog.py` 的 `_fallback_start` 用
+`for src, dst in state.remaps` 解包，而 rear 的 `SPECS` 写的是扁平
+`('/scan', '/scan_rear')` → `ValueError: too many values to unpack (expected 2)`
+→ 看门狗进程退出，systemd 5 秒后重启（`restart counter is at 67`），
+期间两路雷达都没人监控。
+
+改动：
+- `SPECS` rear 改成 `(('/scan', '/scan_rear'),)`
+- 新增纯函数 `_remap_args()` 兼容两种写法（扁平/成对），兜底启动只用它
+- 新增 `tests/test_lidar_watchdog_remaps.py`（用 rclpy 桩件，4 passed）
+- 已部署并重启 `fwr-lidar-watchdog`（active）
+
+### 环境事实（与 AGENTS.md 出入）
+- 主控是 **x86_64**（16 线程、最高 4.7 GHz），**没有** `/usr/bin/jetson_clocks`、
+  `nvpmodel`；CPU governor = **powersave**
+- 建图时 `slam_toolbox` 报 `options.num_threads: 50 exceeds maximum 16`（Ceres 占满）
+
+### 待用户决定（未做）
+1. 看门狗 `--stale` 2.5 s → 4 s（每次误杀都要 ~2 s 重连，反而拉长断流）
+2. CPU governor `powersave` → `performance`（持久化）
+3. `slam_toolbox` 线程数限制到 2~4，削 CPU 峰值
+
+## 2026-11-20 17:35 · 更正主控硬件：不是 Jetson，是 x86 迷你机
+
+### 用户指出
+"这台机不是 jetson，先更新文档。"
+
+### 实测（主控 fwr-n305）
+```
+uname -m            x86_64
+CPU                 Intel Core i5-13500H（13 代，12 核 16 线程，最高 4.7 GHz）
+内存                 15 GB
+系统                 Ubuntu 22.04.5 LTS
+nvpmodel / jetson_clocks / /etc/nv_tegra_release   都没有
+CPU governor        powersave
+```
+
+### 文档改动
+| 文件 | 改动 |
+| --- | --- |
+| `AGENTS.md` §1 | "目标主控 Jetson Orin Nano Super 8GB" → 实机主控 i5-13500H x86_64，注明旧 Jetson 计划作废 |
+| `AGENTS.md` §3 | 新增"主控硬件（2026-11-20 实测）"引用块：CPU/内存/系统、无 nvpmodel、governor=powersave、建图时 slam 线程 50→16 导致前雷达静默 |
+| `AGENTS.md` §3.97 | `stop_pub_timeout` 18.0 → **600.0**（同步 2026-11-20 已批准的实际运行值，护栏 17~600） |
+| `AGENTS.md` §3.977 | 后退让位标题改为"**默认开启**（2026-11-20 起）"，补 `no_forward` 判据与 `backup_front_clear_m=0.60` |
+| `README.md` 两处 | Jetson 迁移表述 → 现行 x86 主控；旧迁移文档标注仅作历史 |
+| `docs/hardware/jetson-migration.md`、`docs/jetson_migration.md` | 顶部加"2026-11-20 起作废（仅历史参考）"横幅 |
+
+### 未做
+- 没有改任何运行参数（本次只动文档）
+- 功耗/线程三项优化（stale 4 s、governor performance、slam 线程限制）仍在等用户点头

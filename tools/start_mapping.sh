@@ -58,6 +58,11 @@ import os, signal, subprocess, time
 PATTERNS = ('ros2 launch fwr_bringup', '/opt/ros/humble/lib/', '/install/fwr_',
             'sllidar', 'dm_imu', 'rviz2', 'map_health', 'map_keep_on',
             'cartographer', 'chain_watchdog')
+# 2026-11-20：/install/fwr_ 这个模式会顺手杀掉常驻的 mqtt_bridge
+# （它也是 install/fwr_bringup/lib/fwr_bringup/mqtt_bridge），于是每次
+# 换地图/重启导航栈，云端链路就断一次（今天 31 次 SIGKILL，status=247），
+# 手机端表现为"切图提示丢了/状态闪断"。常驻服务一律跳过。
+PROTECT = ('mqtt_bridge',)
 out = subprocess.run(['ps', '-e', '-o', 'pid=,cmd='], capture_output=True, text=True).stdout
 killed = []
 for line in out.splitlines():
@@ -69,6 +74,8 @@ for line in out.splitlines():
     if pid == os.getpid():
         continue
     if cmd.startswith('bash -c') or 'ps -e -o pid=' in cmd:
+        continue
+    if any(p in cmd for p in PROTECT):
         continue
     if any(p in cmd for p in PATTERNS):
         try:

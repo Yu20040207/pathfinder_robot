@@ -126,6 +126,11 @@ class BatteryModbus(Node):
         self.declare_parameter('mock', False)
         self.declare_parameter('timeout_s', 0.5)
         self.declare_parameter('charging_voltage', 24.0)
+        # 2026-11-19：单看电流方向会把「车自己耗电」误判成充电。
+        # 实测：充电时 24.73 V / +0.76 A；拔掉充电器后 24.46 V / +0.74 A，
+        # 电流几乎一样（+0.74 A ≈ 18 W 正好是主控+雷达的自耗），
+        # 只能靠电压门限区分。
+        self.declare_parameter('charge_min_voltage', 24.60)
         self.declare_parameter('min_voltage', 5.0)
         self.declare_parameter('max_voltage', 30.0)
 
@@ -275,24 +280,41 @@ class BatteryModbus(Node):
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = 'base_link'
         msg.voltage = float(voltage)
-        msg.current = float(current)            # 放电为正
+        msg.current = float(current)      # 实测：充电为正（充电时 +0.7~0.8 A）
         msg.charge = float('nan')
         msg.capacity = float('nan')
         msg.design_capacity = float('nan')
         msg.percentage = percent_from_pack(voltage, self._cells)
-        # 充电判定：只看"电压相对近 10 分钟峰值的变化"，避免满电静置被误判
+        # 充电判定（2026-11-19 修正）
+        # 旧规则只看"电压比近 10 分钟峰值高 0.15 V"：满电 CV 阶段电压几乎不动
+        # （实测 24.70~24.76 V 来回晃、电流稳定 +0.78 A），永远判不出充电，
+        # 手机就一直显示"未充电"。
+        # 现在以**电流方向**为主判据（接充电器时实测正电流 +0.7~0.8 A），
+        # 电流接近 0 时再退回电压趋势判断。
         now_s = time.monotonic()
         self._v_history.append((now_s, float(voltage)))
         while self._v_history and now_s - self._v_history[0][0] > 600:
             self._v_history.pop(0)
-        prev_peak = (max(v for _t, v in self._v_history[:-1])
-                     if len(self._v_history) > 1 else voltage)
-        if voltage >= prev_peak + 0.15:
-            # 电压被抬高（充电器接入）
+        i_now = float(current)
+        v_gate = float(self.get_parameter('charge_min_voltage').value)
+        # 电流要明显为正**且**电压被顶到位，两个条件同时成立才算充电。
+        # 只看电流：车自耗 +0.74 A 和充电 +0.76 A 分不开（实测）。
+        # 只看电压：拔枪后电压要缓落好几分钟，会继续冒充"充电中"。
+        if i_now >= 0.20 and voltage >= v_gate:
             self._charging = True
-        elif voltage <= prev_peak - 0.20:
-            # 电压回落（拔掉充电器 / 负载拉低）
+        elif i_now <= -0.20:
             self._charging = False
+        elif self._charging and voltage < v_gate - 0.05:
+            # 迟滞：已经在充电的，电压掉到门限下 50 mV 才退出
+            self._charging = False
+        else:
+            # 其余情况按 10 分钟电压趋势兜底
+            ref_v = (self._v_history[0][1] if len(self._v_history) > 1
+                     else float(voltage))
+            if voltage >= ref_v + 0.10:
+                self._charging = True
+            elif voltage <= ref_v - 0.10:
+                self._charging = False
         if self._charging:
             msg.power_supply_status = BatteryState.POWER_SUPPLY_STATUS_CHARGING
         else:

@@ -1,7 +1,7 @@
 /* 明添科技机器人控制 PWA：只缓存外壳，接口/WS 永不缓存 */
-const CACHE = 'jc-car-v1';
+const CACHE = 'jc-car-v4';
 const SHELL = ['./', './car.html', './manifest.webmanifest',
-               './icon-192.png', './icon-512.png', './apple-touch-icon.png'];
+               './icon-192.png?v=4', './icon-512.png?v=4', './apple-touch-icon.png'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).catch(() => {}));

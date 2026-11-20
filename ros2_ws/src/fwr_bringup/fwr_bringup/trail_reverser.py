@@ -53,6 +53,8 @@ class TrailReverser(Node):
         # 白退 3 cm、停 2~3 s。0.40 = 0.35 + 5 cm 余量，符合用户
         # 「任一侧够宽就直接转，只有两侧都不够才后退」的要求。
         self.declare_parameter('front_need_m', 0.45)    # 前方也要 >= 它
+        # 退到前方净空 >= 这个值才结束（比 front_need_m 大一点，别退 4 cm 又贴回去）
+        self.declare_parameter('backup_front_clear_m', 0.60)
         self.declare_parameter('rear_need_m', 0.55)     # 车尾要退得动
         # 前方必须受限（门口前方是开阔的，死胡同前方是墙）才允许"想转但转不开"
         self.declare_parameter('turn_front_need_m', 1.30)
@@ -332,12 +334,19 @@ class TrailReverser(Node):
         filt = self._filtered_cmd
         wants_motion = bool(raw and abs(raw.linear.x) + abs(raw.angular.z) > 0.02)
         stopped = bool(filt and abs(filt.linear.x) + abs(filt.angular.z) < 0.01)
+        # 2026-11-20 现场：车头顶墙 0.41 m 时，方向安全选择器把"前进+转向"
+        # 改判成**纯原地转**（过滤后指令只有角速度、不为 0），于是原来
+        # "只在完全停住时才算被挡"的判据永远不成立 → 后退让位从不触发，
+        # 车在墙前左右转十几分钟。这里把"想前进但没有线速度"也算被挡。
+        no_forward = bool(filt is not None and raw is not None
+                          and raw.linear.x > 0.02 and abs(filt.linear.x) < 0.02)
         if wants_motion and stopped:
             self._unblocked_run = 0.0
         else:
             self._unblocked_run += dt
+        blocked_now = bool(wants_motion and (stopped or no_forward))
         self._blocked_acc = mc.accumulate_blocked(
-            self._blocked_acc, dt, wants_motion and stopped, self._unblocked_run)
+            self._blocked_acc, dt, blocked_now, self._unblocked_run)
 
         lat_l, lat_r = self._lateral_pair()
         front = self._front_min()
@@ -438,7 +447,8 @@ class TrailReverser(Node):
             front_need_m=float(self.get_parameter('front_need_m').value),
             dist_m=float(self.get_parameter('backup_max_m').value),
             max_s=float(self.get_parameter('backup_max_s').value),
-            rear_stop_m=float(self.get_parameter('backup_rear_stop_m').value))
+            rear_stop_m=float(self.get_parameter('backup_rear_stop_m').value),
+            front_clear_m=float(self.get_parameter('backup_front_clear_m').value))
         if done:
             if why == 'can-turn-now':
                 self._turn_attempts = 0        # 目的达成，下次重新计

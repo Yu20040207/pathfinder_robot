@@ -1,5 +1,10 @@
 # Jetson 主控迁移约束
 
+> ⚠️ **2026-11-20 起本文档作废（仅作历史参考）**
+> 实机主控已确定为 **Intel i5-13500H x86_64 迷你主机**（16 线程 / 15 GB / Ubuntu 22.04.5），
+> **不是 Jetson**：主控上没有 `nvpmodel` / `jetson_clocks`，也无需 ARM64 交叉验证。
+> 现行事实见 `AGENTS.md` §1/§3 与 `docs/AGENT_LOG.md` 2026-11-20 条目。
+
 日期：2026-10-12。用户确定后续主控目标为 **NVIDIA Jetson Orin Nano Super Developer Kit（8GB）**。当前先在 Ubuntu 开发电脑上调试，待取得 Jetson 后迁移并完成实机验收。
 
 ## 开发阶段划分

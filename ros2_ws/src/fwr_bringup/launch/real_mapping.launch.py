@@ -5,7 +5,7 @@ from pathlib import Path
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, TimerAction
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
@@ -46,7 +46,8 @@ def generate_launch_description():
                           'yaw_scale': LaunchConfiguration('imu_yaw_scale')}]),
         Node(package='sllidar_ros2', executable='sllidar_node', name='sllidar_node',
              condition=IfCondition(LaunchConfiguration('start_lidar')),
-             output='screen', parameters=[{
+             output='screen', respawn=True, respawn_delay=2.0,
+             parameters=[{
                  'channel_type': 'serial', 'serial_port': LaunchConfiguration('lidar_port'),
                  'serial_baudrate': 460800, 'frame_id': 'laser_front',
                  'inverted': False, 'angle_compensate': True,
@@ -65,7 +66,8 @@ def generate_launch_description():
         # 不占用 /scan（车头那路仍供单雷达回退使用）。
         Node(package='sllidar_ros2', executable='sllidar_node', name='sllidar_node_rear',
              condition=IfCondition(LaunchConfiguration('start_rear_lidar')),
-             output='screen', parameters=[{
+             output='screen', respawn=True, respawn_delay=2.0,
+             parameters=[{
                  'channel_type': 'serial',
                  'serial_port': LaunchConfiguration('lidar_rear_port'),
                  'serial_baudrate': 460800, 'frame_id': 'laser_rear',
@@ -102,6 +104,11 @@ def generate_launch_description():
              name='ekf_filter_node', output='screen',
              remappings=[('odometry/filtered', '/odom')],
              parameters=[str(share / 'config' / 'real_ekf.yaml')]),
+        # 2026-11-19：slam_toolbox 延后 12 秒启动。
+        # 原因：建图栈刚起时后雷达/scan_merger 还没出数据，SLAM 用"半圈"的
+        # 首帧就把地图窗口定死了；车不动时 slam 不会重算，地图就永远缺一半。
+        # 等双雷达+合并稳定后再开始吃扫描，首帧就是 360°。
+        TimerAction(period=35.0, actions=[
         Node(package='slam_toolbox', executable=LaunchConfiguration('slam_executable'),
              name='slam_toolbox', output='screen',
              remappings=[('/map', LaunchConfiguration('slam_map_topic'))],
@@ -113,6 +120,7 @@ def generate_launch_description():
                          {'scan_topic': PythonExpression([
                              "'/scan_merged' if '", LaunchConfiguration('start_rear_lidar'),
                              "' == 'true' else '/scan_mapping'"])}]),
+        ]),
         # 给 RViz 看的降采样地图：slam_toolbox 的 /map 是 Reliable+TransientLocal、
         # 一帧 149 KB，RViz 在 WiFi 上做可靠消费者会触发重传风暴（实测放大 23 倍、
         # 遥控明显卡顿）。这路改成 1/2 降采样 + 0.5 Hz + Best Effort。

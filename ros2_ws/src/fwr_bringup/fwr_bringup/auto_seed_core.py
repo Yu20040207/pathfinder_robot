@@ -179,7 +179,12 @@ def refine_pose(occupied, resolution, origin_x, origin_y, points, x, y, yaw,
         by = py - (s2 * tx + c2 * ty)
         ix = int((bx - origin_x) / resolution)
         iy = int((by - origin_y) / resolution)
-        return 0 <= ix < width and 0 <= iy < height and bool(valid_mask[iy, ix])
+        if not (0 <= ix < width and 0 <= iy < height):
+            return False
+        # 掩码形状必须和网格一致；不一致就当"不可停"，不能崩（2026-11-19）
+        if valid_mask.shape != (height, width):
+            return False
+        return bool(valid_mask[iy, ix])
 
     yaw_span = math.radians(span_yaw_deg)
     for dx in np.arange(-span_m, span_m + 1e-9, step_m):

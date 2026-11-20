@@ -19,6 +19,8 @@ INHERITED = {
     'get_parameters', 'set_parameters', 'add_on_set_parameters_callback',
     'get_node_names', 'get_publishers_info_by_topic', 'get_subscriptions_info_by_topic',
     'count_publishers', 'count_subscribers', 'spin', 'now', 'thisown',
+    # 2026-11-20：auto_initial_pose 用的是"销毁订阅再重建"的恢复手段
+    'destroy_subscription', 'destroy_client', 'destroy_service', 'destroy_rate',
 }
 
 

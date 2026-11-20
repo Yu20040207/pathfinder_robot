@@ -20,8 +20,14 @@ collision_monitor_forward:
     #   test_monitor_is_only_automatic_bridge_input: 17.0 <= stop_pub_timeout <= 20.0
     #   test_auto_sim_nav2_speed_matches_gate_limit: stop_pub_timeout >= 15 + 2
     # 设计意图：停车后保持零速 ≥17 秒，让 Nav2 的 15 秒进度检查超时并**放弃目标**，
-    # 而不是继续挤过去。保持 18.0。
-    stop_pub_timeout: 18.0
+    # 而不是继续挤过去。
+    # 2026-11-20（用户批准）：18.0 → 600.0。
+    #   起因：18 s 到点后 collision_monitor **完全停止发布** /cmd_vel_auto_forward_filtered，
+    #   速度链静默 → chain_watchdog 判定"卡死" → SIGKILL 监控和 lifecycle_manager，
+    #   一天被杀 50 次，"车走一下就停"多半是这条链自己造成的。
+    #   600 s 让零速持续流动：Nav2 的 15 s 进度检查照旧能放弃目标（意图不变），
+    #   而看门狗可以靠"持续压零 + 前停区无真实障碍"这一个判据识别真卡死（误报率低）。
+    stop_pub_timeout: 600.0
     polygons: [front_stop, front_slow]
     # 2026-11-18 现场实测（用户批准后改）：原来是 0.32~0.38，车体前缘在 0.30，
     # 等于只有 2 cm 安全余量。而实测指令速度 0.16~0.18 m/s、减速度 0.35 m/s²，

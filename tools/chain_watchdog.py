@@ -24,6 +24,7 @@ import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.lifecycle import TransitionCallbackReturn  # noqa: F401  (类型存在性检查)
 from geometry_msgs.msg import Twist
+from lifecycle_msgs.msg import TransitionEvent
 from lifecycle_msgs.msg import Transition
 from lifecycle_msgs.srv import ChangeState, GetState
 from rclpy.node import Node
@@ -40,7 +41,7 @@ class Watchdog(Node):
         self._dry = dry_run
         self._started = time.monotonic()
         # 启动宽限期：栈起来后监控要几十秒才稳定发布
-        self._grace_s = float(os.environ.get('FWR_WATCHDOG_GRACE_S', '45'))
+        self._grace_s = float(os.environ.get('FWR_WATCHDOG_GRACE_S', '70'))
         self._in = 0
         self._out = 0
         self._last_in = 0.0
@@ -65,7 +66,48 @@ class Watchdog(Node):
         self._in_nz = 0
         self._out_nz = 0
         self._blocked_pts = 0
+        self._last_out_zero = True
         self._zero_run = 0.0
+        # 2026-11-19：冷却 + "输入持续流动"计数，修掉空闲误判。
+        # 原来 `in_n > 0` 就判故障，空闲时 Nav2 偶尔发 1 帧零速也会被当成卡死，
+        # 一天误触发 172 次 deactivate/activate，反而把状态机弄坏。
+        self._in_run = 0.0
+        # 2026-11-20：区分"导航中"和"空闲"。导航中 Nav2 会持续发**非零**速度，
+        # 这时监控只要 4 s 不输出就是真卡死，不能再等 10 s（用户：走一下就停太久）。
+        # 空闲时 Nav2 只发零速帧，仍用 out_silent_s=10 s，避免误杀。
+        self._last_in_nz = 0.0
+        self._fast_silent_s = float(
+            os.environ.get('FWR_WATCHDOG_FAST_SILENT_S', '4'))
+        self._ever_out = False       # 启动后是否发布过（区分"还没起来"）
+        self._startup_fix_n = 0      # 启动期从未发布过时的重试次数          # 输入连续有数据的秒数
+        self._last_fix = {}         # 每个监控上次动手的时间
+        self._last_stack_restart = 0.0
+        self._fix_cooldown_s = float(
+            os.environ.get('FWR_WATCHDOG_FIX_COOLDOWN_S', '30'))
+        self._stack_cooldown_s = float(
+            os.environ.get('FWR_WATCHDOG_STACK_COOLDOWN_S', '300'))
+        # 2026-11-19：三级（重启整个导航栈）**默认关闭**。
+        # 现场实测：栈刚起来时监控会因 TF 未就绪而静默，三级重启栈会形成
+        # "重启→再静默→再重启"的死循环（10:29 / 10:31 / 10:35 连续三次）。
+        # 真正修法是 launch 里把碰撞监控的激活延后 12 s；三级改成显式开启。
+        self._allow_stack_restart = os.environ.get(
+            'FWR_WATCHDOG_ALLOW_STACK_RESTART', '0') == '1'
+        # 2026-11-19：监控"还没激活"时本来就**不该有输出**。
+        # 原来看门狗只看"输入有、输出无"就判卡死，于是在 launch 设的 40 s
+        # 延迟激活窗口里把还没 active 的监控 deactivate 掉 →
+        # lifecycle_manager 判 bond 丢失 → CRITICAL FAILURE → 重置 → 越修越坏
+        # （实测 17:10:28 一次，之前 16:58:59 一次）。
+        # 现在跟 lifecycle 的 transition_event，只有 state==active 才判故障。
+        self._cm_state = {m: None for m in MONITORS}
+        self._ever_active = {m: False for m in MONITORS}
+        # 2026-11-20：初值设为启动时刻。原来初值 0.0 时 `now - 0` 是几十万秒，
+        # 激活后的盲等窗口形同不存在 → 栈刚起来监控还没输出就被判卡死杀掉。
+        self._cm_active_at = time.monotonic()   # 监控最近一次进入 active 的时刻
+        for _m in MONITORS:
+            self.create_subscription(
+                TransitionEvent, f'/{_m}/transition_event',
+                (lambda msg, name=_m: self._on_transition(name, msg)), 10)
+        self._state_seed_at = 0.0
         self.create_subscription(LaserScan, '/scan', self._on_scan,
                                  qos_profile_sensor_data)
         self.create_subscription(Twist, IN_TOPIC, self._on_in, 20)
@@ -77,22 +119,47 @@ class Watchdog(Node):
             m: self.create_client(GetState, f'/{m}/get_state') for m in MONITORS
         }
         self.create_timer(1.0, self._check)
-        self.declare_parameter('out_silent_s', 3.0)
+        self.declare_parameter('out_silent_s', 10.0)
         self.create_timer(5.0, self._health)
         self.get_logger().info(
             f'看门狗启动（{"只报告" if dry_run else "自动重启"}）：{IN_TOPIC} → {OUT_TOPIC}')
+
+    def _on_transition(self, name, msg):
+        try:
+            prev = self._cm_state[name]
+            self._cm_state[name] = msg.goal_state.label
+            if msg.goal_state.label == 'active':
+                self._ever_active[name] = True
+                if prev != 'active':
+                    self._cm_active_at = time.monotonic()
+        except Exception:                        # noqa: BLE001
+            pass
+
+    def _seed_state(self):
+        """看门狗启动时监控可能已经 active，收不到事件 → 用 CLI 补一次。"""
+        for m in MONITORS:
+            if self._cm_state.get(m) is None:
+                st = self._state_of(m)
+                self._cm_state[m] = st
+                if st == 'active':
+                    self._ever_active[m] = True
 
     def _on_in(self, msg):
         self._in += 1
         self._last_in = time.monotonic()
         if abs(msg.linear.x) > 0.01 or abs(msg.angular.z) > 0.01:
             self._in_nz += 1
+            self._last_in_nz = time.monotonic()
 
     def _on_out(self, msg):
         self._out += 1
         self._last_out = time.monotonic()
+        self._ever_out = True
         if abs(msg.linear.x) > 0.01 or abs(msg.angular.z) > 0.01:
             self._out_nz += 1
+            self._last_out_zero = False
+        else:
+            self._last_out_zero = True
 
     def _state_of(self, name):
         """用 CLI 查状态。
@@ -123,6 +190,38 @@ class Watchdog(Node):
         except Exception:
             return False
 
+    def _kill_safety_processes(self):
+        """SIGKILL 碰撞监控 + 它的 lifecycle_manager，让 launch 的 respawn 重拉。
+
+        2026-11-19：卡死时监控的执行器不再处理 lifecycle 服务，走服务一定失败；
+        只有换一个进程才恢复。SIGKILL 是必须的（SIGTERM 实测会被忽略，
+        结果新旧 manager 抢同一个监控）。
+        """
+        subprocess.run(['pkill', '-9', '-f',
+                        'nav2_collision_monito[r]/collision_monitor'],
+                       timeout=5, check=False)
+        subprocess.run(['pkill', '-9', '-f',
+                        '__node:=lifecycle_manager_collision'],
+                       timeout=5, check=False)
+
+    def _revive(self, name, gap: float = 12.0):
+        """按当前生命周期状态补齐 configure/activate。
+
+        2026-11-19：杀进程后 launch respawn 出来的节点是 unconfigured，
+        直接 activate 会报 "Transition is not registered"，必须先 configure；
+        而 configure 之后立刻 activate 又会因为 tf 缓冲还没有历史而
+        第一次查变换就失败（外推错误），所以两步之间要留 3 秒。
+        """
+        st = self._state_of(name)
+        if st in ('unconfigured', 'unknown', 'finalized'):
+            self._cli(name, 'configure')
+            time.sleep(gap)
+            st = self._state_of(name)
+        if st == 'inactive':
+            self._cli(name, 'activate')
+            time.sleep(max(gap, 8.0))     # 激活后给监控 8 秒转起来再判定
+        return self._out_fresh()
+
     def _restart(self, name):
         """不看状态，直接"停->起"，然后用输出是否恢复来判定。
 
@@ -132,19 +231,135 @@ class Watchdog(Node):
         也无所谓（可能已经 inactive），关键是后面那次 activate，然后用
         "输出是否恢复"验证效果。
         """
-        self.get_logger().warn(f'{name} 输出静默 → deactivate/activate')
+        self.get_logger().warn(f'{name} → deactivate/activate')
         self._cli(name, 'deactivate')
         time.sleep(1.5)
         ok = self._cli(name, 'activate')
         time.sleep(1.5)
-        last_out = getattr(self, '_last_out', 0.0)
-        back = bool(last_out) and (time.monotonic() - last_out) < 2.0
+        back = self._out_fresh()
         self.get_logger().info(
             f'{name} activate={"成功" if ok else "失败"}，输出'
             f'{"已恢复" if back else "仍静默"}')
-        if not back:
+        return back
+
+    def _out_fresh(self, window: float = 2.0) -> bool:
+        """监控输出是否新鲜（用它验证恢复是否真的生效）。"""
+        return bool(self._last_out) and (time.monotonic() - self._last_out) < window
+
+    def _fix(self, name: str, reason: str) -> None:
+        """分级恢复：冷却 → deactivate/activate → cleanup/configure/activate
+        → 自动重启导航栈。
+
+        2026-11-19（用户要求 A+B）：
+          * **冷却 30 s**：同一节点 30 s 内只动一次。原先空闲误判会连续
+            deactivate/activate，把生命周期状态机打断（日志里的
+            "timer is canceled" / "get_available_transitions timeout"）。
+          * **升级链**：一级无效就走二级（节点级 cleanup→configure→activate，
+            不重启整个栈）；二级仍无效才自动重启 fwr-nav（5 分钟冷却）。
+            以前只打印"需要 bash /tmp/restart_nav.sh"，现场没人点就一直停着。
+        """
+        now = time.monotonic()
+        last = self._last_fix.get(name, 0.0)
+        if now - last < self._fix_cooldown_s:
+            self.get_logger().info(
+                f'{name} {reason}：冷却中（{now - last:.0f}s < '
+                f'{self._fix_cooldown_s:.0f}s），跳过')
+            return
+        self._last_fix[name] = now
+
+        # 2026-11-19：启动后**一次都没发布过**，说明是启动期 TF 还没就绪
+        # （日志实证：`getTransform: laser_front->base_footprint，
+        #   requested 447.30 但 buffer 最早 447.49`），节点被卡在首次变换查询。
+        # 这时不能升级到二级/三级 —— 10:31 那次二级 cleanup + 三级重启栈，
+        # 反而把 lifecycle_manager 的 bond 弄丢（"SERVER IS DOWN"）雪上加霜。
+        # 只做"再激活一次"（最多 3 次，间隔由 30 s 冷却保证），不重启栈。
+        if not self._ever_out:
+            self._startup_fix_n += 1
+            if self._startup_fix_n > 3:
+                self.get_logger().error(
+                    f'{name} 启动后始终无输出（TF 未就绪？），已重试 3 次，'
+                    f'请重启导航栈或检查 /tf')
+                return
+            # 2026-11-19：启动期静默是"节点卡在首次 TF 查询"，
+            # 它的执行器已经不处理 lifecycle 服务了 —— deactivate/activate
+            # 只会把 lifecycle_manager 的 bond 弄丢（现场 16:58:59 报
+            # "CRITICAL FAILURE: SERVER collision_monitor_forward IS DOWN"），
+            # 之后节点被 reset 到 unconfigured，restart 的 activate 必然失败，
+            # 车就停在那里直到进程被重拉（实测停了 2 分 8 秒）。
+            # 现在直接走"杀进程让 launch respawn"，几秒就能恢复。
+            self.get_logger().warn(
+                f'{name} {reason}：启动后无输出，第 {self._startup_fix_n}/3 次'
+                f'→ 直接重启监控进程（不做 deactivate，避免丢 bond）')
+            self._kill_safety_processes()
+            time.sleep(6.0)
+            if self._out_fresh():
+                self.get_logger().info(f'{name} 启动期恢复成功（进程已 respawn）')
+                self._startup_fix_n = 0
+            return
+
+        # 2026-11-19：卡死时**别再 deactivate**。
+        # 实测 deactivate 会让 lifecycle_manager 判 bond 丢失 →
+        # CRITICAL FAILURE → 把监控 reset 成 unconfigured →
+        # 之后的 activate 全部失败，车一直停（17:11/17:13/17:16 三次复现）。
+        # 直接杀进程让 launch respawn 反而 8 秒内就恢复（17:16:26 实测）。
+        self.get_logger().warn(
+            f'{name} {reason} → 直接重启监控进程（不做 deactivate，避免丢 bond）')
+        self._kill_safety_processes()
+        time.sleep(10.0)
+        if self._revive(name):
+            self.get_logger().info(f'{name} 恢复成功（进程已 respawn）')
+            return
+
+        self.get_logger().warn(
+            f'{name} 一级无效 → 二级恢复（按状态 configure/activate）')
+        if self._revive(name) and self._out_fresh():
+            self.get_logger().info(f'{name} 二级恢复成功（输出已恢复）')
+            return
+
+        # 三级：重启"安全子系统"进程（碰撞监控 + 它的 lifecycle_manager）。
+        # 2026-11-19：监控卡死时它的执行器已经不再处理 lifecycle 服务，
+        # 所以一级/二级（走服务）必然失败；实测只有"换一个进程"才恢复。
+        # launch 里给这两个节点都开了 respawn，杀掉后约 3+2 s 自动拉起，
+        # 比整栈重启（40~60 s）快一个数量级，也不会中断导航/定位。
+        self.get_logger().warn(
+            f'{name} 二级恢复失败 → 三级：杀掉监控进程让 launch respawn')
+        self._kill_safety_processes()
+        time.sleep(10.0)
+        if self._revive(name):
+            self.get_logger().info(f'{name} 三级恢复成功')
+            return
+        state = self._state_of(name)
+        if state not in ('active',):
+            self.get_logger().warn(
+                f'{name} respawn 后状态 {state} → 手动 configure/activate')
+            self._cli(name, 'configure')
+            time.sleep(1.5)
+            self._cli(name, 'activate')
+        time.sleep(6.0)
+        if self._out_fresh(4.0):
+            self.get_logger().info(f'{name} 三级恢复成功（进程已 respawn）')
+            self._startup_fix_n = 0
+            return
+        self.get_logger().error(f'{name} 三级（重启进程）也失败')
+
+        if not self._allow_stack_restart:
             self.get_logger().error(
-                f'{name} 无法恢复 → 需要重启导航栈（bash /tmp/restart_nav.sh）')
+                f'{name} 需要人工重启导航栈'
+                f'（bash /tmp/restart_nav.sh；自动整栈重启默认关闭）')
+            return
+        if now - self._last_stack_restart < self._stack_cooldown_s:
+            self.get_logger().error(
+                f'{name} 二级仍失败；导航栈 {now - self._last_stack_restart:.0f}s '
+                f'前刚重启过（冷却 {self._stack_cooldown_s:.0f}s），暂不重启')
+            return
+        self._last_stack_restart = now
+        self.get_logger().error(
+            f'{name} 二级恢复失败 → 三级：自动重启导航栈（约 40~60 秒）')
+        try:
+            subprocess.run(['sudo', '-n', 'systemctl', 'restart', 'fwr-nav.service'],
+                           timeout=180, check=False)
+        except Exception as exc:                    # noqa: BLE001
+            self.get_logger().error(f'重启导航栈失败: {exc}')
 
     def _scan_publishers(self):
         try:
@@ -208,9 +423,18 @@ class Watchdog(Node):
         if self._dry:
             return
         now = time.monotonic()
-        cmd_flowing = (now - self._last_in) < 1.0
-        out_silent = (now - self._last_out) > float(
+        # 2026-11-19：_health 原来不受启动宽限期约束，栈刚起来监控还没
+        # active 就判"指令流动但输出静默"，一路升级到重启整个导航栈 ——
+        # 复现了 10:29 那次自己把自己重启掉的事故。这里补上宽限期。
+        if now - self._started < self._grace_s:
+            return
+        cmd_flowing = (now - self._last_in) < 1.0 and self._in_run >= 2.0
+        # 2026-11-20：和 _check 保持一致 —— 导航中（有非零指令）用 4 s 阈值
+        nav_active = (now - self._last_in_nz) < 2.0
+        silent_need = self._fast_silent_s if nav_active else float(
             self.get_parameter('out_silent_s').value)
+        out_silent = (self._ever_out and (now - self._last_out) > silent_need
+                      and not (self._blocked_pts >= 3 and self._last_out_zero))
         # /scan 多发布者检查（今天的事故源）
         pubs = self._scan_publishers()
         if len(pubs) > 1:
@@ -236,16 +460,31 @@ class Watchdog(Node):
                 self._restart_scan()
             self._last_scan = now      # 避免每轮都触发
 
+        # 2026-11-19：`ros2 lifecycle get` 在负载高时能卡 10 s，原来每 5 s 查一次
+        # 两个监控，等于把执行器占满。现在只有"输出静默"或每 30 s 才查状态。
+        query_state = out_silent or (
+            now - getattr(self, '_last_state_check', 0.0) > 30.0)
+        if query_state:
+            self._last_state_check = now
         for name in MONITORS:
+            if not query_state:
+                if cmd_flowing and out_silent:
+                    self._fix(name, '指令流动但输出静默')
+                continue
             state = self._state_of(name)
-            if state not in ('active', 'unknown'):
+            if state == 'active':
+                self._ever_active[name] = True
+            if state not in ('active', 'unknown') and self._ever_active.get(name):
                 self.get_logger().warn('%s 处于 %s，自动恢复' % (name, state))
-                self._restart(name)
+                self._fix(name, f'状态 {state}')
+            elif state not in ('active', 'unknown'):
+                # 启动期还没激活过：inactive 是正常状态，别去 deactivate
+                pass
             elif cmd_flowing and out_silent:
                 self.get_logger().warn(
                     '%s 指令在流动但输出静默 %.1fs，重启'
                     % (name, now - self._last_out))
-                self._restart(name)
+                self._fix(name, '指令流动但输出静默')
 
     def _check(self) -> None:
         now = time.monotonic()
@@ -255,18 +494,63 @@ class Watchdog(Node):
         if now - self._started < self._grace_s:
             self._in = self._out = 0
             return
+        # 状态未知就每 15 秒补查一次（放到线程里，避免 CLI 卡住定时器）
+        if any(v is None for v in self._cm_state.values()) and \
+                now - self._state_seed_at > 15.0:
+            self._state_seed_at = now
+            import threading
+            threading.Thread(target=self._seed_state, daemon=True).start()
+        # 本次运行还一次没见过监控 active（刚启动/正在配置）→ 静默是正常的
+        if not any(self._ever_active.values()):
+            self._in = self._out = 0
+            self._in_run = 0.0
+            return
+        # 监控不是 active（还没激活 / 正在 reset）时，没有输出是**正常**的
+        states = [self._cm_state.get(m) for m in MONITORS]
+        if all(st is not None for st in states) and 'active' not in states:
+            self._in = self._out = 0
+            return
         in_alive = now - self._last_in < 1.0
         out_alive = now - self._last_out < 1.0
         in_n, out_n = self._in, self._out
         self._in = self._out = 0
         in_nz, out_nz = self._in_nz, self._out_nz
         self._in_nz = self._out_nz = 0
-        if in_alive and not out_alive and in_n > 0:
+        # 输入连续流动计时（空闲时 Nav2 偶尔发 1 帧零速，不能算"在动"）
+        if in_alive and in_n >= 5:
+            self._in_run += 1.0
+        else:
+            self._in_run = 0.0
+        # 2026-11-19：2 s 太敏感 —— 实测只是"指令刚发过来、监控还没转起来"
+        # 就判卡死并 deactivate，反而把 bond 弄丢（17:13:38 现场）。
+        # 20 Hz 的节点 10 s 一帧都没有才是真坏。
+        # 2026-11-20：导航中（最近 2 s 有非零指令）= 用户正看着车走，
+        # 静默 4 s 就修；空闲/刚启动仍用 10 s，避免误杀。
+        nav_active = (now - self._last_in_nz) < 2.0
+        amplify = 8.0 if nav_active else 20.0
+        if now - self._cm_active_at < amplify:
+            self._in_run = 0.0
+            if in_alive and not out_alive:
+                return
+        silent_need = self._fast_silent_s if nav_active else float(
+            self.get_parameter('out_silent_s').value)
+        # 2026-11-20：前方**真有障碍**、监控最后一次输出是零速时，静默是
+        # stop_pub_timeout 的正常行为（Nav2 停止重复发零），不是卡死。
+        # 之前把这种情况也判成卡死 → 车停在墙前时看门狗每 35 s 杀一次监控，
+        # 速度链断断续续（15:31~15:35 连续 4 轮）。
+        legit_stop = (self._blocked_pts >= 3 and self._last_out_zero)
+        if legit_stop:
+            self._in_run = 0.0
+            if in_alive and not out_alive:
+                return
+        if in_alive and not out_alive and in_n >= 5 and self._in_run >= silent_need:
             self.get_logger().warn(
-                f'输入 {in_n} 帧/秒，但监控输出静默 → 判定卡死')
+                f'输入 {in_n} 帧/秒（连续 {self._in_run:.0f}s，'
+                f'{"导航中" if nav_active else "空闲"}阈值 {silent_need:.0f}s），'
+                f'监控输出静默 → 判定卡死')
             if not self._dry:
                 for name in MONITORS:
-                    self._restart(name)
+                    self._fix(name, '输出静默')
         elif (in_alive and out_alive and in_nz > 0 and out_nz == 0
               and self._blocked_pts < 3):
             # 2026-11-18（用户："不能自动恢复吗"）：监控"假活" ——
@@ -286,7 +570,7 @@ class Watchdog(Node):
                     f'且前停区无真实障碍（{self._blocked_pts} 点）→ 判定假活，重启监控')
                 if not self._dry:
                     for name in MONITORS:
-                        self._restart(name)
+                        self._fix(name, '持续压零')
         elif not in_alive and not out_alive:
             # 空闲时两者都没数据是正常的，不处理
             self._zero_run = 0.0

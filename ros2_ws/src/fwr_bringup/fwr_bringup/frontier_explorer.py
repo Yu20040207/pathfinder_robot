@@ -282,6 +282,7 @@ class FrontierExplorer(Node):
 
     def _publish_progress(self) -> None:
         """发布当前航点进度（手机端显示"正在前往第 N/M 个航点"）。"""
+        target = getattr(self, '_active_target', None)
         try:
             total = int(getattr(self._sm, 'fixed_legs', 0) or 0)
             raw_idx = int(getattr(self._sm, 'fixed_leg_index', 0) or 0)
@@ -292,14 +293,20 @@ class FrontierExplorer(Node):
         else:
             # 优先用"当前正在前往的目标"编号（暂停恢复后也准确）
             idx = raw_idx
-            target = getattr(self, '_active_target', None)
             if isinstance(target, dict) and 'idx' in target:
                 try:
                     idx = int(target['idx'])
                 except (TypeError, ValueError):
                     pass
             leg = min(total, max(0, idx) + 1)
+            # 2026-11-20：手机"正在前往 N 号航点"对不上。段号是探索器自己的编号
+            # （会跳过近点、切图后重排），跟手机上的编号不一定一致。
+            # 这里把**当前真实目标坐标**一起发出去，手机按坐标反查编号就不会错。
             body = json.dumps({'leg': leg, 'total': total})
+            if isinstance(target, dict) and 'x' in target and 'y' in target:
+                body = json.dumps({'leg': leg, 'total': total,
+                                   'x': round(float(target['x']), 3),
+                                   'y': round(float(target['y']), 3)})
         now = time.monotonic()
         if body != self._last_progress or now - self._progress_at > 0.5:
             self._last_progress = body

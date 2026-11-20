@@ -280,10 +280,43 @@ async def control_ws(ws: WebSocket, device_id: str, token: str = ''):
     try:
         while True:
             raw = await ws.receive_json()
+            if raw.get('type') == 'ping':
+                # 2026-11-20：手机顶部 WiFi 图标的延迟测量（原样回传 t，页面算 RTT）
+                await ws.send_json({'type': 'pong', 't': raw.get('t')})
+                continue
             if raw.get('type') == 'preview':
                 points = raw.get('points') or []
                 if points:
                     publish_json(device_id, 'preview', {'points': points})
+                continue
+            if raw.get('type') == 'diag':
+                # 手机页面把屏幕上的诊断条文本发回来，便于远程看它到底卡在哪一层
+                try:
+                    with open('/opt/jc/logs/diag.log', 'a', encoding='utf-8') as f:
+                        f.write(f"{time.time():.0f} {device_id} "
+                                f"{str(raw.get('text'))[:300]}\n")
+                except Exception:            # noqa: BLE001
+                    pass
+                continue
+            if raw.get('type') == 'lmap_plain':
+                # 手机是 http（非安全上下文）时没有 DecompressionStream，
+                # 请求桥接改发未压缩的实时地图。
+                publish_json(device_id, 'lmap_plain',
+                             {'plain': bool(raw.get('plain'))})
+                continue
+            if raw.get('type') == 'map_edit':
+                # 手机编辑好的地图（栅格字节 base64，可 gzip）回传给车端保存
+                body = {
+                    'name': str(raw.get('name') or ''),
+                    'width': int(raw.get('width') or 0),
+                    'height': int(raw.get('height') or 0),
+                    'resolution': float(raw.get('resolution') or 0.05),
+                    'origin': raw.get('origin') or {},
+                    'pgm': str(raw.get('pgm') or ''),
+                    'gz': bool(raw.get('gz')),
+                }
+                if body['width'] > 0 and body['height'] > 0 and body['pgm']:
+                    publish_json(device_id, 'map_edit', body)
                 continue
             if raw.get('type') == 'goal':
                 points = raw.get('points') or []
@@ -303,7 +336,11 @@ async def control_ws(ws: WebSocket, device_id: str, token: str = ''):
                 continue
             linear = clamp(float(raw.get('linear', 0.0)), MAX_LINEAR)
             angular = clamp(float(raw.get('angular', 0.0)), MAX_ANGULAR)
-            publish_cmd(device_id, linear, angular)
+            try:
+                ttl = int(raw.get('ttl_ms', 800))
+            except (TypeError, ValueError):
+                ttl = 800
+            publish_cmd(device_id, linear, angular, ttl)
     except WebSocketDisconnect:
         pass
     except (ValueError, TypeError):
@@ -404,11 +441,13 @@ def publish_json(device_id: str, suffix: str, body: dict) -> None:
                         json.dumps(body, ensure_ascii=False), qos=1)
 
 
-def publish_cmd(device_id: str, linear: float, angular: float) -> None:
+def publish_cmd(device_id: str, linear: float, angular: float,
+                ttl_ms: int = 800) -> None:
     global SEQ
     if MQTT_CLIENT is None or not MQTT_OK:
         return
     SEQ += 1
-    body = json.dumps({'seq': SEQ, 'linear': round(linear, 4),
-                       'angular': round(angular, 4), 'ttl_ms': 300})
+    body = json.dumps({'seq': SEQ, 'ttl_ms': ttl_ms,
+                       'linear': round(linear, 4),
+                       'angular': round(angular, 4)})
     MQTT_CLIENT.publish(f'robot/{device_id}/cmd', body, qos=0)

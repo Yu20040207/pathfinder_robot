@@ -4,7 +4,8 @@ from pathlib import Path
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import ExecuteProcess, DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import (ExecuteProcess, DeclareLaunchArgument,
+                            IncludeLaunchDescription, TimerAction)
 from launch.conditions import IfCondition, UnlessCondition
 
 
@@ -189,15 +190,41 @@ def generate_launch_description():
              # 只能靠逐级抓话题才定位到是它在拦。
              additional_env={'FWR_SELECTOR_DEBUG': '1'},
              parameters=[{'use_sim_time': use_sim_time, 'scan_topic': '/scan'}]),
+        # 2026-11-19：允许 respawn。看门狗三级恢复会杀掉这个进程，
+        # 交给 launch 立刻拉起（约 3 s），比重启整个导航栈快 20 倍。
         Node(package='nav2_collision_monitor', executable='collision_monitor',
              name='collision_monitor_forward', output='screen',
+             respawn=True, respawn_delay=3.0,
              parameters=[str(share / 'config' / 'real_collision_monitor_forward.yaml'),
                          {'use_sim_time': use_sim_time}]),
-        Node(package='nav2_lifecycle_manager', executable='lifecycle_manager',
-             name='lifecycle_manager_collision', output='screen',
-             parameters=[{'use_sim_time': use_sim_time,
-                          'autostart': True,
-                          'node_names': ['collision_monitor_forward']}]),
+        # 2026-11-19：延迟 12 s 再激活碰撞监控。
+        # 现场日志实证：栈刚起来时 odom→base_footprint 的 TF 还没填满缓冲，
+        # 监控一激活就报
+        #   `getTransform: laser_front->base_footprint, requested ...447.30
+        #    但 buffer 最早 447.49`（Lookup would require extrapolation into the past）
+        # 之后**再也不发布** /cmd_vel_auto_forward_filtered（active 但静默），
+        # 看门狗去救，反而把 lifecycle_manager 的 bond 弄丢
+        # （"SERVER collision_monitor_forward IS DOWN after 4000 ms"）。
+        # 实测 odom→base_footprint 的 TF 要到 launch 后 ~13 s 才出现，
+        # 12 s 仍然太早（日志：激活 963.66s，TF 最早 964.58s）。
+        # 改成 25 s，等 EKF 稳定后再激活。
+        # 2026-11-19 再改：25 s 仍是**刚好差 0.4 s** —— 实测激活时刻
+        # 707.9 s、base_footprint→odom 的 TF 最早只到 708.3 s，
+        # 监控第一次查变换就报 extrapolation，然后**执行器卡死不再发布**，
+        # 车在原地停了 2 分 8 秒（用户反馈"到第一个航点中途卡了一下"）。
+        # 40 s 给栈启动留足余量；万一还是太早，看门狗现在会直接重拉进程。
+        # 2026-11-19：激活延后到 40 s（原来 25 s 时监控刚激活就查 tf，
+        # 缓冲里还没有 1 秒前的数据 → extrapolation → 之后不发布，
+        # 车在原地停 2 分钟）。这里恢复成 manager 自动 bringup，
+        # 万一仍然静默，看门狗会直接重拉监控进程。
+        TimerAction(period=40.0, actions=[
+            Node(package='nav2_lifecycle_manager', executable='lifecycle_manager',
+                 name='lifecycle_manager_collision', output='screen',
+                 respawn=True, respawn_delay=2.0,
+                 parameters=[{'use_sim_time': use_sim_time,
+                              'autostart': True,
+                              'node_names': ['collision_monitor_forward']}]),
+        ]),
         # 2026-11-02 回退：不再常驻启动 auto_explore_state。
         # 它无条件每秒发 /explore/state='navigating'，与 explorer 自己的状态机
         # 打架 —— 发出去的目标 0.1 s 就被 "Client requested to cancel the goal"，

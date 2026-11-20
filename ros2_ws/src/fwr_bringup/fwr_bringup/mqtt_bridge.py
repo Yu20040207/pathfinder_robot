@@ -22,9 +22,12 @@ import gzip
 import json
 import math
 import os
+from pathlib import Path
 import subprocess
 import threading
 import time
+from rclpy.qos import (DurabilityPolicy, HistoryPolicy, QoSProfile,
+                       ReliabilityPolicy)
 from collections import deque
 
 import rclpy
@@ -129,7 +132,7 @@ def read_temps():
 
 def build_state_payload(battery, pose, nav_state, fault, armed, ready=False,
                        manual=False, map_name='', speed=0.0, yaw_rate=0.0,
-                       leg=0, legs=0):
+                       leg=0, legs=0, front_at=0.0, rear_at=0.0, mode=''):
     """组装上行状态；缺失字段用 None，云端按需处理。"""
     payload = {'ts': time.time()}
     if battery is not None:
@@ -152,11 +155,20 @@ def build_state_payload(battery, pose, nav_state, fault, armed, ready=False,
     if temps:
         payload['temps'] = temps
     payload['yaw_rate'] = round(float(yaw_rate), 3)
+    now_m = time.monotonic()
+    # 2026-11-19：窗口从 2 s 放宽到 3 s。2 s 时雷达偶尔掉一两帧
+    # 就会让手机端"雷达就绪"标记来回跳（现场看到"已就绪↔等待"刷屏）。
+    payload['lidar_front'] = (now_m - front_at) < 3.0
+    payload['lidar_rear'] = (now_m - rear_at) < 3.0
     if legs:
         payload['leg'] = int(leg)
         payload['legs'] = int(legs)
     if map_name:
         payload['map'] = str(map_name)
+    # 2026-11-19：车端实际在跑哪个栈。页面只凭本地 lastMode 判断时，
+    # 切换指令丢失会出现"页面显示建图探索、车端仍在导航栈"（11:44 黑屏不出图）。
+    if mode:
+        payload['mode'] = str(mode)
     return json.dumps(payload, separators=(',', ':')).encode('utf-8')
 
 
@@ -180,8 +192,9 @@ class MqttBridge(Node):
         self.declare_parameter('cmd_timer_hz', 20.0)
         self.declare_parameter('state_hz', 10.0)
         self.declare_parameter('scan_hz', 5.0)
-        self.declare_parameter('scan_points', 180)
+        self.declare_parameter('scan_points', 360)
         self.declare_parameter('rear_mask_deg', 50.0)
+        self.declare_parameter('scan_merged_topic', '/scan_merged')
         self.declare_parameter('scan_frame', 'map')
         self.declare_parameter('insecure_tls', False)
         self.declare_parameter('map_yaml', '')
@@ -214,6 +227,10 @@ class MqttBridge(Node):
         self._cmd_pub = self.create_publisher(Twist, '/cmd_vel_manual', 10)
         self._map_published = False
         self._pending = deque()
+        self._busy_since = 0.0
+        self._slam_map_w = -1          # 最近一帧 SLAM 地图宽度
+        self._empty_map_since = 0.0    # 从什么时候开始一直 0×0
+        self._last_map_recover = 0.0   # 上次自动重启建图栈的时间
         self._last_nav_action = ''
         self._busy = False
         self._srv_clients = {}
@@ -226,6 +243,7 @@ class MqttBridge(Node):
         self._param_client = self.create_client(
             SetParameters, '/base_bridge/set_parameters')
         self._arm_client = self.create_client(Trigger, '/base/arm_auto')
+        self._desired_gate = None      # 待生效的 (motion, manual, mixed)
         self._reseed_client = self.create_client(Trigger, '/localization/reseed')
         self._save_client = self.create_client(Trigger, '/mapping/save_slam')
         self._load_map_client = self.create_client(LoadMap,
@@ -242,11 +260,20 @@ class MqttBridge(Node):
         self._path_points = None
         self._path_dirty = False
         self.create_timer(0.1, self._drain_actions)
+        self.create_timer(1.0, self._apply_pending_gate)
         self.create_timer(1.0, self._publish_path)
         self.create_timer(0.1, self._publish_scan)
 
         self.create_subscription(BatteryState, '/base/battery',
                                  self._on_battery, 10)
+        # 2026-11-20：安全链心跳。手机点"开始导航"时如果 collision_monitor 还没
+        # active（导航栈重启后要等 ~50 s 才激活），Nav2 会 15 s 后报
+        # "Failed to make progress" 放弃目标 —— 现场表现就是"换完地图点导航，
+        # 车停一下又不动"。这里记录过滤后速度的最后时刻，状态里给手机一个
+        # chain 标志，让前端等链通再发目标。
+        self.create_subscription(Twist, '/cmd_vel_auto_forward_filtered',
+                                 self._on_filtered_vel, 10)
+        self._last_filtered = 0.0
         self.create_subscription(PoseWithCovarianceStamped, '/amcl_pose',
                                  self._on_pose, 10)
         self._tf_buffer = tf2_ros.Buffer()
@@ -262,31 +289,76 @@ class MqttBridge(Node):
         self._live_map_at = 0.0
         self._map_name = ''
         self._map_name_at = 0.0
+        # 2026-11-20 用户反馈：切图时"地图已切换"的提示比地图实际生效早。
+        # 原因：_current_map_name() 读的是状态文件，而 _apply_map_choice 一开始
+        # 就把它写了，于是手机立刻以为切好了（其实导航栈还在重启）。
+        # 现在分开两个概念：
+        #   _active_map_path = map_server 真正加载的那张（页面只认它）
+        #   _pending_map_path = 刚选好、等重启完成才生效的那张
+        self._active_map_path = ''
+        self._pending_map_path = ''
         self._mapping_mode = False
+        self._mode_lock = threading.Lock()
+        self._mode_running = False
+        self._mode_running_action = ''
+        self._mode_pending = ''
         self._leg = 0
         self._legs = 0
+        # 当前真实目标坐标（/explore/progress 带过来），手机按它反查航点编号
+        self._leg_x = None
+        self._leg_y = None
+        self._leg_at = 0.0
         self._slam_map_seen = False
         self._mapping_grace_until = 0.0
         self._mapping_suppress_until = 0.0
         self._speed = 0.0
         self._yaw_rate = 0.0
-        self.create_subscription(LaserScan, '/scan', self._on_scan, 10)
+        self._merged_at = 0.0
+        merged_qos = QoSProfile(
+            depth=5, reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE)
+        self.create_subscription(
+            LaserScan, str(self.get_parameter('scan_merged_topic').value),
+            self._on_scan_merged, merged_qos)
+        raw_qos = QoSProfile(depth=5,
+                             reliability=ReliabilityPolicy.BEST_EFFORT,
+                             durability=DurabilityPolicy.VOLATILE)
+        self._front_at = 0.0
+        self._rear_at = 0.0
+        self.create_subscription(LaserScan, '/scan', self._on_scan_front, 10)
+        self.create_subscription(LaserScan, '/scan_rear', self._on_scan_rear,
+                                 raw_qos)
         self._local_points = None
         self._local_dirty = False
         self.create_subscription(RosPath, '/local_plan', self._on_local, 10)
         self.create_subscription(RosPath, '/plan', self._on_plan, 10)
-        self.create_subscription(OccupancyGrid, '/slam_map', self._on_live_map, 10)
-        self.create_subscription(OccupancyGrid, '/map', self._on_live_map_fallback, 10)
+        # 2026-11-19：建图地图用 TRANSIENT_LOCAL 订阅。
+        # `/map` 由 maperaser 以 TRANSIENT_LOCAL 发布（低频、只在变化时发），
+        # 桥接原来用默认 volatile：如果它比 maperaser 晚订阅，
+        # 就会一直收不到那唯一一帧 → 手机建图探索一直黑屏（11:44 现场）。
+        map_qos = QoSProfile(depth=1,
+                             history=HistoryPolicy.KEEP_LAST,
+                             reliability=ReliabilityPolicy.RELIABLE,
+                             durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.create_subscription(OccupancyGrid, '/slam_map', self._on_live_map,
+                                 map_qos)
+        self.create_subscription(OccupancyGrid, '/map',
+                                 self._on_live_map_fallback, map_qos)
         self._nav_map_size = None
+        self._published_map_size = None      # 最近一次发到云端的图尺寸
+        self._pending_map_size = None        # 切图中"应该加载"的图尺寸
+        self._nav_map_msgs = 0          # 收到多少帧 /map（换图后要看到刷新）
         self._load_check_timer = None
         self._load_check_before = None
         self._load_check_path = None
-        from rclpy.qos import (DurabilityPolicy, HistoryPolicy,
-                               QoSProfile, ReliabilityPolicy)
         map_qos = QoSProfile(depth=1, history=HistoryPolicy.KEEP_LAST,
                              reliability=ReliabilityPolicy.RELIABLE,
                              durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.create_subscription(OccupancyGrid, '/map', self._on_nav_map, map_qos)
+        self._topic_lmap_plain = f'robot/{self._device}/lmap_plain'
+        self._topic_map_edit = f'robot/{self._device}/map_edit'
+        self._live_map_plain = False
+        self._last_occ = None
         self.create_timer(1.0, self._publish_live_map)
         self.create_timer(5.0, self._sync_mapping_mode)
         self.create_timer(0.5, self._publish_local)
@@ -302,6 +374,8 @@ class MqttBridge(Node):
 
         if mqtt is None:
             raise RuntimeError('缺少 paho-mqtt，请 pip install paho-mqtt')
+        # 启动时确定"当前已加载的地图"（导航栈正是按状态文件起的）
+        self._init_active_map()
         self._client = mqtt.Client(
             mqtt.CallbackAPIVersion.VERSION2,
             client_id=f'{self._device}-{int(time.time())}',
@@ -331,6 +405,7 @@ class MqttBridge(Node):
         self._client.will_set(self._topic_online, 'offline', retain=True)
         self._client.on_connect = self._on_mqtt_connect
         self._client.on_disconnect = self._on_mqtt_disconnect
+        self._client.on_subscribe = self._on_mqtt_subscribe
         self._client.on_message = self._on_mqtt_message
 
         cmd_period = 1.0 / max(1.0, float(self.get_parameter('cmd_timer_hz').value))
@@ -338,6 +413,7 @@ class MqttBridge(Node):
         self.create_timer(cmd_period, self._publish_cmd)
         self.create_timer(state_period, self._publish_state)
         self.create_timer(30.0, self._ensure_connected)
+        self.create_timer(5.0, self._check_slam_map_health)
 
         try:
             self._client.connect_async(self._host, self._port, keepalive=30)
@@ -357,11 +433,34 @@ class MqttBridge(Node):
             client.subscribe(self._topic_nav, qos=1)
             client.subscribe(self._topic_preview_cmd, qos=0)
             client.subscribe(self._topic_power, qos=1)
+            client.subscribe(self._topic_lmap_plain, qos=1)
+            client.subscribe(self._topic_map_edit, qos=1)
             if not self._map_published:
                 self._publish_map()
             self.get_logger().info('MQTT 已连接')
         else:
             self.get_logger().error(f'MQTT 连接失败: {reason_code}')
+
+    def _resubscribe(self) -> None:
+        """幂等重订阅全部上行话题（防静默掉订阅）。"""
+        try:
+            for topic, qos in ((self._topic_cmd, 0), (self._topic_goal, 1),
+                               (self._topic_nav, 1),
+                               (self._topic_preview_cmd, 0),
+                               (self._topic_power, 1),
+                               (self._topic_lmap_plain, 1),
+                               (self._topic_map_edit, 1)):
+                self._client.subscribe(topic, qos=qos)
+        except Exception as exc:                 # noqa: BLE001
+            self.get_logger().warn(f'重订阅失败: {exc}',
+                                   throttle_duration_sec=30.0)
+
+    def _on_mqtt_subscribe(self, _client, _userdata, mid, reason_codes,
+                           _props=None):
+        bad = [str(rc) for rc in (reason_codes or []) if int(getattr(rc, 'value', rc)) >= 128]
+        if bad:
+            self.get_logger().error(
+                f'MQTT 订阅被拒绝 mid={mid}: {bad}（该话题将收不到消息）')
 
     def _on_mqtt_disconnect(self, _client, _userdata, _flags, reason_code, _props=None):
         self._connected = False
@@ -382,6 +481,12 @@ class MqttBridge(Node):
         if msg.topic == self._topic_power:
             self._handle_power(msg.payload)
             return
+        if msg.topic == self._topic_lmap_plain:
+            self._on_lmap_plain(msg)
+            return
+        if msg.topic == self._topic_map_edit:
+            self._on_map_edit(msg)
+            return
         if msg.topic != self._topic_cmd:
             return
         parsed = parse_command(msg.payload, self._max_v, self._max_w)
@@ -399,6 +504,9 @@ class MqttBridge(Node):
     # ---------------- ROS 订阅 ----------------
     def _on_battery(self, msg):
         self._battery = msg
+
+    def _on_filtered_vel(self, msg):
+        self._last_filtered = time.monotonic()
 
     def _on_pose(self, msg):
         p = msg.pose.pose
@@ -442,6 +550,10 @@ class MqttBridge(Node):
             data = json.loads(msg.data)
             self._leg = int(data.get('leg', 0))
             self._legs = int(data.get('total', 0))
+            if 'x' in data and 'y' in data:
+                self._leg_x = float(data['x'])
+                self._leg_y = float(data['y'])
+                self._leg_at = time.monotonic()
         except (ValueError, TypeError, AttributeError):
             return
 
@@ -487,7 +599,11 @@ class MqttBridge(Node):
 
     def _publish_map(self) -> None:
         """把最近一次导航用的 PGM 地图压缩后发到云端（retained）。"""
-        yaml_path = self._map_path()
+        self._publish_map_file(self._map_path())
+
+    def _publish_map_file(self, yaml_path) -> None:
+        """把指定地图文件压缩发到云端（retained）。切图时先发新图，
+        手机不用等导航栈重启完（2026-11-20 用户反馈"等云端更新太久"）。"""
         if not yaml_path or not os.path.isfile(yaml_path):
             self.get_logger().warn('没有可用的地图文件，跳过地图上传')
             self._map_published = True
@@ -519,6 +635,7 @@ class MqttBridge(Node):
             if len(fields) < 3:
                 raise ValueError('PGM 头解析失败')
             width, height = int(fields[1]), int(fields[2])
+            self._published_map_size = (width, height)
             payload = {
                 'resolution': float(meta.get('resolution', 0.05)),
                 'origin': [float(v) for v in
@@ -548,6 +665,20 @@ class MqttBridge(Node):
         if not 1 <= len(points) <= 20:
             self.get_logger().warn(f'导航点数量 {len(points)} 不合法')
             return
+        # 2026-11-20 现场事故：手机在 test1 地图上点了 6 个航点，但车端已切到
+        # 1A_map_door2，坐标按旧图解释 → 目标落在墙里 → 原地左右打转。
+        # 目标里带 map 字段时校验：跟"已加载地图"不一致就拒绝，让用户重点。
+        try:
+            declared = str(obj.get('map') or '').strip()
+        except AttributeError:
+            declared = ''
+        active = self._current_map_name()
+        if declared and active and declared != active:
+            self.get_logger().warn(
+                f'目标来自旧地图 {declared}，当前已加载 {active}，拒绝执行')
+            self._publish_result('goal', False,
+                                 f'地图已切换为 {active}，请重新点航点')
+            return
         self.get_logger().info(f'收到导航目标：{len(points)} 个点 {points[:3]}')
         self._pending.append(('arm', points))
 
@@ -559,6 +690,19 @@ class MqttBridge(Node):
         action = str(obj.get('action') or '')
         if not action:
             return
+        # 2026-11-19：把收到的 nav 动作记一行日志，否则"手机点了没反应"时
+        # 完全看不出是消息没到、还是队列卡住（现场排查很吃亏）。
+        self.get_logger().info(f'收到 nav 动作: {action}')
+        # 2026-11-19：relocalize 是手机端的周期请求（每 12 秒一次）。
+        # 导航栈没起来时 /localization/reseed 一直 not ready，这些请求会被
+        # 反复 appendleft 堆在队首，把后面的 mapping_stop 堵住 →
+        # 车端永远停在建图栈，手机就"一直重新定位"（16:47 现场）。
+        # 这里只保留最新的一条，避免堆积。
+        if action == 'relocalize':
+            self._pending = type(self._pending)(
+                it for it in self._pending
+                if not (it[0] == 'nav' and isinstance(it[1], dict)
+                        and it[1].get('action') == 'relocalize'))
         self._pending.append(('nav', obj))
 
     def _handle_power(self, payload: bytes) -> None:
@@ -603,9 +747,48 @@ class MqttBridge(Node):
 
     def _drain_actions(self) -> None:
         """串行处理待执行动作（0.1 秒轮询）。"""
-        if self._busy or not self._pending:
-            return
-        kind, payload = self._pending.popleft()
+        # 2026-11-19：_busy 一旦被某个没回调的 future 卡住，
+        # 后面所有动作（包括手机的模式切换）都会静默排队，现象是"点了没反应"。
+        # 这里给 _busy 加 30 秒兜底，超时强制解锁并告警。
+        if self._busy:
+            now_b = time.monotonic()
+            if not self._busy_since:
+                self._busy_since = now_b
+            elif now_b - self._busy_since > 30.0:
+                self.get_logger().warn(
+                    '动作队列卡住超过 30 秒，强制解锁并继续处理')
+                self._busy = False
+                self._busy_since = 0.0
+            # 2026-11-19：模式切换/手动授权与 ROS 服务是否 busy 无关，
+            # 必须能插队处理，否则一个卡住的导航请求会把手机指令全堵死
+            # （现场表现：点「授权」一直"已请求授权"、切模式没反应）。
+            # 模式切换（起/停栈）优先级最高：它们才是"把服务拉起来"的动作，
+            # 必须先跑，否则 relocalize/stop 之类会在服务不在时无限重排。
+            def _prio(item):
+                k, pl = item
+                if k == 'nav' and isinstance(pl, dict):
+                    a = pl.get('action')
+                    if a in ('mapping_start', 'mapping_stop', 'mapping_restart'):
+                        return 0
+                    if a in ('relocalize', 'stop', 'resume'):
+                        return 2
+                return 1
+            nav_idx = None
+            for i, item in enumerate(self._pending):
+                if item[0] != 'nav':
+                    continue
+                if nav_idx is None or _prio(item) < _prio(self._pending[nav_idx]):
+                    nav_idx = i
+            if nav_idx is None:
+                return
+            kind, payload = self._pending[nav_idx]
+            del self._pending[nav_idx]
+            self.get_logger().info('busy 中优先处理 nav 动作')
+        else:
+            self._busy_since = 0.0
+            if not self._pending:
+                return
+            kind, payload = self._pending.popleft()
         if kind == 'preview':
             self._busy = True
             self._start_preview(payload)
@@ -670,13 +853,23 @@ class MqttBridge(Node):
             if action == 'set_map':
                 self._apply_map_choice(str(obj.get('map') or ''))
                 return
+            if action == 'delete_map':
+                self._delete_map(str(obj.get('map') or ''))
+                return
             if action in ('mapping_start', 'mapping_stop', 'mapping_restart'):
                 self._run_service_action(action)
                 return
             if action == 'relocalize':
                 client = self._reseed_client
                 if not client.service_is_ready():
-                    self._pending.appendleft((kind, obj))
+                    # 导航栈没起来时这个服务本来就不存在。手机每 12 秒会重发，
+                    # 这里直接丢弃并记一行，绝不能 appendleft（会饿死模式切换）。
+                    self.get_logger().warn(
+                        '重新定位服务未就绪（导航栈未运行？），已忽略本次请求',
+                        throttle_duration_sec=10.0)
+                    # 必须回一条失败结果，否则手机端只能等到 15 次超时才停
+                    self._publish_result('nav', False, '导航栈未就绪，请稍候',
+                                         action='relocalize')
                     return
                 client.call_async(Trigger.Request()).add_done_callback(
                     self._on_nav_done)
@@ -734,12 +927,28 @@ class MqttBridge(Node):
         self._pending.appendleft(('goal', points))
 
     def _set_gate(self, motion: bool, manual: bool, mixed: bool) -> None:
-        if not self._param_client.wait_for_service(timeout_sec=0.3):
+        """设置运动门。
+
+        2026-11-20 现场（开机后手机点授权一直"请求中"）：
+        旧实现是 `wait_for_service(0.3)` + `_pending.appendleft` 重排。
+        开机时 base_bridge 还没起来（它在导航栈里，要 60~90 s），
+        于是每 0.1 s 的 drain 都阻塞 0.3 s 再重排 → **把执行器饿死**，
+        `wait_for_service` 再也看不到图变化，永远 False，自锁。
+        现在改成**非阻塞**：服务没就绪就只记下目标门位，由 1 Hz 定时器
+        `_apply_pending_gate` 在服务出现后补发，并回结果给手机。
+        """
+        self._desired_gate = (bool(motion), bool(manual), bool(mixed))
+        if not self._param_client.service_is_ready():
             self.get_logger().warn(
-                '等待 /base_bridge 参数服务，授权稍后重试',
-                throttle_duration_sec=3.0)
-            self._pending.appendleft(('nav', {'action': 'manual'}))
+                '运动门等待 /base_bridge（车端仍在启动），稍后自动重试',
+                throttle_duration_sec=5.0)
             return
+        self._send_gate()
+
+    def _send_gate(self) -> None:
+        if self._desired_gate is None:
+            return
+        motion, manual, mixed = self._desired_gate
         req = SetParameters.Request()
         req.parameters = [
             Parameter(name='motion_enabled',
@@ -752,9 +961,32 @@ class MqttBridge(Node):
                       value=ParameterValue(type=ParameterType.PARAMETER_BOOL,
                                            bool_value=mixed)),
         ]
-        self._param_client.call_async(req)
+        self._desired_gate = None
+        future = self._param_client.call_async(req)
+        future.add_done_callback(self._on_gate_done)
         self.get_logger().info(
             f'运动门设置 motion={motion} manual={manual} mixed={mixed}')
+
+    def _on_gate_done(self, future) -> None:
+        ok = False
+        try:
+            res = future.result()
+            ok = all(r.successful for r in getattr(res, 'results', []))
+        except Exception as exc:                 # noqa: BLE001
+            self.get_logger().warn(f'设置运动门失败: {exc}')
+        if ok:
+            self.get_logger().info('运动门已生效')
+            self._publish_result('nav', True, '手动授权已开启', action='manual')
+        else:
+            self.get_logger().error('运动门设置失败')
+            self._publish_result('nav', False, '运动门设置失败', action='manual')
+
+    def _apply_pending_gate(self) -> None:
+        """1 Hz：有未生效的门位且服务已就绪时补发。"""
+        if self._desired_gate is None:
+            return
+        if self._param_client.service_is_ready():
+            self._send_gate()
 
     def _start_preview(self, targets) -> None:
         """1 个点用 ComputePathToPose；多个点用 ComputePathThroughPoses。"""
@@ -809,38 +1041,191 @@ class MqttBridge(Node):
         self._client.publish(self._topic_preview, body, qos=1)
         self.get_logger().info(f'路径预览已生成：{len(pts)} 个点')
 
+    def _active_stack(self) -> str:
+        """当前实际在跑哪个栈：'map' / 'nav' / ''（都停着）。"""
+        try:
+            out = subprocess.run(
+                ['systemctl', 'is-active', 'fwr-map.service'],
+                capture_output=True, text=True, timeout=4).stdout.strip()
+            if out == 'active':
+                return 'map'
+            out = subprocess.run(
+                ['systemctl', 'is-active', 'fwr-nav.service'],
+                capture_output=True, text=True, timeout=4).stdout.strip()
+            if out == 'active':
+                return 'nav'
+        except Exception:                       # noqa: BLE001
+            pass
+        return ''
+
+    def _systemctl(self, verb: str, unit: str, timeout: float = 60) -> None:
+        """sudo -n systemctl <verb> <unit>，失败只记录不抛。"""
+        try:
+            subprocess.run(['sudo', '-n', 'systemctl', verb, unit],
+                           timeout=timeout, check=False)
+        except Exception as exc:                 # noqa: BLE001
+            self.get_logger().error(f'systemctl {verb} {unit} 出错: {exc}')
+
+    def _service_state(self, unit: str) -> str:
+        try:
+            return subprocess.run(['systemctl', 'is-active', unit],
+                                  capture_output=True, text=True,
+                                  timeout=5).stdout.strip()
+        except Exception:                        # noqa: BLE001
+            return ''
+
+    def _wait_service_state(self, unit: str, wanted, timeout: float) -> bool:
+        """轮询直到 unit 处于 wanted 中的任一状态（确认真的停了/起了）。"""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            st = self._service_state(unit)
+            if st in wanted:
+                return True
+            time.sleep(0.5)
+        self.get_logger().warn(
+            f'{unit} 等待 {wanted} 超时，当前={self._service_state(unit) or "unknown"}')
+        return False
+
     def _run_service_action(self, action: str) -> None:
-        """建图/导航栈切换：后台线程执行 systemctl。"""
+        """建图/导航栈切换：后台线程执行 systemctl。
+
+        2026-11-19：**串行化**。原来 page 连点两下「建图探索/导航」会并发启动两个
+        systemctl 序列，互相 stop 对方的栈，最后落在哪个栈全看时序
+        （实测 10:08:37 两次 mapping_start + 10:08:57 mapping_stop 并发，
+        最终停在建图栈 → 手机导航模式一直重新定位）。
+        现在：执行中只记"最后一个想要的"，完成后再执行；目标栈已经是当前栈就跳过。
+        """
         import threading
-        cmds = {
-            'mapping_start': ['bash', '-lc',
-                              'sudo -n systemctl stop fwr-nav.service; '
-                              'sleep 2; sudo -n systemctl start fwr-map.service'],
-            'mapping_stop': ['bash', '-lc',
-                             'sudo -n systemctl stop fwr-map.service; '
-                             'sleep 2; sudo -n systemctl start fwr-nav.service'],
-            'mapping_restart': ['sudo', '-n', 'systemctl', 'restart',
-                                'fwr-map.service'],
-            'nav_restart': ['bash', '-lc',
-                            'sudo -n systemctl stop fwr-map.service; '
-                            'sleep 2; sudo -n systemctl restart fwr-nav.service'],
+        target = 'map' if action in ('mapping_start', 'mapping_restart') else 'nav'
+        self._nav = 'unknown'   # 栈要动，先别让手机以为导航就绪
+        with self._mode_lock:
+            if self._mode_running:
+                self._mode_pending = action
+                self.get_logger().warn(
+                    f'{action} 排队（{self._mode_running_action} 正在切换栈）')
+                return
+            if action in ('mapping_start', 'mapping_stop'):
+                active = self._active_stack()
+                if active == target:
+                    self.get_logger().info(
+                        f'{action} 忽略：栈已经是 {target} 模式')
+                    self._publish_result('nav', True, f'已经是{("建图" if target == "map" else "导航")}模式',
+                                         action=action)
+                    return
+            self._mode_running = True
+            self._mode_running_action = action
+        # 每个动作 = (先停哪个栈, 再起哪个栈)。
+        # 用户要求：**必须先确认另一边的栈真的停了，再启动这一边**，
+        # 否则两套节点会同时占用 /scan、/tf、/cmd_vel，出现"建图和导航打架"。
+        plans = {
+            'mapping_start': ('fwr-nav.service', 'fwr-map.service'),
+            'mapping_stop': ('fwr-map.service', 'fwr-nav.service'),
+            'mapping_restart': ('fwr-map.service', 'fwr-map.service'),
+            # 2026-11-20 bug：原来是 ('fwr-map', 'fwr-nav') + start fwr-nav ——
+            # 导航栈本来就在跑时 systemd 的 start 是空操作，于是"换地图"只写了
+            # 状态文件、map_server 还挂着旧图，手机换新图后定位仍按旧图算
+            # （15:31 现场：选了 test1，map_server 仍是 1A_map_door2 928x605）。
+            # nav 换图必须**先停自己再起**，才能让 run_navigation.sh 重读
+            # ~/.config/fwr/last_navigation_map。
+            'nav_restart': ('fwr-nav.service', 'fwr-nav.service'),
         }
-        cmd = cmds.get(action)
-        if cmd is None:
+        plan = plans.get(action)
+        if plan is None:
             return
+        # 切栈前先把排队里的"轻量动作"清掉：它们在旧栈上执行毫无意义，
+        # 还会在切栈完成后继续和新栈打架。
+        self._pending = type(self._pending)(
+            it for it in self._pending
+            if not (it[0] == 'nav' and isinstance(it[1], dict)
+                    and it[1].get('action') in ('relocalize', 'stop', 'resume')))
         if action in ('mapping_start', 'mapping_restart'):
             self._mapping_mode = True
             self._mapping_grace_until = time.monotonic() + 25.0
+            # 清空缓存并通知手机丢弃旧地图：SLAM 重启后新地图是空白的，
+            # 手机如果继续保留旧图，看起来就像"重新建图没生效"（11-19 现场）。
+            self._live_map = None
+            self._live_map_dirty = False
+            self._publish_live_map_reset()
         elif action in ('mapping_stop', 'nav_restart'):
             self._mapping_mode = False
             self._mapping_suppress_until = time.monotonic() + 20.0
 
         def worker():
-            self.get_logger().warn(f'执行 {action}: {" ".join(cmd)}')
+            before_map_msgs = self._nav_map_msgs
+            stop_svc, start_svc = plan
+            self.get_logger().warn(f'{action}: 先停 {stop_svc}')
             try:
-                subprocess.run(cmd, timeout=120, check=False)
-                self.get_logger().warn(f'{action} 完成')
+                # 1) 停：等它真的变成 inactive/failed 才继续
+                self._systemctl('stop', stop_svc, timeout=60)
+                stopped = self._wait_service_state(stop_svc,
+                                                   ('inactive', 'failed'),
+                                                   timeout=30.0)
+                if not stopped:
+                    self.get_logger().error(
+                        f'{action}: {stop_svc} 30 秒内没停下，放弃启动 {start_svc}')
+                    self._publish_result(
+                        'nav', False,
+                        f'{stop_svc} 未能停止，已取消启动 {start_svc}',
+                        action=action)
+                    return
+                self.get_logger().info(f'{action}: {stop_svc} 已停止')
+                time.sleep(2.0)                  # 给 DDS 一点时间回收节点
+                # 2) 起：先清 failed 状态，起不来重试一次
+                self._systemctl('reset-failed', start_svc, timeout=20)
+                self._systemctl('start', start_svc, timeout=90)
+                if not self._wait_service_state(start_svc, ('active',),
+                                                timeout=25.0):
+                    self.get_logger().warn(
+                        f'{action}: {start_svc} 未 active，清 failed 后重试一次')
+                    self._systemctl('reset-failed', start_svc, timeout=20)
+                    self._systemctl('start', start_svc, timeout=90)
+                    if not self._wait_service_state(start_svc, ('active',),
+                                                    timeout=25.0):
+                        self.get_logger().error(
+                            f'{action}: {start_svc} 启动失败')
+                        self._publish_result(
+                            'nav', False, f'{start_svc} 启动失败', action=action)
+                        return
+                self.get_logger().warn(f'{action} 完成（{stop_svc} 已停，{start_svc} 已起）')
                 if action in ('nav_restart', 'mapping_stop'):
+                    # 2026-11-20：确认地图真的换过来了。以前 systemctl start
+                    # 在栈已运行时是空操作，状态文件写了却仍按旧图定位，
+                    # 页面还显示"切换成功"。这里等 /map 真刷新，等不到就报错。
+                    deadline = time.monotonic() + 60.0
+
+                    def map_refreshed() -> bool:
+                        # 2026-11-20：原来要求"至少 2 帧新 /map"，可 map_server
+                        # 只锁存发布 1 帧（map_publish_period=0）→ 换图成功也判失败。
+                        if self._nav_map_msgs > before_map_msgs:
+                            return True
+                        return (self._pending_map_size is not None and
+                                self._nav_map_size == self._pending_map_size)
+
+                    while time.monotonic() < deadline and not map_refreshed():
+                        time.sleep(0.5)
+                    if not map_refreshed():
+                        self.get_logger().error(
+                            f'{action}: 60 秒内 /map 没有刷新，地图可能没换成功'
+                            f'（当前 {self._nav_map_size}）')
+                        # 预发的新图不算数：把"真正在用的旧图"发回去
+                        try:
+                            self._publish_map_file(self._active_map_path)
+                        except Exception:            # noqa: BLE001
+                            pass
+                        self._pending_map_path = ''
+                        self._publish_result(
+                            'nav', False, '地图没有刷新，请重试', action=action)
+                    elif self._pending_map_path:
+                        # 地图真换了才算"已切换"（页面靠这个字段弹提示）
+                        self._active_map_path = self._pending_map_path
+                        self._pending_map_path = ''
+                        self._pending_map_size = None
+                        self._map_name = Path(self._active_map_path).stem
+                        self.get_logger().warn(
+                            f'地图切换完成（已生效）: {self._map_name}')
+                        # 真正加载完才通知手机"已加载"
+                        self._publish_result('nav', True, self._map_name,
+                                             action='set_map_done')
                     self._map_name_at = 0.0
                     self._publish_map()
                 self._publish_result('nav', True, f'{action} 完成',
@@ -849,8 +1234,43 @@ class MqttBridge(Node):
                 self.get_logger().error(f'{action} 失败: {exc}')
                 self._publish_result('nav', False, f'{action} 失败: {exc}',
                                      action=action)
+            finally:
+                with self._mode_lock:
+                    self._mode_running = False
+                    self._mode_running_action = ''
+                    nxt = self._mode_pending
+                    self._mode_pending = ''
+                if nxt:
+                    self.get_logger().warn(f'执行排队中的 {nxt}')
+                    self._run_service_action(nxt)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _check_slam_map_health(self) -> None:
+        """建图中 SLAM 地图持续 0×0 → 自动重启建图栈（黑屏自愈）。
+
+        2026-11-19 现场：双雷达在建图栈刚起时集体 USB 超时死掉，
+        slam_toolbox 的首帧队列被丢弃，之后地图一直停在 0×0，
+        手机端就是全黑。重启整栈即可恢复（实测 173×193）。
+        """
+        if not self._mapping_mode:
+            self._empty_map_since = 0.0
+            return
+        now = time.monotonic()
+        if self._slam_map_w > 0:
+            self._empty_map_since = 0.0
+            return
+        if not self._empty_map_since:
+            self._empty_map_since = now
+            return
+        if now - self._empty_map_since < 90.0:
+            return
+        if now - self._last_map_recover < 600.0:
+            return
+        self._last_map_recover = now
+        self._empty_map_since = 0.0
+        self.get_logger().warn('SLAM 地图持续 90 秒为 0×0，自动重启建图栈')
+        self._run_service_action('mapping_restart')
 
     def _do_save(self) -> None:
         self._busy = True
@@ -867,27 +1287,152 @@ class MqttBridge(Node):
             self.get_logger().warn(f'写地图名失败: {exc}')
         on_done()
 
-    def _map_files(self):
+    MAPS_ROOT = '/home/manbaout/Company_Project/Four-wheel-robot/ros2_ws/src/fwr_bringup/maps'
+
+    def _map_dirs(self):
+        """返回 [(目录, 来源标记)]。phone = 手机上编辑/保存的图，robot = SLAM 存的图。"""
         from pathlib import Path
-        dirs = [Path('/home/manbaout/Company_Project/Four-wheel-robot/'
-                     'ros2_ws/src/fwr_bringup/maps'),
-                Path.home() / 'robot_maps']
+        root = Path(self.MAPS_ROOT)
+        return [(root, 'robot'),
+                (root / 'phone', 'phone'),
+                (Path.home() / 'robot_maps', 'robot')]
+
+    def _map_files(self):
+        """列出所有可用地图：[(名字, 路径, 来源)]。"""
         out = []
-        for d in dirs:
+        for d, source in self._map_dirs():
             if not d.is_dir():
                 continue
             for f in sorted(d.glob('*.yaml')):
-                out.append((f.name.replace('.yaml', ''), str(f)))
+                out.append((f.name.replace('.yaml', ''), str(f), source))
         return out
 
+    def _on_map_edit(self, msg) -> None:
+        """手机端编辑后的地图：写成 maps/<name>.pgm + .yaml，并设为导航地图。
+
+        手机只传栅格字节（0=占用 205=未知 254=空闲），这里负责补 PGM 头、
+        生成 YAML 元数据、更新 last_navigation_map 指针，然后回报结果。
+        """
+        import base64
+        import gzip
+        from pathlib import Path
+        try:
+            obj = json.loads(msg.payload.decode('utf-8'))
+        except (ValueError, UnicodeDecodeError):
+            return
+        try:
+            raw = base64.b64decode(obj.get('pgm') or '')
+            if obj.get('gz'):
+                raw = gzip.decompress(raw)
+        except Exception as exc:                 # noqa: BLE001
+            self._publish_result('nav', False, f'地图解码失败: {exc}',
+                                 action='map_edit')
+            return
+        w = int(obj.get('width') or 0)
+        h = int(obj.get('height') or 0)
+        res = float(obj.get('resolution') or 0.05)
+        if w <= 0 or h <= 0 or len(raw) != w * h:
+            self._publish_result(
+                'nav', False,
+                f'地图尺寸不匹配：{w}x{h} 应为 {w * h} 字节，实收 {len(raw)}',
+                action='map_edit')
+            return
+        origin = obj.get('origin') or {}
+        ox = float(origin.get('x') or 0.0)
+        oy = float(origin.get('y') or 0.0)
+        oyaw = float(origin.get('yaw') or 0.0)
+        name = str(obj.get('name') or '').strip()
+        if not name:
+            name = time.strftime('edit_%Y%m%d_%H%M%S')
+        name = Path(name).name.replace('.yaml', '').replace('.pgm', '') or \
+            time.strftime('edit_%Y%m%d_%H%M%S')
+        # 2026-11-20 用户要求：手机上编辑/保存的图单独放 maps/phone/，
+        # 跟 SLAM 存下来的图分开，方便辨认和整体删除。
+        maps_dir = Path(self.MAPS_ROOT) / 'phone'
+        pgm_path = maps_dir / f'{name}.pgm'
+        yaml_path = maps_dir / f'{name}.yaml'
+        try:
+            maps_dir.mkdir(parents=True, exist_ok=True)
+            pgm_path.write_bytes(b'P5\n%d %d\n255\n' % (w, h) + raw)
+            yaml_path.write_text(
+                f'image: {name}.pgm\n'
+                f'resolution: {res:.6f}\n'
+                f'origin: [{ox:.6f}, {oy:.6f}, {oyaw:.6f}]\n'
+                'negate: 0\n'
+                'occupied_thresh: 0.65\n'
+                'free_thresh: 0.196\n',
+                encoding='utf-8')
+            state = Path.home() / '.config/fwr/last_navigation_map'
+            state.parent.mkdir(parents=True, exist_ok=True)
+            state.write_text(str(yaml_path), encoding='utf-8')
+        except OSError as exc:
+            self.get_logger().error(f'保存编辑地图失败: {exc}')
+            self._publish_result('nav', False, f'保存失败: {exc}',
+                                 action='map_edit')
+            return
+        self.get_logger().warn(
+            f'编辑地图已保存: {pgm_path.name} {w}x{h} @{res:.3f}m')
+        self._map_name = name
+        self._map_name_at = 0.0
+        self._publish_result('nav', True, f'{name}（{w}×{h}）',
+                             action='map_edit')
+        self._publish_map_list()
+
     def _publish_map_list(self) -> None:
-        maps = [{'name': n, 'path': pth} for n, pth in self._map_files()]
+        maps = [{'name': n, 'path': pth, 'source': src}
+                for n, pth, src in self._map_files()]
         if not self._connected:
             return
         self._client.publish(self._topic_maps,
                              json.dumps({'maps': maps}, ensure_ascii=False),
                              qos=1)
         self.get_logger().info(f'地图列表已上报：{len(maps)} 个')
+
+    def _delete_map(self, path: str) -> None:
+        """删除一张地图（.yaml + .pgm），拒绝删当前正在用的图和越界路径。"""
+        from pathlib import Path
+        p = Path(path or '')
+        try:
+            p = p.resolve()
+        except OSError:
+            self._publish_result('nav', False, '路径无效', action='delete_map')
+            return
+        allowed = False
+        for d, _src in self._map_dirs():
+            try:
+                if p.parent == d.resolve():
+                    allowed = True
+                    break
+            except OSError:
+                continue
+        if not allowed or p.suffix != '.yaml' or not p.is_file():
+            self._publish_result('nav', False, '不能删除这个文件',
+                                 action='delete_map')
+            return
+        state = Path.home() / '.config/fwr/last_navigation_map'
+        try:
+            current = state.read_text(encoding='utf-8').strip()
+        except OSError:
+            current = ''
+        if current and Path(current).resolve() == p:
+            self._publish_result('nav', False, '这是当前使用的地图，先换一张再删',
+                                 action='delete_map')
+            return
+        removed = []
+        for suffix in ('.yaml', '.pgm', '.json'):
+            f = p.with_suffix(suffix)
+            if f.is_file():
+                try:
+                    f.unlink()
+                    removed.append(f.name)
+                except OSError as exc:
+                    self.get_logger().warn(f'删除 {f} 失败: {exc}')
+        if not removed:
+            self._publish_result('nav', False, '删除失败', action='delete_map')
+            return
+        self.get_logger().warn(f'已删除地图: {", ".join(removed)}')
+        self._publish_result('nav', True, '已删除 ' + p.stem, action='delete_map')
+        self._publish_map_list()
 
     def _apply_map_choice(self, path: str) -> None:
         from pathlib import Path
@@ -897,6 +1442,22 @@ class MqttBridge(Node):
         if not p.is_file():
             self.get_logger().warn(f'地图不存在: {path}')
             return
+        # 2026-11-20：选的就是当前已加载的图 → 不折腾（否则白重启一次导航栈）
+        try:
+            if (self._active_map_path and
+                    Path(self._active_map_path).resolve() == p and
+                    not self._pending_map_path):
+                self.get_logger().info(f'已经是当前地图 {p.name}，不重启')
+                # 已经是这张图 → 直接算"已加载"（不需要重启，也不用等）
+                self._publish_result('nav', True, p.stem,
+                                     action='set_map_done')
+                return
+        except OSError:
+            pass
+        self._pending_map_path = str(p)
+        # 栈马上要重启：先把导航状态标回未知，手机据此判断"还没就绪"，
+        # 不会在重启窗口里狂点重新定位
+        self._nav = 'unknown'
         try:
             state = Path.home() / '.config/fwr/last_navigation_map'
             state.parent.mkdir(parents=True, exist_ok=True)
@@ -908,8 +1469,18 @@ class MqttBridge(Node):
             return
         # 运行时 load_map 在此 Nav2 版本不可靠（返回 false 且不重发地图），
         # 直接重启导航栈（页面用进度条等待就绪）
+        # 2026-11-20 用户反馈：刚点切换就提示"地图已加载"，其实图还没出来。
+        # 这里只回报"已受理/切换中"，真正加载完成由 worker 在 /map 刷新后
+        # 用 action='set_map_done' 回报。
         self.get_logger().info(f'导航地图已切换为 {p.name}，重启导航栈')
-        self._publish_result('nav', True, p.stem, action='set_map')
+        # 2026-11-20：新图文件已经在磁盘上，先直接发到云端（几十毫秒），
+        # 手机 1~2 秒就能看到新图，不用等导航栈 40~60 秒的重启。
+        try:
+            self._publish_map_file(str(p))
+            self._pending_map_size = self._published_map_size
+        except Exception as exc:                 # noqa: BLE001
+            self.get_logger().warn(f'切图时预发地图失败: {exc}')
+        self._publish_result('nav', True, p.stem, action='set_map_ack')
         self._run_service_action('nav_restart')
 
     def _on_load_map(self, future, path) -> None:
@@ -944,6 +1515,7 @@ class MqttBridge(Node):
 
     def _on_nav_map(self, msg) -> None:
         self._nav_map_size = (int(msg.info.width), int(msg.info.height))
+        self._nav_map_msgs += 1
 
     def _on_live_map_fallback(self, msg) -> None:
         """没有 /slam_map 时（旧启动方式）才使用 /map，避免混入其它节点的地图。"""
@@ -953,6 +1525,8 @@ class MqttBridge(Node):
 
     def _on_live_map(self, msg, from_slam: bool = True) -> None:
         """SLAM 地图：压缩后低频上传，供手机建图模式显示。"""
+        if from_slam:
+            self._slam_map_w = int(msg.info.width)
         if not self._mapping_mode:
             return
         if time.monotonic() < self._mapping_grace_until:
@@ -962,6 +1536,7 @@ class MqttBridge(Node):
         now = time.monotonic()
         if now - self._live_map_at < 1.0:
             return
+        self._last_occ = msg
         try:
             w, h = int(msg.info.width), int(msg.info.height)
             # OccupancyGrid: -1=未知, 0=空闲, 100=占用；行序从下往上
@@ -974,6 +1549,13 @@ class MqttBridge(Node):
             for i in range(1, 101):
                 table[i] = 0          # 占用 → 黑
             data = top_down.translate(bytes(table))
+            if self._live_map_plain:
+                if from_slam:
+                    self._slam_map_seen = True
+                self._live_map = self._plain_live_map(msg)
+                self._live_map_dirty = True
+                self._live_map_at = now
+                return
             payload = {
                 'resolution': float(msg.info.resolution),
                 'origin': [float(msg.info.origin.position.x),
@@ -990,6 +1572,64 @@ class MqttBridge(Node):
         self._live_map_dirty = True
         self._live_map_at = now
 
+    def _on_lmap_plain(self, msg) -> None:
+        try:
+            self._live_map_plain = bool(
+                json.loads(msg.payload.decode()).get('plain'))
+        except Exception:                        # noqa: BLE001
+            pass
+        self.get_logger().info(
+            f'实时地图格式：{"未压缩" if self._live_map_plain else "gzip"}')
+        # 立刻用最后一帧按新格式重发，避免"车不动 → 没有新地图帧 → 页面一直黑"
+        if self._last_occ is not None:
+            self._live_map_at = 0.0
+            self._on_live_map(self._last_occ)
+
+    def _plain_live_map(self, msg) -> dict:
+        """未压缩版本：0=占用 160=未知 254=空闲，大图按 2 倍下采样。
+
+        ⚠️ 行序必须翻转：OccupancyGrid 的 data 是"从下往上"，
+        页面按图片行序（从上往下）绘制，并用 y = height - (y-origin)/res 换算，
+        不翻转会让地图上下镜像 → 雷达点和墙对不上（现场"错位"）。
+        """
+        w, h = int(msg.info.width), int(msg.info.height)
+        data = msg.data
+        # 只在真的很大时才降采样（0.1 m），普通房间保持 0.05 m 全分辨率
+        step = 1 if w * h <= 260000 else 2
+        ow, oh = max(1, w // step), max(1, h // step)
+        out = bytearray(ow * oh)
+        for oy in range(oh):
+            for ox in range(ow):
+                any_occ = False
+                all_free = True
+                for dy in range(step):
+                    grid_y = h - 1 - (oy * step + dy)   # 下往上 → 上往下
+                    if grid_y < 0 or grid_y >= h:
+                        all_free = False
+                        continue
+                    base = grid_y * w
+                    for dx in range(step):
+                        idx = base + ox * step + dx
+                        if idx >= len(data):
+                            all_free = False
+                            continue
+                        v = data[idx]
+                        if v >= 50:                     # 占用
+                            any_occ = True
+                            all_free = False
+                        elif v != 0:                    # -1 未知
+                            all_free = False
+                out[oy * ow + ox] = 0 if any_occ else (254 if all_free else 160)
+        return {
+            'resolution': float(msg.info.resolution) * step,
+            'origin': [float(msg.info.origin.position.x),
+                       float(msg.info.origin.position.y), 0.0],
+            'width': ow,
+            'height': oh,
+            'pgm': base64.b64encode(bytes(out)).decode('ascii'),
+            'plain': True,
+        }
+
     def _sync_mapping_mode(self) -> None:
         try:
             out = subprocess.run(['systemctl', 'is-active', 'fwr-map'],
@@ -998,7 +1638,22 @@ class MqttBridge(Node):
         except Exception:                        # noqa: BLE001
             pass
 
+    def _init_active_map(self) -> None:
+        """进程启动时把状态文件里的地图记为"已加载"（栈正是按它起的）。"""
+        from pathlib import Path
+        try:
+            state = Path.home() / '.config/fwr/last_navigation_map'
+            if state.is_file():
+                self._active_map_path = state.read_text(encoding='utf-8').strip()
+                self._map_name = Path(self._active_map_path).stem
+        except OSError:
+            pass
+
     def _current_map_name(self) -> str:
+        from pathlib import Path
+        # 只报"真正加载"的那张图，别把刚选中还没生效的报出去
+        if self._active_map_path:
+            return Path(self._active_map_path).stem
         now = time.monotonic()
         if now - self._map_name_at < 5.0:
             return self._map_name
@@ -1020,6 +1675,12 @@ class MqttBridge(Node):
                              json.dumps(self._live_map, separators=(',', ':')),
                              qos=0)
 
+    def _publish_live_map_reset(self) -> None:
+        if not self._connected:
+            return
+        self._client.publish(self._topic_live_map,
+                             json.dumps({'reset': True}), qos=0)
+
     def _on_local(self, msg) -> None:
         pts = []
         for pose in msg.poses[:80]:
@@ -1036,8 +1697,23 @@ class MqttBridge(Node):
                           separators=(',', ':'))
         self._client.publish(self._topic_local, body, qos=0)
 
-    def _on_scan(self, msg) -> None:
-        """把激光点转到地图坐标、抽稀后发布（默认 5 Hz / 180 点）。"""
+    def _on_scan_merged(self, msg) -> None:
+        """双雷达 360° 合并扫描（/scan_merged，base_link 系，已去除车身自击）。"""
+        self._merged_at = time.monotonic()
+        self._handle_scan(msg, merged=True)
+
+    def _on_scan_front(self, msg) -> None:
+        self._front_at = time.monotonic()
+        # 单雷达兜底（合并扫描 1 秒内没数据时才用）
+        if time.monotonic() - self._merged_at < 1.0:
+            return
+        self._handle_scan(msg, merged=False)
+
+    def _on_scan_rear(self, msg) -> None:
+        self._rear_at = time.monotonic()
+
+    def _handle_scan(self, msg, merged: bool) -> None:
+        """把激光点转到地图坐标、抽稀后发布（默认 5 Hz / 360 点）。"""
         now = time.monotonic()
         min_period = 1.0 / max(0.5, float(
             self.get_parameter('scan_hz').value))
@@ -1063,9 +1739,9 @@ class MqttBridge(Node):
             if not math.isfinite(r) or r < 0.12 or r > 8.0:
                 continue
             ang = msg.angle_min + i * msg.angle_increment
-            # 屏蔽车尾 ±50°（车体自击，与 RViz 的 /scan_mapping 一致）
             wrapped = math.atan2(math.sin(ang), math.cos(ang))
-            if abs(wrapped) <= self._rear_mask_rad:
+            # 单雷达时屏蔽车尾 ±50°（车体自击）；双雷达合并圈是 360°，不遮
+            if not merged and abs(wrapped) <= self._rear_mask_rad:
                 continue
             ang = wrapped
             lx, ly = r * math.cos(ang), r * math.sin(ang)
@@ -1183,8 +1859,25 @@ class MqttBridge(Node):
                                       self._ready, self._manual,
                                       self._current_map_name(),
                                       self._speed, self._yaw_rate,
-                                      self._leg, self._legs)
-        self._client.publish(self._topic_state, payload, qos=0)
+                                      self._leg, self._legs,
+                                      self._front_at, self._rear_at,
+                                      mode='map' if self._mapping_mode else 'nav')
+        # build_state_payload 返回的是 JSON bytes，这里解回 dict 才能加字段
+        try:
+            body = json.loads(payload.decode('utf-8'))
+        except (ValueError, AttributeError):
+            body = {}
+        # 安全链是否通畅（过滤后速度 2 s 内有帧）。建图模式没有这条链，给 True。
+        body['chain'] = (True if self._mapping_mode else
+                         (time.monotonic() - self._last_filtered) < 2.0)
+        # 当前正在前往的目标坐标（3 秒内有效），手机用它算"第几号航点"
+        if (self._leg_x is not None and
+                time.monotonic() - self._leg_at < 3.0):
+            body['leg_x'] = round(self._leg_x, 3)
+            body['leg_y'] = round(self._leg_y, 3)
+        self._client.publish(
+            self._topic_state,
+            json.dumps(body, separators=(',', ':')).encode('utf-8'), qos=0)
 
     def _publish_event(self, kind: str, data: dict):
         if not self._connected:
@@ -1197,6 +1890,10 @@ class MqttBridge(Node):
 
     def _ensure_connected(self):
         if self._connected:
+            # 2026-11-19：出现过"cmd 还能收、nav 却收不到"的静默掉订阅
+            # （QoS1 订阅莫名失效，SUBACK 也没记录），手机端点「授权」就
+            # 一直卡在"已请求授权"。这里每 30 秒幂等重订阅一次，自愈。
+            self._resubscribe()
             return
         try:
             self._client.reconnect()

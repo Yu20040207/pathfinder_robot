@@ -1,5 +1,10 @@
 # Jetson 迁移操作手册（Orin Nano Super 8GB）
 
+> ⚠️ **2026-11-20 起本文档作废（仅作历史参考）**
+> 实机主控已确定为 **Intel i5-13500H x86_64 迷你主机**（16 线程 / 15 GB / Ubuntu 22.04.5），
+> **不是 Jetson**：主控上没有 `nvpmodel` / `jetson_clocks`，也无需 ARM64 交叉验证。
+> 现行事实见 `AGENTS.md` §1/§3 与 `docs/AGENT_LOG.md` 2026-11-20 条目。
+
 > 目标：把现在 Ubuntu 台式机上的工作区完整搬到达 Jetson，行为与今天一致。
 > 关键前提：**JetPack 6.x = Ubuntu 22.04 = ROS 2 Humble**，和当前环境完全一致。
 > ⚠️ 不要刷 JetPack 7（Ubuntu 24.04 → ROS 2 Jazzy），Nav2 API 有变化，会白折腾。

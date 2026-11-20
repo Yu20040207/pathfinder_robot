@@ -5,7 +5,9 @@
 
 ## 1. 项目速览
 
-- ROS 2 Humble + Python 3.10（项目虚拟环境 `.venv/`）+ ESP-IDF；开发机 Ubuntu，目标主控 Jetson Orin Nano Super 8GB。
+- ROS 2 Humble + Python 3.10（项目虚拟环境 `.venv/`）+ ESP-IDF。
+  **实机主控 = Intel i5-13500H 迷你主机（x86_64 / 16 线程 / 15 GB / Ubuntu 22.04.5），不是 Jetson**
+  （2026-11-20 实测；此前文档里的 Jetson Orin Nano Super 计划已作废，仅作历史参考）。
 - 主工作区 `ros2_ws/`：`fwr_bringup`、`fwr_voice`、`fwr_navigation`、`fwr_imu`、`fwr_interfaces`、`fwr_vision`、`fwr_attendance`。
 - 实机：ESP32-S3 底盘控制、DM-IMU-L1、RPLIDAR C1、HP60C 相机；固件在 `firmware/`。
 - 当前分支 `codex/real-nav2-imu-turn`，工作区可能有很多未提交/未跟踪改动。**不要用 `git checkout`、`git reset`、`git clean` 清掉别人的工作。**
@@ -20,6 +22,13 @@
 5. 涉及实机时先查 `ls /dev/serial/by-id/`、`ps -ef | grep -E 'ros2|sllidar|dm_imu|base_bridge'`；不要重复启动同一节点。
 
 ## 3. 当前已验证快照（2026-10-24）
+
+> **主控硬件（2026-11-20 实测，取代旧的 Jetson 说法）**
+> - CPU：Intel Core i5-13500H（13 代，12 核 16 线程，最高 4.7 GHz），内存 15 GB，Ubuntu 22.04.5 x86_64
+> - **没有** `nvpmodel` / `jetson_clocks` / `/etc/nv_tegra_release` —— 不是 Jetson 平台
+> - CPU governor = **powersave**（省电降频）；`/sys/.../cpu0/cpufreq/scaling_governor`
+> - 后果：建图时 `slam_toolbox` 报 `options.num_threads: 50 exceeds maximum 16`，Ceres 占满核，
+>   前雷达 `sllidar_node` 出现过 2.6~3.0 s 静默（进程活着、USB 无断开），由 `fwr-lidar-watchdog` 杀掉重拉。
 
 - 雷达 C1 使用 **by-id** 路径；`/dev/ttyUSB*` 会因插拔/复位重新枚举，不要把编号写死。
 - **雷达视野实测（2026-10-30）**：物理遮挡只有后方 **±45°（共 90°）**，
@@ -193,7 +202,7 @@
 | --- | --- |
 | `front_stop.points` | [0.32,0.22, 0.38,0.22, 0.38,-0.22, 0.32,-0.22]（半宽 **0.22**，护栏下限）|
 | `front_slow.points` | [0.30,0.22, 0.50,0.22, 0.50,-0.22, 0.30,-0.22] |
-| `stop_pub_timeout` | **18.0**（护栏要求 ≥17）|
+| `stop_pub_timeout` | **600.0**（2026-11-20 批准 18→600；护栏允许 17.0 ≤ value ≤ 600.0）|
 | `source_timeout` | 0.6 |
 
 **底盘 `base_bridge`**
@@ -259,12 +268,20 @@
 - 一次穿过（through-poses）模式继续时要**重置派发计数**（`sm.reset_dispatched()`），
   否则状态机认为"已走完"立刻停。
 
-## 3.977 🧍 后退让位（trail_reverser）状态：**默认关闭**
+## 3.977 🧍 后退让位（trail_reverser）状态：**默认开启**（2026-11-20 起）
 
-- 默认 `trail_reverser:=false`（`real_navigation.launch.py`），代码保留。
+- `real_navigation.launch.py` 的 `trail_reverser` 默认值 = **true**，手机端「开始导航」
+  起的栈里 `/trail_reverser` 会运行（2026-11-20 现场核对：节点在、`enabled=True`）。
 - 触发条件（全部满足）：功能启用 / 车尾不近障 / **左右两侧都 < 0.5 m**（用 `max` 判，
   原来左右混一起取 min 是错的）/ 前方被挡 ≥1 s / 轨迹 ≥0.5 m / 冷却 5 s。
+  - **"被挡"的判据（2026-11-20 修）**：除"过滤后速度≈0"外，新增
+    `no_forward`——原始指令想前进（`raw.linear.x > 0.02`）但过滤后线速度≈0
+    （方向安全选择器把"前进+转向"改判成纯原地转）也计为被挡。
+    此前这种情况 `blocked_for_s` 永不累计 → 车头顶墙只会左右转、不后退。
 - 后退 0.08 m/s，沿记录轨迹；任意一侧 ≥0.9 m、车尾 <15 cm、1.2 m、10 s 任一满足即结束。
+- **收工余量**：`backup_front_clear_m`（默认 **0.60 m**）——车头净空 ≥
+  max(`front_need_m` 0.45, 0.60) 才判定"能转了"收工；此前只留 4 cm（0.45），
+  退完立刻又贴墙。
 - 与任务的关系：发布 `/reverse/active`；explorer 看到后**暂停**任务，结束再恢复；
   同一点让位 >2 次 → 跳过该点（逐段：`skip_leg`；through-poses：删最近点）。
 - ⚠️ 该链路**只有单元测试与独立域模拟**（`tools/sim_reverse_chain_*.py`，需 `ROS_DOMAIN_ID≠0`），
