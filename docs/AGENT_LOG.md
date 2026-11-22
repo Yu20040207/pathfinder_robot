@@ -10937,3 +10937,35 @@ battery_modbus: 已打开 /dev/jsy_meter → 已切换直流模式（0x0205）  
 ### 下一步
 - 用户实车出门框再看一次：正常应"车尾离开门线 ~18 cm 后才转身"。
 - 若仍偏早 → `door_clear_margin_m` 0.10→0.15；若明显过度（车走太远才转）→ 0.10→0.06。
+
+## 2026-11-22 09:28 · 仓库收尾：main 快进 394 个提交，首页终于是最新代码
+
+### 背景
+- 用户看 GitHub 首页（`Yu20040207/pathfinder_robot`）只有一个月前的 `bf81932`，
+  问"方案推到哪了、主项目里怎么没有"。
+- 实测：三个分支在**同一条直线**上（`git merge-base --is-ancestor main feature/dual-lidar` 成立），
+  `main(eb77238)` 是 `feature/dual-lidar(8646811)` 的祖先，中间 **394 个提交**；
+  `codex/real-nav2-imu-turn(8d2e936)` 还更早，无独有提交。
+  根因是历史上换了两次分支名（codex→feature/dual-lidar），**没人把 main 往前推**。
+
+### 做了什么（用户："合"）
+```bash
+git checkout main
+git merge --ff-only feature/dual-lidar     # 快进，无冲突
+git push origin main                        # bf81932..8646811
+```
+- 远端 `main` 现在 = `8646811`（含今天的 3 个提交：视觉/跟随代码、文档同步、Nav2 方案）。
+- `feature/dual-lidar` 与 `main` 指向同一提交，均已与远端同步。
+
+### 已验证
+- `git ls-remote origin refs/heads/main` → `8646811846…`（= 本地 main）
+- `git branch -vv` → `main 8646811 [origin/main]`、`feature/dual-lidar [origin/feature/dual-lidar]`
+
+### 遗留
+- `codex/real-nav2-imu-turn` 本地领先远端 1 个提交（其提交已被 main 包含），可推可删。
+- 未打新 tag（用户只要"合"）。
+
+### 规则提醒（下次别再攒 394 个）
+1. `main` = 实机跑得通的那版，别在上面乱改；
+2. 每次改动开 `feature/日期-主题`，验证完**合回 main 并 push**；
+3. 每天开工 `git pull`、收工 `git push`，不要攒到几百个提交。
