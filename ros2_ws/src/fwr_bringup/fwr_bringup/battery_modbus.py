@@ -33,6 +33,8 @@ import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from sensor_msgs.msg import BatteryState
+
+from fwr_bringup.battery_charge import ChargeDetector
 from std_msgs.msg import Bool, Float32
 from std_srvs.srv import Trigger
 
@@ -131,6 +133,11 @@ class BatteryModbus(Node):
         # 电流几乎一样（+0.74 A ≈ 18 W 正好是主控+雷达的自耗），
         # 只能靠电压门限区分。
         self.declare_parameter('charge_min_voltage', 24.60)
+        # 2026-11-22：充电判定改成"电压长窗斜率 + 去抖"，见 battery_charge.py。
+        # 旧规则在低 SOC（21.4 V）时每秒在充电/未充电之间翻（用户报"一直跳动"）。
+        self.declare_parameter('charge_rise_vps', 8e-5)      # ≈ +0.29 V/h 算在充
+        self.declare_parameter('charge_fall_vps', -3e-5)     # ≈ -0.11 V/h 算没充
+        self.declare_parameter('charge_debounce_s', 30.0)    # 候选状态要稳定这么久才切
         self.declare_parameter('min_voltage', 5.0)
         self.declare_parameter('max_voltage', 30.0)
 
@@ -153,8 +160,14 @@ class BatteryModbus(Node):
                             self._on_clear_energy)
 
         self._zero_count = 0
-        self._v_history = []
         self._charging = False
+        self._charge = ChargeDetector(
+            rise_vps=float(self.get_parameter('charge_rise_vps').value),
+            fall_vps=float(self.get_parameter('charge_fall_vps').value),
+            top_v=float(self.get_parameter('charge_min_voltage').value),
+            debounce_s=float(self.get_parameter('charge_debounce_s').value),
+            initial=False)
+        self._charge_log_at = 0.0
         if not self._mock:
             self._open()
         period = 1.0 / max(0.1, float(self.get_parameter('poll_hz').value))
@@ -285,36 +298,18 @@ class BatteryModbus(Node):
         msg.capacity = float('nan')
         msg.design_capacity = float('nan')
         msg.percentage = percent_from_pack(voltage, self._cells)
-        # 充电判定（2026-11-19 修正）
-        # 旧规则只看"电压比近 10 分钟峰值高 0.15 V"：满电 CV 阶段电压几乎不动
-        # （实测 24.70~24.76 V 来回晃、电流稳定 +0.78 A），永远判不出充电，
-        # 手机就一直显示"未充电"。
-        # 现在以**电流方向**为主判据（接充电器时实测正电流 +0.7~0.8 A），
-        # 电流接近 0 时再退回电压趋势判断。
+        # 充电判定（2026-11-22 重写）：斜率 + CV 顶点兜底 + 去抖。
+        # 旧规则三段自相矛盾，低 SOC 时 1 Hz 方波（用户："一直充电中跳动"）。
         now_s = time.monotonic()
-        self._v_history.append((now_s, float(voltage)))
-        while self._v_history and now_s - self._v_history[0][0] > 600:
-            self._v_history.pop(0)
-        i_now = float(current)
-        v_gate = float(self.get_parameter('charge_min_voltage').value)
-        # 电流要明显为正**且**电压被顶到位，两个条件同时成立才算充电。
-        # 只看电流：车自耗 +0.74 A 和充电 +0.76 A 分不开（实测）。
-        # 只看电压：拔枪后电压要缓落好几分钟，会继续冒充"充电中"。
-        if i_now >= 0.20 and voltage >= v_gate:
-            self._charging = True
-        elif i_now <= -0.20:
-            self._charging = False
-        elif self._charging and voltage < v_gate - 0.05:
-            # 迟滞：已经在充电的，电压掉到门限下 50 mV 才退出
-            self._charging = False
-        else:
-            # 其余情况按 10 分钟电压趋势兜底
-            ref_v = (self._v_history[0][1] if len(self._v_history) > 1
-                     else float(voltage))
-            if voltage >= ref_v + 0.10:
-                self._charging = True
-            elif voltage <= ref_v - 0.10:
-                self._charging = False
+        self._charging = self._charge.feed(now_s, voltage, current)
+        if now_s - self._charge_log_at >= 10.0:
+            self._charge_log_at = now_s
+            sl = self._charge.slope
+            self.get_logger().info(
+                '充电判定：V=%.2f V I=%.2f A 斜率=%s V/s → %s'
+                % (voltage, current,
+                   'n/a' if sl is None else '%.2e' % sl,
+                   '充电中' if self._charging else '未充电'))
         if self._charging:
             msg.power_supply_status = BatteryState.POWER_SUPPLY_STATUS_CHARGING
         else:
