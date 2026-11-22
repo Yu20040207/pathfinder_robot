@@ -147,9 +147,24 @@ systemd 服务 `fwr-mqtt-bridge.service`，开机自启。
 `/etc/udev/rules.d/99-fwr-serial.rules`：
 
 ```
-SUBSYSTEM=="tty", KERNELS=="3-1.1", SYMLINK+="jsy_meter"
-SUBSYSTEM=="tty", KERNELS=="3-1.3", SYMLINK+="ultrasonic"
+SUBSYSTEM=="tty", KERNELS=="3-1.2", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", SYMLINK+="jsy_meter"
+SUBSYSTEM=="tty", KERNELS=="3-1.3", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", SYMLINK+="ultrasonic"
 ```
+
+> 📌 **当前 USB 拓扑（2026-11-22 08:56 实测，换口后必须同步这张表）**：
+> `3-1.1 = DM-IMU-L1`、**`3-1.2 = JSY 电池表 CH340`**、`3-1.3 = 超声波 CH340`、
+> `3-1.4 = USB 网卡`、`3-2 / 3-4 = 后 / 前雷达 CP2102`、`3-7 = ESP32 底盘`、
+> `3-9 = 相机`、`3-10 = 蓝牙`。两个 CH340 **ID 完全相同**，只能靠端口区分；
+> 换个 hub 口就要改 `KERNELS`，否则 `jsy_meter` 会指到别的串口上。
+
+> ⚠️ **2026-11-22 事故：必须带 `ATTRS{idVendor/idProduct}` 两个条件**。
+> 只按 `KERNELS`（物理端口）匹配时，USB 重新枚举一换位就会指错设备：那天
+> **IMU（DM-Tech）跑到 3-1.1**，`jsy_meter` 于是指向 `ttyACM0`=IMU 串口，
+> 电池节点每秒往里写 Modbus 帧（日志全是 `切换直流模式失败: CRC 校验失败`），
+> IMU 同一条线上还挂着 `dm_imu_node` 在读。加上 vendor/product 后：
+> 端口上没有 CH340 就不建软链，电池节点报"打不开"而**不会污染别的串口**。
+> 当天第二个 CH340（JSY 表本身）根本没枚举 —— 主电池开关断开时表没电，
+> USB-TTL 也不会出现在 `lsusb`，表现就是页面「电量/电压 --」。
 
 ### 关键坑：直流模式要写 **2**，不是手册写的 1
 

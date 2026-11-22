@@ -1,5 +1,11 @@
 # 双雷达方案（feature/dual-lidar）
 
+> ✅ **2026-11-21 状态：已实装，最终遮罩 ±80°（每路 200°），不是本文中间段落写的 ±70°/220°。**
+> 原因：±80° 让重叠从 80° 降到 40°，重复点减半，同时保留单雷达故障时 200° 的覆盖；
+> 实测 `/scan_merged` 跨度 359°，`scan_merger` 输出被 slam_toolbox / AMCL / 手机共用。
+> 下文表格里的「±70°（当前）」是 2026-11-18 的中间决定，**以 `real_mapping.launch.py`
+> 的 `rear_half_angle_rad = radians(80)` 为准**。现行事实与看门狗配置见 `AGENTS.md` §3。
+
 **分支**：`feature/dual-lidar`
 **基线**：`lidar-single-baseline`（tag，commit `8d2e936`）
 **基线文档**：[`docs/hardware/lidar-single-baseline.md`](../hardware/lidar-single-baseline.md)

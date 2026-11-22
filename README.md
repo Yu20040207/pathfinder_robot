@@ -129,9 +129,9 @@ ros2 launch fwr_bringup navigation_preview.launch.py
 
 此节点**不发布 `/cmd_vel`，不会驱动底盘**。本机尚未安装 Nav2；驱动轮计划直径虽已给出，但实测滚动半径、轮距、编码器/IMU 与急停接口尚未接入。路径预览不能替代可行驶的导航系统。后续按 [第二阶段首步计划](docs/superpowers/plans/2026-10-05-navigation-preview.md)接入底盘和 Nav2。当前 `clearance_m: 0.25` 仅供离线预览，须在实测机器人外廓后重新标定。
 
-平整地面、低功耗优先时的底盘方案见 [底盘驱动方案](docs/hardware/chassis-drive-selection.md)。当前采用左右两路差速驱动，配前端左右两只无动力万向脚轮；底盘外廓为长 52 cm、宽 35 cm、总高 20 cm。样机先用两台 24 V 立盛 JGY4632-370-2485 的 77.7:1 档编码器减速电机，配直径 100 mm、宽 35 mm 驱动轮；满载 24 kg 时的速度、爬坡能力、连续运行温升和轴承载荷待实测验收。接下来优先打通 HP60C 持续出帧和双机械臂 CAN 总线舵机接口。
+平整地面、低功耗优先时的底盘方案见 [底盘驱动方案](docs/hardware/chassis-drive-selection.md)。当前采用左右两路差速驱动，配前端左右两只无动力万向脚轮；底盘外廓为长 52 cm、宽 35 cm、总高 20 cm。样机先用两台 24 V 立盛 JGY4632-370-2485 的 77.7:1 档编码器减速电机，配直径 100 mm、宽 35 mm 驱动轮；满载 24 kg 时的速度、爬坡能力、连续运行温升和轴承载荷待实测验收。接下来优先打通 HP60C 持续出帧和双机械臂 CAN 总线舵机接口。视觉方案（抓取用夹爪端深度相机、机身广角 RGB 做直播、现有 HP60C 复用为 3D 避障层、深度与 2D 雷达的分工）见 [视觉方案提议稿](docs/hardware/vision.md)，**尚未实施**。人体跟随方案（安静办公区 / 不带标签 / 跟随速度与导航同为 0.20 m/s / 全程复用现有安全链避障）见 [人体跟随方案](docs/hardware/follow-plan.md)，同样**尚未实施**。手机看相机画面（WiFi 先行，MJPEG，机器人 `fwr-media.service` 端口 8081，页面手动模式急停右侧 📷）见 [视觉方案 §3.6.1](docs/hardware/vision.md)。
 
-后续建图与自主导航的传感器架构见 [底盘激光雷达与导航架构](docs/hardware/chassis-lidar-navigation-design.md)：样机先在底盘前缘固定一只 2D 雷达，配合轮编码器、底盘 IMU、建图/定位和 Nav2。前置单雷达不保证周围 360° 无盲区感知；后置雷达是否需要待实测决定。在后方感知与安全验证完成前，不启用自主倒车；目前仅记录设计，不表示已接入雷达或实机导航。
+后续建图与自主导航的传感器架构见 [底盘激光雷达与导航架构](docs/hardware/chassis-lidar-navigation-design.md)。**实机现状（2026-11-21）：前后各一只 RPLIDAR C1**，两只各遮罩 ±80°（车身自击段）后各 200°，前端保 `base_link ±100°`、后端保 `80~280°`，由 `scan_merger` 合成 **`/scan_merged`（360°）** 供 slam_toolbox / AMCL / 手机扫描图使用；单雷达仍可 `start_rear_lidar:=false` 回退。雷达看门狗 `fwr-lidar-watchdog` 同时监控 `/scan` 与 `/scan_rear`。装位与最新约束见 `AGENTS.md` §3 与 `docs/AGENT_LOG.md`。
 
 腰部折叠六舵机、USB-CAN 调试卡和 ESP32-S3 收发器的候选方案及协议疑点见 [腰部 CAN 执行器选型记录](docs/hardware/waist-can-actuator-selection.md)。此方案尚未完成型号核对、机构扭矩计算和实机验证。
 
@@ -141,7 +141,7 @@ ros2 launch fwr_bringup navigation_preview.launch.py
 
 当前没有整机 CAD。`docs/hardware/preview/fwr_chassis_preview.urdf` 按用户提供的底盘外廓长 52 cm、宽 35 cm、总高 20 cm 绘制为圆角长方体；两只主动轮位于内部并靠左右边，两只可自由转向的从动轮并排位于前端。主动轮按计划直径 100 mm、宽 35 mm 显示，前脚轮尺寸和全部轮子的精确安装位置仍是可视化占位值，不能直接用作导航 footprint、碰撞检测或制造依据。运行以下命令可在独立 ROS 通信域中打开 RViz：
 
-预览和 `fwr_bringup` 演示 URDF 还包含底盘顶部靠前的 RPLIDAR C1 示意件及固定坐标系 `laser_front`（相对 `base_link`：前 0.19 m、扫描面高 0.2298 m）。示意件外廓按 C1 机械图约 55.6×55.6×41.3 mm 绘制，细节形状及底盘安装位仍是近似，须在实物上核对；当前没有雷达驱动或实机扫描数据。
+预览和 `fwr_bringup` 演示 URDF 还包含底盘顶部靠前的 RPLIDAR C1 示意件及固定坐标系 `laser_front`（相对 `base_link`：前 0.19 m、扫描面高 0.2298 m）。示意件外廓按 C1 机械图约 55.6×55.6×41.3 mm 绘制，细节形状及底盘安装位仍是近似，须在实物上核对。实机 URDF（`ros2_ws/src/fwr_bringup/description/fwr_chassis_demo.urdf`）已包含 `laser_front`（前 0.21 m）与 `laser_rear`（后 −0.229 m）两只雷达，实机扫描数据在跑。
 
 ```bash
 ./scripts/show_chassis_preview_rviz.sh

@@ -21,7 +21,7 @@
 4. 先 `grep` / `glob` 定位，再按行范围 `read`；不要通读 `build/`、`install/`、`log/`、`.venv/`、`ascam_ros2_ws/third_party/`、`data/`、`models/`。
 5. 涉及实机时先查 `ls /dev/serial/by-id/`、`ps -ef | grep -E 'ros2|sllidar|dm_imu|base_bridge'`；不要重复启动同一节点。
 
-## 3. 当前已验证快照（2026-10-24）
+## 3. 当前已验证快照（2026-11-21）
 
 > **主控硬件（2026-11-20 实测，取代旧的 Jetson 说法）**
 > - CPU：Intel Core i5-13500H（13 代，12 核 16 线程，最高 4.7 GHz），内存 15 GB，Ubuntu 22.04.5 x86_64
@@ -30,19 +30,35 @@
 > - 后果：建图时 `slam_toolbox` 报 `options.num_threads: 50 exceeds maximum 16`，Ceres 占满核，
 >   前雷达 `sllidar_node` 出现过 2.6~3.0 s 静默（进程活着、USB 无断开），由 `fwr-lidar-watchdog` 杀掉重拉。
 
-- 雷达 C1 使用 **by-id** 路径；`/dev/ttyUSB*` 会因插拔/复位重新枚举，不要把编号写死。
-- **雷达视野实测（2026-10-30）**：物理遮挡只有后方 **±45°（共 90°）**，
-  即有效视场约 **270°**。扫描角 0° = 车尾，-45°~+45° 读到 0.12~0.15 m 的车身自击，
-  `/scan_mapping` 现在屏蔽后方 **±50°**，有效视场 **260°**。
-  **注意：这个值必须在 launch 里改**（`real_mapping.launch.py` 的
-  `rear_half_angle_rad`），改节点代码默认值无效 —— launch 传参会覆盖它。
-  2026-10-31 就是因为 launch 里写死 π/2，长期停在 180° 视场，白扔两侧各 45°。
-  由此得到两条硬约束：
-  - `/scan` 的后方扇区（scan 角度 0° 附近 = ranges 数组中部）读到的是**车身**，不是障碍；
-    `/scan_mapping` 用 `mask_rear_ranges` 屏蔽这一段，建图只用前方+两侧。
-  - 任何拿 `/scan` 判断“是否被堵 / 能不能转向”的代码**必须忽略后方扇区**，
-    否则会把自己车体当成墙（自动建图曾因此误判“三面被堵”进入死循环）。
-  - 雷达倒装 180°：`/scan` 角度范围 [-180°,+180°]，**index 0 侧 = 车头方向**，index 中部 = 车尾。
+- **雷达：前后双雷达（2026-11-18 起，实机在跑）**
+  两只都是 RPLIDAR C1、460800、`scan_mode Standard`、10 Hz，全部用 **by-id** 路径
+  （`/dev/ttyUSB*` 会因插拔/复位重新枚举，**不要写死编号**）：
+
+  | 位置 | 节点 | frame | 话题 | by-id 尾段 |
+  | --- | --- | --- | --- | --- |
+  | 车头 | `sllidar_node` | `laser_front` | `/scan` | `e00aaf475431...` |
+  | 车尾 | `sllidar_node_rear` | `laser_rear` | `/scan_rear` | `14da82d39131...` |
+
+  - 安装位（`description/fwr_chassis_demo.urdf`）：前 `xyz=(0.21, 0, 0.0425)` rpy yaw **π（倒装 180°）**；
+    后 `xyz=(-0.229, 0, 0.0425)` rpy yaw **0**
+  - 两路各经 `scan_mapping_filter` 遮罩 **±80°**（车身自击段）→ 每路有效 **200°**；
+    前保 base_link ±100°、后保 80~280°，**并集 360°**
+  - `scan_merger` 合成 **`/scan_merged`**（base_link 系，跨度 359°）：
+    slam_toolbox、AMCL、手机扫描图都吃这一路
+  - 单雷达回退 `start_rear_lidar:=false` 时才退回 `/scan_mapping`（老的 260° 视场）
+  - **改视场必须改 launch**（`real_mapping.launch.py` 的 `rear_half_angle_rad`），
+    改节点默认值无效（launch 传参覆盖）。2026-10-31 就因为 launch 写死 π/2，长期停在 180°
+  - slam_toolbox **延后 35 秒启动**（`TimerAction`），等两路+合并稳定，否则首帧只有半圈、
+    车不动时地图永远缺一半
+  - `fwr-lidar-watchdog` 管**两路**（`--stale 2.5 --cooldown 15`），任一路断流就杀对应节点等 launch 重拉；
+    remaps 必须用配对写法 `(('/scan','/scan_rear'),)`，扁平写法会让看门狗自己崩（2026-11-20，一天 67 次）
+
+  单雷达回退时仍生效的老约束：
+  - `/scan` 的后方扇区（scan 角 0° 附近 = ranges 中部）读到的是**车身**，不是障碍；
+    `mask_rear_ranges` 屏蔽这一段
+  - 任何拿 `/scan` 判断"是否被堵 / 能不能转向"的代码**必须忽略后方扇区**，
+    否则会把自己车体当成墙（自动建图曾因此误判"三面被堵"死循环）
+  - 倒装：`/scan` 角度范围 [-180°,+180°]，**index 0 侧 = 车头**，index 中部 = 车尾
 - **设备路径**（2026-11-03 实测更正，原文档写反了）：
   - ESP32-S3 底盘 = **`/dev/ttyACM0`**（`ID_VENDOR=Espressif`），115200，
     `BASE_CONTROL_V2`，`S2` 为 14 字段
@@ -65,7 +81,11 @@
 - 超速：`OVERSPEED_MMPS 700`、窗口 0.4 s
 
 **里程计**（`base_bridge_core.py`）
-- `track_m 0.262`、`circumference_m 0.2075`、`counts_per_rev 1468`
+- ⚠️ **`track_m 0.317`**（2026-11-11 换 WSDC2412D-V3 + 100 mm 轮 + 卷尺实测 317 mm；
+  旧值 0.262 / 0.268 作废）、`circumference_m 0.314159`、`counts_per_rev 6400`
+- 任何"单轮包络"计算（`follow_core.limit_pair`、`base_bridge.manual_velocity`）
+  **必须用 0.317**，用旧值会把上限算小 1.3 cm/s → 底盘整帧丢弃 → "跟随中但车不动"
+  （2026-11-21 实机 11 次 `Rejected out-of-range manual velocity`）。有单测钉死。
 - 3 米实测误差 +0.20%（换胎后标定）
 
 **IMU 航向修正**（`fwr_imu/node.py` + launch `imu_yaw_scale`）
@@ -98,7 +118,259 @@
 - 用户级 skill：`~/.agents/skills/ros2-engineering-skills`（Apache-2.0，DSH 已识别）。
 - ROS MCP：`~/.local/share/fwr-ros-mcp/venv`（`ros-mcp 3.1.2`）+ 只读包装 `~/.local/bin/ros-mcp-readonly`；DSH 的 `mcp-ros` 行已启用，HMR 热加载 11 个只读工具。
 - `rosbridge 2.0.8` 监听 9090；连接地址 `127.0.0.1:9090`，端到端只读验证通过（35 节点、`/scan` 720 点）。
+- 机器人上 `fwr-media.service`（2026-11-21 起）监听 **8081**，把相机画面转 MJPEG 给手机
+  服务端跑 `tools/robot_mjpeg_server.py --fps 0 --quality 70 --width 480 --fallback-test-pattern`
+  （`--width 480` = 送到手机的是 **480x360 / 16.8 KB / 2.1 Mbps**；去掉它则按原图
+  640x480 / 44 KB / 5.3 Mbps 送。`--width` 是**唯一**需要服务端二次编码的路径，实测 encode 6 ms）：
+  **`--fps 0` 千万别改成 10**——节点 15 fps 与限速拍频后实际只出 7.5 fps，延迟翻倍。
+  `--fallback-test-pattern` 会在相机没起时先出测试图案。延迟数据见
+  `docs/hardware/vision.md`（DDS 2.8 ms、服务端帧龄 24~54 ms、手机 15 fps/67 ms）。
+  相机由 **`fwr-camera.service`**（`ros2 run fwr_bringup hp60c_uvc_node`）独占 `/dev/video0`，
+  发布 `/robot/camera/{color,depth}/image_raw` + `color/image_raw/compressed`（原 JPEG）；
+  MJPEG 服务只订阅 ROS 话题，优先走 compressed。
+  ⚠️ **HP60C 走 UVC 裸流**：厂商 `ascamera_node` 在本机 **1 s 后自己停流**（闭源 SDK），
+  且**不要 `kill -9` 它**（会弄没 `/dev/video0`，用 `3-1.3/authorized` 0→1 复位）；
+  竖屏格式 = 2560 B 头 + JPEG 640×480 + 深度 640×480×2（**0.1 mm**）+ 512 B，≈630 KB/帧。
+  hub 上 640×642 只有 **9.3 fps**，1280×720 只有 0.9 fps。详见 `docs/hardware/vision.md` §3.6.2。
+  ⚠️ **HP60C 裸流是左右镜像的**（2026-11-21 用户用手机相机对照确认）：绕开厂商 SDK 直接读
+  UVC 拿到的是镜像画面（厂商 SDK 里应该是翻过的）。`hp60c_uvc_node` 的参数 **`mirror`
+  默认 `true`**，会把**彩色 JPEG（重编码）与深度图一起翻正**，两者保持对齐；
+  代价是相机节点 CPU 从 ~9% 涨到 **~21%**、单帧 34 KB → **44 KB**（q92）。
+  换相机/换固件后要重新确认这一项（对着带文字的东西看字是否正常，或把手放镜头左侧看画面左右）。
+  ⚠️ **MJPEG 服务只订 `compressed`，别无条件订原始图**（2026-11-21）：相机节点一旦看到
+  原始图有订阅者，就要每帧解码 34 KB JPEG → 921 KB `bgr8` 再经 DDS 发出去
+  （15 fps ≈ **13.8 MB/s**），实测把 `hp60c_uvc_node` 从 ~9% 顶到 **~90% CPU**、
+  负载冲到 47，手机摇杆跟着"一卡一卡"。现在 `robot_mjpeg_server.py` 只在
+  **3 秒没收到 compressed** 时才退回订阅原始图，压缩一到立刻退订。
+  改动后实测：相机节点 CPU **9%**、MJPEG 15 fps、帧龄 23~49 ms。
+  ⚠️ **禁止用 `ros2 lifecycle get/set` 做高频状态查询**（2026-11-21）：每次 CLI 要新起
+  一个 DDS participant，**~2 s CPU**，而且负载一高就 10 s 超时
+  （`collision_monitor` 日志会刷 `failed to send response to /get_state (timeout)`）。
+  `chain_watchdog` 已改为**节点内 GetState 客户端异步查询**，CLI 只在服务不就绪时兜底且
+  节流 120 s；原先每 15 s 两个 CLI 把 CPU 吃满，是摇杆卡顿与"安全链一直检查"的共同根因。
+  `collision_monitor_forward` 卡在 `inactive` 时，CPU 降下来后
+  `ros2 lifecycle set /collision_monitor_forward activate` 秒回（实测
+  `Transitioning successful` / `active [3]`），恢复后 `/cmd_vel_auto_forward_filtered` 20 Hz 正常。
+  页面手动模式**急停右侧 📷** 打开；地址由 `GET /api/devices/{id}/media` 下发（云端
+  `JC_MEDIA_HOSTS`）。⚠️ **8080 不要用**（页面会重定向到 `/car/`）；**HTTPS 页面会拦 HTTP 视频**。
 - 启用/关闭/回滚步骤见 `docs/agent/ros-mcp-setup.md`；不要用 `FWR_ROS_MCP_MODE=full` 连实机。
+
+### 视觉：跟随模式的人体识别（2026-11-21 新建）
+
+- 节点 **`person_detector`**（`ros2_ws/src/fwr_bringup/fwr_bringup/person_detector.py`，
+  systemd **`fwr-vision.service`**，`After=fwr-camera`）：
+  - 订阅 `/robot/camera/color/image_raw/compressed`，发布 **`/robot/vision/persons`**（`std_msgs/String` JSON，**归一化坐标**）
+  - 订阅 **`/robot/vision/select`**（`{"id": N}`，N<0 取消）锁定要跟随的人
+  - 模型 **YOLO11n ONNX** 在 `models/yolo11n.onnx`（11 MB，onnxruntime 跑，见下）
+  - 默认 8 Hz、输入 416、conf 0.35；纯逻辑在 `vision_boxes.py`（有 11 个单测）
+- ⚠️ **必须用 onnxruntime，不能 cv2.dnn**：OpenCV 4.10 解析 YOLO11 的 `Concat` 节点直接报
+  `Incorrect size of input array`，模型加载不起来。实测 ORT（i5-13500H）：320→13 ms、
+  **416→21 ms**、640→44 ms（4 线程）。
+- ⚠️ **`session.intra_op.allow_spinning = 0` 必须设**：默认自旋让线程在两次推理之间忙等，
+  8 Hz 限频也压不住，实测 vision 常驻 **319% CPU**；关掉 + 2 线程后 **~55%**。
+- 手机端：模式选择器里 **「跟随模式」**，画面 + 框；点框 → `GET /select?id=N`，
+  框变绿显示「目标」，再点同一框或空白处取消。框由 MJPEG 服务 **`GET /boxes`** 下发
+  （1 秒没新结果标 `stale`，页面显示"没在跑"而不是冻结旧框）。
+- 🔒 **选中的目标必须"粘住"（2026-11-22，用户报"选好有时变绿、有时又变白要重选"）**：
+  绿框原来是 `person.id === followSel` 硬比 id，而 id 由 `assign_ids` 每帧贪心重匹配，
+  人走快一点/尺度一变/漏一帧就会换号 → 页面永远对不上 → 变白，只能重新点。四道修复：
+  1. `vision_boxes.pick_selected(ids, last_box)`：id 换了就用**上次的框**重新认领
+     （IoU 0.05 或中心距 < 0.6·max(w,h)）；画面里**只剩一个人**时直接认他。
+     认领成功即把 `sel_id` 改成新号（日志 `目标 id 重新认领：1 → 7`）。
+  2. 真丢了也**补发 stale 框**（最多 1 s）：`persons[]` 里带 `stale: true` 的最后位置，
+     页面画**绿色虚框**「目标（短暂丢失）」——不再瞬间变白。
+  3. 页面把车端的 `sel` 当**唯一权威**（`followData.sel !== followSel` 就跟随），
+     车端换号后绿框立刻跟住，不用用户再点。
+  4. `person_follower` **跳过 `stale` 框**：控制侧仍走自己的 `lost_stop_s 0.8 s`
+     沿用上一帧逻辑，别把"丢失"伪装成"看见"。
+  单测：`tests/test_person_detector.py` 的 `test_pick_selected_*`（3 例，含"都走了"）。
+- 识别之外还有跟随控制（见下段「跟随控制」）；跟随走手动通道，受底盘双门控。
+- ⚠️ **部署要同时落到 `ros2_ws/build/fwr_bringup/fwr_bringup/`**：实机 `ros2 run` 解析到的是
+  **build 副本**（`python -c "import fwr_bringup.person_detector as m; print(m.__file__)"` 实测），
+  只改 `src/` 不生效。2026-11-22 就因为只改了 `src/` 又把 import 行改漏（字符串 replace 没匹配上、没 assert），
+  一框选目标就 `NameError` → 检测线程死掉 → 手机端显示"人体识别没在跑"。
+  改完必须真发一次 `/robot/vision/select` 再抓 `GET :8081/boxes`，并
+  `journalctl -u fwr-vision | grep -c Traceback` 确认没有新异常；`tests/test_person_detector.py`
+  有静态回归（调用了的 helper 必须 import 过）。
+- 单帧 JSON 里 `infer_ms` 是推理耗时，不是帧率。
+
+**跟随控制（2026-11-21 第五版，走手动通道）**
+- 节点 **`person_follower`**（`person_follower.py` + 纯逻辑 `follow_core.py`，
+  systemd **`fwr-follow.service`**）：订阅 `/robot/vision/persons`、`/scan_merged`、
+  `/follow/enable`；发布 **`/cmd_vel_manual`** 与 `/follow/state`。
+- **为什么走 `/cmd_vel_manual`**：`base_bridge` 只认 `/cmd_vel_auto_safe`（需 nav 栈）
+  和 `/cmd_vel_manual`。跟随是页面发起的手动行为，manual 通道在没起导航时也通，
+  且天然受 `motion_enabled` + `manual_enabled` 双门控——**代理不用、也不能替用户开门**。
+- ⚠️ **远近只看"框高占画面比例"，不要再用 `fy×1.7/h` 估米数**（2026-11-21 用户实测：
+  人一走近框被画面裁掉，h 卡在 1.0，估出距离永远 ~2 m → 车"该停不停"一直往前顶）。
+  `stop_box_h 0.85` 停（用户 2026-11-21 晚第三次实测：85% 才停，**框 80% 时还要在动**）、
+  `resume_box_h 0.81` 才重新走
+  （**迟滞只有 4%**；从 75% 上调到 85% 是因为 75% 就停车会让车"停住等人"）、
+  `0.82~0.85` 按比例慢走、`≤0.30` 不追只转过去看。
+- ⚠️ **速度曲线（2026-11-21 两次调快，"太慢"）**：`go_box_h` **0.62 → 0.70 → 0.82**。
+  最早框 0.65~0.70（最常见的跟随距离）只有 **0.19→0.10 m/s**，体感就是"一直爬"；
+  现在框 ≤0.82 全速 0.29，只有最后 3%（0.82~0.85）减速。
+  **改这个值比改 `vmax` 影响大得多**。
+- 🚧 **前进速度的天花板是底盘给的**：`vmax 0.29` 已经是
+  `manual_max_speed_mps 0.30 − |ω|·track/2` 的极限（直行）。想真正跟上走路的人（1.0 m/s 级）
+  必须把 `base_bridge.manual_max_speed_mps` 提到 **0.5~0.6**（固件超速门限 700 mm/s 兜底），
+  **这是底盘安全参数，须用户批准**；提了之后同时改 `vmax` / `max_wheel_mps`。
+  手机摇杆不受影响（MQTT 桥另有 `max_linear_mps 0.15` 钳位）。
+- **第三版行为（2026-11-21 用户提要求后加）**：
+  1. **车头一直追着框**：目标偏离画面中线 > `face_ex 0.30` → **原地转向对准**（v=0，只转），
+     人从车旁走过去时车头会跟着转，不会盲目前冲；
+  2. **太近就后退**：框高 ≥ `back_box_h 0.92`（人贴到车头）→ 后退 `back_vmax 0.12 m/s`，
+     退到 `back_release_box_h 0.85` 才停（迟滞），**边退边按框位置转向**；
+  3. **后退也避障**：`scan_metrics` 同时算**车尾走廊**（同一 ±0.22 m 走廊，`lon<0`）。
+     车尾 0.60 m 内开始减速后退，**0.30 m 内（`back_hard_m`）禁止后退**，改成
+     `rear_blocked` = 原地转向（用户原话"后面很靠近障碍物就原地转向就好"）；
+  4. 底盘侧还有一道：`base_bridge` 的 `/base/rear_blocked`（车尾超声）为真时直接拒绝倒车指令，
+     日志 `后退被车尾超声守卫拦截`——两道都过才退。
+  5. **穿门框（第四版，2026-11-21 用户报"出门框卡在门框上"）**：
+     **门框在车身走廊（±0.22 m）外面**（横向 0.4~0.6 m），走廊避障根本看不见它；
+     人走太快时跟着框转，车角一扫就顶在门框上。现在 `passage_metrics()` 专门在
+     **走廊外侧**找两侧边界：车前 1.1 m 内左右都有边界、净宽 **0.55~1.05 m** 就算"门洞"
+     （走廊 1.2 m、大厅都不会误判），此时：
+     - **改瞄门洞中心，不看画面的框**（`gate_pass`，v ≤ 0.18 m/s，|ω| ≤ 0.45）；
+     - 中心偏 > **7 cm** 就**先原地站正**（`gate_align`，v=0），站正了再进；
+     - 门洞里有人挡（框 ≥85%）→ 停，不硬挤；
+     - 门洞信号消失后再保持 **0.35 s**（`gate_hold_s`）才退出，防阈值抖动。
+     ⚠️ **符号**：雷达 y>0 是车**左**边，门洞中心偏左要**左转**（ω>0），
+     和跟框那条 `ω = -kp·(框中心-0.5)` **相反**，写代码时别照抄（单元测试钉死了这条）。
+  6. **近障碍先对准再走**：车头 0.80 m 内有东西时，"先对准再走"的门槛从 30% 收紧到
+     **12%**（`align_first_ex`），避免"一边转一边前进"切内角撞门框。
+  7. **门内丢人 → 先出门再找人（第五版，2026-11-21 用户要求）**：
+     人比车快，出门时人先消失在画面里；以前一丢人就停车，**卡在门框中间**。
+     现在门洞还在 + 目标丢失 + 记得人最后在画面哪一侧 → `gate_exit`：
+     **继续按门洞中心低速（0.18 m/s）把门走完**（未对中先 `gate_align`，走廊有障碍照样停），
+     最多 `gate_exit_max_s 4 s`；门洞消失（= 已出门）→ `search`：
+     **原地按"最后看到人的那一侧"转身**（人在右边 → ω<0 右转，0.50 rad/s 转 2.5 s ≈72°），
+     人一回到画面立刻恢复正常跟随。⚠️ 丢人时**不知道人在哪一侧**（一直居中）就不自己乱走，
+     保持原来的"直接停"。
+  8. **整车出门才算出门（第六版，2026-11-21 用户："前雷达出去不等于车出去，我还有后雷达"）**：
+     前雷达在车头（+0.21 m），它刚过门线时**车尾还在门框里**（车长 0.46 m），
+     原来一到"前雷达看不到门框"就原地转身找人 → 车尾/车角刮门框。
+     现在 `door_metrics()` 用 **360° `/scan_merged`**（前+后雷达）在车身两侧
+     横向 **0.28~0.80 m** 找门框点（两侧都有、净宽 0.5~1.35 m 才算"门线还在"），
+     给出门线的纵向位置 `front_lon`；**只有 `front_lon < -(扫掠半径 + 0.10) = -0.415 m`**
+     才算整车出去，这时才允许 `search` 原地转身。判定用 `follow_core.door_clear()`。
+     ⚠️ **2026-11-22 用户第二次报「没完全出来就转向」**：旧阈值只减车尾
+     （`-(0.23+0.06) = -0.29`），但原地转身时**车尾角点**扫到
+     `hypot(0.23, 0.215) = 0.315 m`，比车尾还靠后 8.5 cm → 门线在 -0.30 时转身就蹭门框。
+     现在阈值 = `-(hypot(body_rear_m, body_half_width_m) + door_clear_margin_m 0.10)`
+     = **-0.415 m**（车尾后面约 18 cm）。另外两条配套修正：
+     * `gate_exit` **不再要求 `gate_hold`**：车快出去时前雷达已经看不到门洞，
+       旧写法会落到 `no_target` **停在门框里**，门线永远退不到车尾后面（死锁）。
+     * `door_metrics` 返回 `None`（遮挡/超出 ±1.3 m 视场）时**不再立刻算"出去了"**，
+       沿用最近 `door_lost_hold_s 0.6 s` 的测量，超时才算真出去。
+     车尾还在门里时 `gate_exit` **继续沿门洞中心直出**（0.18 m/s），
+     `/follow/state` 多三个字段 `door_lon` / `door_clear` / `door_thresh`。
+     ⚠️ 别退化成"只看前雷达"：`passage_metrics()` 只搜 `lon ≥ 0.15` 的正前方，
+     它看不到身后的门框，**必须配 `door_metrics()` 一起用**。
+  决策顺序：**门口丢人先出门（车尾没出完继续直出）→ 整车出门后找人（gate_exit/search）** → 其它丢人停 →
+**门前/门内先对中（gate_align/gate_pass）** → 偏太多原地转 →
+  贴脸后退/车尾挡住原地转 → 到停距停 → 太远只转 → 车头走廊障碍停/减速 → 按框高给速度。
+- ⚠️ **避障必须用"车身走廊"而不是角度锥**：旧写法取 ±30° 最小距离，门框在门两侧
+  （0.5 m 处 ±35°、横向 0.29 m）会被当成障碍 → **人出门后车出不了门**。
+  现在 `scan_metrics` 只把横向 |lat| ≤ **0.22 m**（车身半宽 0.215 + 5 mm）的点算障碍，
+  走廊内 0.35 m 停、0.60 m 降速。侧向 ±30~70° 仍只看距离，用于判断"能不能转"。
+- 参数（全部**跟随专用**，不动 `real_nav2.yaml`）：`vmax 0.29`、`wmax 0.70`、
+  `yaw_kp 2.4`（第七版 PD；第一版 2.2 跟不住人横走、第三版 3.5 又摆，取中间）、
+  `yaw_kd 0.9`、`v_accel 0.60`、`w_accel 3.0`、
+  `corridor_m 0.22`、`front_hard_m 0.35`、`front_slow_m 0.60`、
+  `side_clear_m 0.30`、`lost_stop 0.8`、`lost_abort 3.0`、
+  `face_ex 0.30`、`back_box_h 0.92`、`back_release_box_h 0.85`、`back_vmax 0.12`、
+  `back_hard_m 0.30`、`back_slow_m 0.60`、`follow_hz 20`、`smooth_alpha 0.35`、
+  `max_wheel_mps 0.29`、`track_m 0.317`、`yaw_kd 0.9`、`steer_wmax 0.42`、
+  `gate_look_m 1.10`、`gate_half_span_m 1.20`、`gate_min_gap_m 0.55`、`gate_wide_m 1.05`、
+  `gate_align_m 0.07`、`gate_kp 2.5`、`gate_wmax 0.45`、`gate_vmax 0.18`、`gate_hold_s 0.35`、
+  `align_first_m 0.80`、`align_first_ex 0.12`、
+  `gate_exit_enabled True`、`gate_exit_max_s 4.0`、`search_turn_s 2.5`、`search_wmax 0.50`、
+  `body_rear_m 0.23`、`body_half_width_m 0.215`、`door_clear_margin_m 0.10`、
+`door_lost_hold_s 0.6`、`door_lat_min_m 0.28`、`door_lat_max_m 0.80`、
+`stop_box_h 0.85`、`resume_box_h 0.81`、`go_box_h 0.82`。
+- **死手开关**：页面 1 s 发一次 `/follow/enable`，节点 **3 s 收不到就停车**
+  （2 s 太紧，丢一次心跳就停一下）；
+  切模式/切后台/关页面都会主动发 `on=0`，并补发 2 s 零速度。
+- 手机端：画面下方还有**小摇杆（104 px）**，一碰就退出自动跟随、交给人手动开。
+  ⚠️ 两个摇杆**必须共用同一套 `jx/jy/joyActive`**：真正负责 20 Hz 重发的只有
+  `sendTimer`（它只看这三个变量）。小摇杆若另存 `fjx/fjy`，按住不动时一条指令都不发，
+  底盘 TTL(800 ms) 到点就停 → 手感"一卡一卡"（2026-11-21 用户报，手动模式正常）。
+  另外 `on=0` 之后跟随节点只补发 **0.3 s** 零速度（心跳超时才补 2 s），
+  否则会和刚接管的摇杆抢 `/cmd_vel_manual`。
+- 🚨 **两张"底盘硬限"必须永远满足，否则整帧被丢 = 页面显示正在转向但车不动**
+  （2026-11-21 用户报"显示正在转向，实际车没动"，实机日志确认 45 次
+  `Rejected out-of-range manual velocity（v=0.000 w=0.900 …）`）：
+  1. `|ω| ≤ 0.75` —— `base_bridge.manual_velocity()` 硬限。第二版把 `wmax` 提到 **0.9**，
+     `facing`（原地转向）每次都超限被丢，所以"说在转、其实一动不动"。
+     现在 `wmax 0.70`，并且 `limit_pair()` 里再夹一道 `|ω| ≤ 0.74`。
+  2. **单轮包络** `|v| + |ω|·track/2 ≤ manual_max_speed_mps`（**0.30**）。
+     `v=0.25` 配 `ω=0.6` 就是 `0.25+0.079=0.329 > 0.30` → **一样整帧被丢**，
+     前进中一转弯就丢帧（这也是"一卡一卡"的一个来源）。
+     `limit_pair()` 保 ω、按剩余预算收 v（`max_wheel_mps 0.29` 留 1 cm/s 余量），
+     实测 `v=0.25,w=0.63` → 出版 `v=0.207`，不再被丢。
+  ⚠️ 改 `vmax`/`wmax`/`back_vmax` 之前先算这两条；`limit_pair()` 是最后一道闸，
+  **不要为了"转得更快"把它去掉**，要快就把 `manual_max_speed_mps` 提上去（需用户批准）。
+- 🧭 **转向用 PD + 自动阻尼（第七版，2026-11-21 晚，用户报"直线跟随时一直左转右转"）**：
+  1. **纯 P 换 PD**：`steer(err, err_dot)` = `-(kp·e + kd·err_dot)`，
+     `yaw_kp 3.5 → 2.4`、新增 `yaw_kd 0.9`。阻尼项**只许收力**（夹在 `-0.7×P ~ +0.3×P`），
+     否则 `-kd·err_dot` 会反号把车拽向反方向（实测 err=+0.10、dot=-0.5 会输出 +0.35）。
+  2. **死区 0.05 → 0.06**，`err_dot` 用**平滑后**的框中心算（原始框每帧抖 1~2% 会把 d 项变噪声）。
+  3. **跟随时 ω 上限 `steer_wmax 0.42`**（原来直接吃满 `wmax 0.70`）；偏到画面边上
+     （`|err| > face_ex`，要原地对准）才允许满 0.70。
+  4. **`OscGuard` 自动阻尼**（`follow_core`）：盯观测量而不是模型 —— **2 s 内 ω 变号 ≥3 次**
+     就按 0.6 比例收转向增益（下限 0.35），稳住后每秒恢复 0.12。只在
+     `following/obstacle_slow` 生效（`facing/gate/search` 要满速转，不能收）。
+     `/follow/state` 新增 `osc_gain`、`err_dot` 便于现场判断：
+     `osc_gain` 长期 <1 说明车一直在摆，这时该降 `yaw_kp` 或查底盘。
+- 📚 **开源参考（2026-11-21 调研，用户要求"去网上找开源资料"）**：
+  - [`Pramod-Gurav/ros2-rgbd-person-follower`](https://github.com/Pramod-Gurav/ros2-rgbd-person-follower)：
+    YOLO+深度 → IoU 跟踪 → **角速度 PID + 线速度 PID**，配置 `angular_kp 0.004/px`、
+    `ki 1e-4`、`kd 1e-3`、`horizontal_deadzone 30 px`、`ema_alpha 0.2`、输出 ±1.0 rad/s，
+    PID 带积分限幅/输出饱和/`reset()`。**我们照它的结构**（死区+EMA+PD+输出限幅），
+    但满幅等效增益比它更低（0.004×640≈2.6 rad/s vs 我们 2.4 且带阻尼）。
+  - [`atom-robotics-lab/Person-Follower`](https://github.com/atom-robotics-lab/Person-Follower)：
+    ROS2 差速底盘跟随仿真，同样的"框中心 → 角速度、框高/深度 → 线速度"分层。
+  - [`skunal3318/ros2_person_follower`](https://github.com/skunal3318/ros2_person_follower)：
+    YOLOv8 + **比例控制** + rosbridge/Three.js 面板（和我们的架构最接近）。
+  - 结论：这类项目**都用"框中心误差 → PID/PD"**，没有一个用纯 P 高增益；
+    共同套路 = 死区 + 输入 EMA + 输出限幅/饱和 + （可选）积分抗风。
+- ⚠️ **页面"显示跟随中但车不动"的两种真凶**（2026-11-21 实机两次踩）：
+  ① **底盘整帧丢弃**——`v/ω` 超 `base_bridge` 硬限（最常见的是轮距用错，见上）；
+  ② **运动门/急停**——`motion_enabled` 或 `manual_enabled` 关着，指令全部被静默丢弃。
+  现在节点订阅 `/odom` 自检：命令 `|v|>0.06` 持续 **1.5 s** 而里程计 `<0.03 m/s`
+  → `/follow/state` 置 `nomotion: true`，页面提示行直接红字
+  「⚠ 指令已发但车没动（查运动门/急停）」。**它只报警不干预**，别改成自动停车。
+- ⚠️ **画面黑屏但框还在 = MJPEG 连接断了，不是识别坏了**（2026-11-21 用户报）：
+  人体框走画布（数据来自 `/boxes`），视频走 `<img src=/video>` 的 multipart 长连接，
+  两条连接互不影响。iPhone 切后台/切网、媒体服务重启，长连接会被静默掐断 →
+  画面全黑 + 破图标，以前只能刷新页面。现在页面自带**断流自愈**：
+  `onerror` 重连、每 2 s 查 `naturalWidth === 0`、`visibilitychange`/`pageshow` 回来重连、
+  连续失败 3 次**重新问 `/api/devices/<id>/media`**（地址可能过期），重连间隔限 1.5 s
+  （iOS 同域最多 6 个并发连接），提示行显示"画面断了，正在自动重连…（车照常跟随）"。
+  摄像头页 `#camImg` 同样处理。**改视频相关代码时别把这段删掉**。
+- ⚠️ **跟随"一卡一卡"的四个根因（2026-11-21 全部修掉，别再引入）**：
+  1. **刷新率**：`follow_hz` 必须 **20 Hz**（和手动摇杆同频），10 Hz 对固件速度环太粗；
+  2. **检测掉帧**：`person_detector` 8 Hz，YOLO 偶尔漏一帧。漏帧时节点**沿用上一帧的框**
+     继续控制（最多 `lost_stop_s` 0.8 s），不加这一段就是"每漏一帧急刹一次"；
+  3. **阈值抖动**：`stop 0.85 / resume 0.81` 迟滞；
+  4. **框抖动**：框高与框中心做 **EMA（alpha 0.35）**，转向死区放宽到 ±5%。
+- 验证：`pytest tests/test_follow_core.py`（**65 例**）+ 黑盒 `tools/sim_follow_check.py`
+  （隔离 `ROS_DOMAIN_ID=42`，**22 场景**：0.29 m/s、w=-0.63（v 自动收到 0.190）、
+  走廊 0.3 m 停、**框 90% 停 / 框 80% 继续跟**、宽门口正常走、检测掉帧 0.4 s 不急刹、
+  **框 95% 后退 v=-0.12**、
+  **车尾 0.15 m 只原地转**、**人贴边缘原地追框**、
+  **正对门洞低速直穿 v=0.18**、**门洞偏左先站正 w=+0.24**、**门里人偏右不跟框转**、
+  **门里丢人继续出门 v=0.18**、**出门后右转找人 w=-0.50**、
+  **车尾还在门里 → 继续直出 v=0.18 不转身**、**整车出门 → 转身找人 w=-0.50**、
+  **门线只到车后 0.34 m → 继续直出（旧判据会在这就转身）**、
+  **目标左右摆→osc_gain 收到 <0.7**、**稳定跟随→osc_gain 恢复 >0.9**、
+  **里程计不动时报 nomotion**、心跳停）。⚠️ **黑盒前先杀掉上次遗留的 42 域实例**，
+  否则多个节点同时发速度，读到的还是旧值（2026-11-21 踩过）。
+  **2026-11-22 08:24 实测 21 场景全 PASS**；**09:05 加 Q2 后 22 场景全 PASS**
+  （S `osc_gain=0.46`、T 恢复到 1.0、Q2 `gate_exit v=0.180`），
+  `fwr-follow` 08:27 重启后 `/followstate` 已带 `osc_gain/err_dot`，
+  启动日志打印 `转向 PD kp 2.4/kd 0.9（跟随 ω≤0.42）`。实车跟随**仍待用户实跑**。
 
 ### 实机导航已验证参数快照（2026-11-02，四房间实景）
 
@@ -508,6 +780,8 @@ bash tools/check_stack.sh /tmp/fwr_runs/<本次日志>.log
 ## 6. 省 token / 防重复（硬规则）
 
 - **一个事实只写一处**：长期规则写本文件；会话结果写 `AGENT_LOG.md`；计划进度写 `progress.md`。不要三处复制。
+- **改动即文档（用户 2026-11-21 明确要求）**：每次改完代码/参数/硬件，**当场**同步文档，不要攒到收尾。
+  长期有效的事实（硬件、接口、冻结值、已验证行为）→ 本文件；当天的过程与证据 → `docs/AGENT_LOG.md`。
 - **先搜后做**：动手前用 `grep` 搜代码、日志和计划，确认没做过；不要凭印象重跑一遍排查。
 - **输出要小**：`head` / `tail`、`--once`、`-l`、`wc -l`、`timeout`；大输出先落盘再 `grep`，不要把整个日志贴进上下文。
 - **独立调用并行**：一个消息里批量发互不依赖的读取/搜索；大范围探索交给 subagent，只让它回传 ≤20 行结论。
