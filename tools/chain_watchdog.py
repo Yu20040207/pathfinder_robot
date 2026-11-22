@@ -108,6 +108,8 @@ class Watchdog(Node):
                 TransitionEvent, f'/{_m}/transition_event',
                 (lambda msg, name=_m: self._on_transition(name, msg)), 10)
         self._state_seed_at = 0.0
+        self._state_inflight = set()      # 正在异步查状态的监控
+        self._last_cli_seed = 0.0         # 上次用 CLI 兜底的时间（必须有节流）
         self.create_subscription(LaserScan, '/scan', self._on_scan,
                                  qos_profile_sensor_data)
         self.create_subscription(Twist, IN_TOPIC, self._on_in, 20)
@@ -136,13 +138,65 @@ class Watchdog(Node):
             pass
 
     def _seed_state(self):
-        """看门狗启动时监控可能已经 active，收不到事件 → 用 CLI 补一次。"""
+        """看门狗启动时监控可能已经 active、收不到事件 → 主动查一次。
+
+        2026-11-21：**不要用 `ros2 lifecycle get`**。实测每次 CLI 都要 ~2 s CPU
+        （新起一个 DDS participant），而它在这台机器上还会超时
+        （collision_monitor 日志里每 3 分钟一条
+        `failed to send response to /get_state (timeout)`），于是状态永远是 unknown，
+        看门狗每 15 s 再起两个 CLI → CPU 被吃满（负载一度 47），摇杆就"一卡一卡"。
+        现在：优先用节点里已有的 GetState 客户端异步查（毫秒级、无子进程）；
+        只有服务一直不就绪才退到 CLI，且 **至少间隔 120 s**。
+        """
+        polled = False
         for m in MONITORS:
             if self._cm_state.get(m) is None:
-                st = self._state_of(m)
-                self._cm_state[m] = st
-                if st == 'active':
-                    self._ever_active[m] = True
+                polled = self._poll_state(m) or polled
+        if polled:
+            return
+        now = time.monotonic()
+        if now - self._last_cli_seed < 120.0:
+            return
+        self._last_cli_seed = now
+        for m in MONITORS:
+            if self._cm_state.get(m) is None:
+                st = self._state_of(m)          # 兜底，节流 120 s
+                if st != 'unknown':
+                    self._cm_state[m] = st
+                    if st == 'active':
+                        self._ever_active[m] = True
+
+    def _poll_state(self, name: str) -> bool:
+        """用 lifecycle 服务异步查状态；返回 False 表示服务还没就绪。"""
+        client = self._state_clients.get(name)
+        if client is None or not client.service_is_ready():
+            return False
+        if name in self._state_inflight:
+            return True
+        self._state_inflight.add(name)
+        try:
+            fut = client.call_async(GetState.Request())
+            fut.add_done_callback(
+                lambda f, n=name: self._on_state_result(n, f))
+        except Exception:                        # noqa: BLE001
+            self._state_inflight.discard(name)
+            return False
+        return True
+
+    def _on_state_result(self, name: str, fut) -> None:
+        self._state_inflight.discard(name)
+        try:
+            res = fut.result()
+        except Exception:                        # noqa: BLE001
+            return
+        label = getattr(getattr(res, 'current_state', None), 'label', None)
+        if not label:
+            return
+        if label == 'active':
+            if self._cm_state.get(name) != 'active':
+                self._cm_active_at = time.monotonic()
+            self._ever_active[name] = True
+        self._cm_state[name] = label
 
     def _on_in(self, msg):
         self._in += 1
@@ -471,7 +525,8 @@ class Watchdog(Node):
                 if cmd_flowing and out_silent:
                     self._fix(name, '指令流动但输出静默')
                 continue
-            state = self._state_of(name)
+            self._poll_state(name)              # 异步，毫秒级
+            state = self._cm_state.get(name)
             if state == 'active':
                 self._ever_active[name] = True
             if state not in ('active', 'unknown') and self._ever_active.get(name):

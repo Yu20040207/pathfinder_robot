@@ -10,6 +10,7 @@
     POST /api/devices/bind          {device_id, code}      需登录
     GET  /api/devices               我的设备（含最近状态）
     GET  /api/devices/{id}/state    最近状态
+    GET  /api/devices/{id}/media    摄像头播放地址（{type, url, snapshot, ttl}）
     WS   /ws/control/{device_id}?token=...   实时控制 + 状态推送
     GET  /api/health
 
@@ -18,6 +19,8 @@
     JC_SECRET      JWT 密钥（生产必须改）
     JC_BIND_CODE   设备绑定码（默认 123456，试用期）
     JC_MQTT_HOST/PORT   EMQX（默认 127.0.0.1:1883）
+    JC_MEDIA_HOSTS     摄像头地址表 JSON，如 {"car-001": "192.168.0.20"}
+    JC_MEDIA_PORT      机器人 MJPEG 服务端口（默认 8081）
 """
 import asyncio
 import hashlib
@@ -53,6 +56,21 @@ app.add_middleware(CORSMiddleware, allow_origins=['*'],
 # device_id -> 最近状态
 STATE_CACHE: Dict[str, dict] = {}
 MAP_CACHE: Dict[str, dict] = {}
+
+
+def _media_hosts() -> Dict[str, str]:
+    """机器人 LAN 地址表：JC_MEDIA_HOSTS 的 JSON，解析失败就当没配。"""
+    raw = os.environ.get('JC_MEDIA_HOSTS', '').strip()
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return {}
+    return {str(k): str(v) for k, v in data.items()} if isinstance(data, dict) else {}
+
+
+MEDIA_PORT = os.environ.get('JC_MEDIA_PORT', '8081')
 # device_id -> 活跃 WebSocket 集合
 CONNECTIONS: Dict[str, Set[WebSocket]] = {}
 LOOP: Optional[asyncio.AbstractEventLoop] = None
@@ -198,6 +216,39 @@ def device_state(device_id: str, user_id: int = Depends(current_user)):
     return STATE_CACHE.get(device_id, {})
 
 
+@app.get('/api/devices/{device_id}/media')
+def device_media(device_id: str, user_id: int = Depends(current_user)):
+    """摄像头播放地址。
+
+    页面只认 {type, url}：现在是 mjpeg（办公室 WiFi 直连机器人），
+    以后接 4G 改成中继时只换这里的返回，页面不用改。
+
+    地址来源优先级：JC_MEDIA_HOSTS[device_id] → 机器人上报的 lan_ip。
+    """
+    hosts = _media_hosts()
+    host = hosts.get(device_id)
+    if not host:
+        state = STATE_CACHE.get(device_id) or {}
+        host = str(state.get('lan_ip') or '')
+    if not host:
+        raise HTTPException(
+            404, '未配置摄像头地址：请设置 JC_MEDIA_HOSTS，'
+                 '或在机器人 bridge 里上报 lan_ip')
+    host = host.replace('http://', '').replace('/', '')
+    port = MEDIA_PORT
+    if ':' in host:                      # 允许 "192.168.0.20:8081" 覆盖端口
+        host, port = host.split(':', 1)
+    base = f'http://{host}:{port}'
+    return {
+        'type': 'mjpeg',
+        'url': f'{base}/video',
+        'snapshot': f'{base}/snapshot.jpg',
+        'health': f'{base}/healthz',
+        'page': f'{base}/',          # 自检页：HTTPS 页面被拦时在新窗口打开
+        'ttl': 60,
+    }
+
+
 @app.post('/api/admin/reset_password')
 def admin_reset_password(req: PasswordRequest, x_admin_token: str = Header(default='')):
     """管理员重置用户密码（忘记密码时用，需 JC_ADMIN_TOKEN）。"""
@@ -261,18 +312,25 @@ def device_map(device_id: str, user_id: int = Depends(current_user)):
 
 @app.websocket('/ws/control/{device_id}')
 async def control_ws(ws: WebSocket, device_id: str, token: str = ''):
+    # 2026-11-21：以前直接 `ws.close(code=4401)` 而不 accept，握手阶段会被
+    # uvicorn 变成 HTTP 403 → 浏览器只看到 onclose(1006)，分不清"token 过期"
+    # 和网络抖动，于是页面用过期 token 无限重连，永远显示「云端断开」。
+    # 现在先 accept 再用 4401 关闭，页面收到就能直接跳登录页。
     try:
         user_id = user_from_token(token)
+        auth_error = None
     except HTTPException:
-        await ws.close(code=4401)
-        return
+        user_id = None
+        auth_error = 4401
     with db() as conn:
         row = conn.execute('SELECT owner_id FROM devices WHERE device_id=?',
                            (device_id,)).fetchone()
-    if row is None or row['owner_id'] != user_id:
-        await ws.close(code=4403)
-        return
+    if user_id is not None and (row is None or row['owner_id'] != user_id):
+        auth_error = 4403
     await ws.accept()
+    if auth_error:
+        await ws.close(code=auth_error)
+        return
     CONNECTIONS.setdefault(device_id, set()).add(ws)
     cached = STATE_CACHE.get(device_id)
     if cached:

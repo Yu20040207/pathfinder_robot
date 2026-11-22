@@ -177,6 +177,18 @@ def yaw_of(q) -> float:
                       1 - 2 * (q.y * q.y + q.z * q.z))
 
 
+def _system_shutting_down() -> bool:
+    """系统是否正在关机/重启。
+
+    systemd 排定关机时会写 `/run/systemd/shutdown/scheduled`；这个文件比
+    监听 SIGTERM 可靠（我们可能在信号到达前就被重复拉起）。
+    """
+    try:
+        return os.path.exists('/run/systemd/shutdown/scheduled')
+    except OSError:
+        return False
+
+
 class MqttBridge(Node):
     def __init__(self):
         super().__init__('mqtt_bridge')
@@ -376,9 +388,15 @@ class MqttBridge(Node):
             raise RuntimeError('缺少 paho-mqtt，请 pip install paho-mqtt')
         # 启动时确定"当前已加载的地图"（导航栈正是按状态文件起的）
         self._init_active_map()
+        # 2026-11-21：以前 client_id 带启动时间戳 → 每次重启都是一个全新会话，
+        # 被杀掉的老进程要等 keepalive(30 s) 才由 broker 结算 LWT，
+        # 那条 retained "offline" 会把新进程刚发的 "online" 冲掉
+        # （现场表现：机器明明在线，手机却显示设备离线）。
+        # 改成固定 client_id：新连接一进来就接管旧会话，旧 LWT 当场结算。
         self._client = mqtt.Client(
             mqtt.CallbackAPIVersion.VERSION2,
-            client_id=f'{self._device}-{int(time.time())}',
+            client_id=f'fwr-{self._device}',
+            clean_session=True,
             protocol=mqtt.MQTTv311)
         if self._secret:
             self._client.username_pw_set(self._device, self._secret)
@@ -402,6 +420,12 @@ class MqttBridge(Node):
         self._topic_state = f'robot/{self._device}/state'
         self._topic_event = f'robot/{self._device}/event'
         self._topic_online = f'robot/{self._device}/online'
+        # 2026-11-21：用户点关机后，systemd 的 Restart=always 有可能在关机
+        # 过程中把本进程再拉起一次 → 重新发 retained "online" → 手机端
+        # 先显示离线、又显示"设备已重新上线"、过一会才真正离线。
+        # 这个标志 + /run/systemd/shutdown/scheduled 检查一起堵住它。
+        self._shutting_down = False
+        self._online_timer = None
         self._client.will_set(self._topic_online, 'offline', retain=True)
         self._client.on_connect = self._on_mqtt_connect
         self._client.on_disconnect = self._on_mqtt_disconnect
@@ -423,11 +447,28 @@ class MqttBridge(Node):
         self.get_logger().info(
             f'mqtt_bridge 启动：{self._host}:{self._port} device={self._device}')
 
+    def _publish_online_heartbeat(self) -> None:
+        """周期性重申在线状态（retained），顺便自愈被旧会话 LWT 覆盖的情况。"""
+        if not self._connected:
+            return
+        value = 'offline' if (self._shutting_down or
+                              _system_shutting_down()) else 'online'
+        try:
+            self._client.publish(self._topic_online, value, retain=True, qos=1)
+        except Exception:                        # noqa: BLE001
+            pass
+
     # ---------------- MQTT 回调 ----------------
     def _on_mqtt_connect(self, client, _userdata, _flags, reason_code, _props=None):
         self._connected = reason_code == 0
         if self._connected:
-            client.publish(self._topic_online, 'online', retain=True)
+            if self._shutting_down or _system_shutting_down():
+                # 关机过程中被 systemd 重启：绝不能报 online，
+                # 否则手机端会闪一下"设备已重新上线"
+                client.publish(self._topic_online, 'offline', retain=True)
+                self.get_logger().warn('系统正在关机：本次连接只发 offline')
+            else:
+                client.publish(self._topic_online, 'online', retain=True)
             client.subscribe(self._topic_cmd, qos=0)
             client.subscribe(self._topic_goal, qos=1)
             client.subscribe(self._topic_nav, qos=1)
@@ -438,6 +479,14 @@ class MqttBridge(Node):
             if not self._map_published:
                 self._publish_map()
             self.get_logger().info('MQTT 已连接')
+            # 在线状态心跳：retained 消息可能被旧会话的 LWT 覆盖，
+            # 每 20 秒重申一次，最多 20 秒内自愈
+            try:
+                if self._online_timer is None:
+                    self._online_timer = self.create_timer(
+                        20.0, self._publish_online_heartbeat)
+            except Exception as exc:             # noqa: BLE001
+                self.get_logger().warn(f'在线心跳定时器创建失败: {exc}')
         else:
             self.get_logger().error(f'MQTT 连接失败: {reason_code}')
 
@@ -722,10 +771,18 @@ class MqttBridge(Node):
         time.sleep(0.5)
         cmd = ['sudo', '-n', 'shutdown', '-h', 'now'] if action == 'shutdown' \
             else ['sudo', '-n', 'reboot']
+        # 先立刻报离线（快于 keepalive/LWT 的 30 秒），再动手关机，
+        # 这样手机端是"点完就离线"，不会等 MQTT 超时
+        self._shutting_down = True
+        try:
+            self._client.publish(self._topic_online, 'offline', retain=True, qos=1)
+        except Exception:                        # noqa: BLE001
+            pass
         try:
             subprocess.run(cmd, timeout=10, check=False)
         except Exception as exc:                 # noqa: BLE001
             self.get_logger().error(f'执行电源指令失败: {exc}')
+            self._shutting_down = False
 
     def _handle_preview(self, payload: bytes) -> None:
         """计算到指定点的路径（不执行），用于点击航点后预览路线。"""

@@ -104,7 +104,7 @@ def generate_launch_description():
              name='ekf_filter_node', output='screen',
              remappings=[('odometry/filtered', '/odom')],
              parameters=[str(share / 'config' / 'real_ekf.yaml')]),
-        # 2026-11-19：slam_toolbox 延后 12 秒启动。
+        # 2026-11-19：slam_toolbox 延后 35 秒启动（TimerAction 实际值）。
         # 原因：建图栈刚起时后雷达/scan_merger 还没出数据，SLAM 用"半圈"的
         # 首帧就把地图窗口定死了；车不动时 slam 不会重算，地图就永远缺一半。
         # 等双雷达+合并稳定后再开始吃扫描，首帧就是 360°。

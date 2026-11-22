@@ -1,0 +1,425 @@
+"""跟随控制节点：跟人走 + 实时避障（走手动通道 `/cmd_vel_manual`）。
+
+与第一版的区别（2026-11-21 用户反馈三件事）
+----------------------------------------
+1. **远近只看框的大小**（``box_h`` 占画面比例），不再用身高估米数。
+   估米数在人走近时框被画面裁掉，距离卡在 ~2 m，车永远到不了"该停"的点。
+2. **走廊避障**：只有横向 ±0.22 m（车身半宽）内的点才当障碍，
+   门框在门两侧不会被判成障碍 → 能过门。
+3. **转向更快**：``yaw_kp`` 2.2→3.5、``wmax`` 0.6→0.9。
+   这些参数只属于跟随节点，不动导航的 `real_nav2.yaml`。
+
+为什么走 `/cmd_vel_manual`
+------------------------
+底盘 `base_bridge` 只认 `/cmd_vel_auto_safe`（需 nav 栈）和 `/cmd_vel_manual`。
+跟随是页面发起的手动行为，manual 通道在没起导航时也通，且天然受
+`motion_enabled` + `manual_enabled` 双门控——**代理不用、也不能替用户开门**。
+
+三层保护
+--------
+1. 本节点：雷达走廊 + 侧向净空 + 框大小
+2. 底盘：motion_enabled / manual_enabled / 传感器就绪 / 指令 TTL
+3. 看门狗：页面每 1 s 发心跳，2 s 收不到就停车
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import time
+
+import rclpy
+from geometry_msgs.msg import Twist
+from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
+from nav_msgs.msg import Odometry
+from sensor_msgs.msg import LaserScan
+from std_msgs.msg import String
+
+from fwr_bringup.follow_core import (DEFAULTS, OscGuard, decide, door_clear,
+                                    door_metrics, door_swept_radius, limit_pair,
+                                    passage_metrics, scan_metrics)
+
+
+class PersonFollower(Node):
+    def __init__(self) -> None:
+        super().__init__('person_follower')
+        p = self.declare_parameter
+        # 20 Hz 与手动摇杆同频：10 Hz 更新对固件速度环来说太粗，车会一顿一顿
+        self.follow_hz = float(p('follow_hz', 20.0).value)
+        self.heartbeat_timeout = float(p('heartbeat_timeout', 3.0).value)
+        self.smooth_alpha = float(p('smooth_alpha', 0.35).value)   # 框的 EMA
+        # 跟随专用参数（ROS 参数可覆盖，默认值见 follow_core.DEFAULTS）
+        self.p = {k: type(v)(p(k, v).value) for k, v in DEFAULTS.items()}
+        self.v_accel = float(p('v_accel', 0.60).value)      # m/s²
+        self.w_accel = float(p('w_accel', 3.00).value)      # rad/s²
+
+        self.enabled = False
+        self._heartbeat = 0.0
+        self._zero_until = 0.0
+        self._persons = {'sel': -1, 'tracking': False, 'lost_s': 0.0,
+                         'persons': [], 'stamp': 0.0}
+        self.clear_hard = math.inf
+        self.clear_slow = math.inf
+        self.left = self.right = math.inf
+        self.rear_hard = math.inf
+        self.rear_slow = math.inf
+        self.v_cmd = 0.0
+        self.w_cmd = 0.0
+        self._ema = {'h': None, 'cx': None}   # 框高 / 框中心的平滑值
+        self._last_person = None              # 上一帧匹配到的框（掉帧时沿用）
+        self._last_seen = 0.0
+        self._size_hold = False               # 因"太近"停过 → 等框缩到 resume_box_h
+        self._back_hold = False               # 人贴脸 → 后退，退到 back_release 才停
+        # 门洞（2026-11-21 第四版）：门框在车身走廊外，跟框转向会顶门框 →
+        # 测到窄通道就改瞄门洞中心、进门前站正、门内低速直线走。
+        self.gate_gap = math.inf
+        self.gate_center = 0.0
+        self._gate_hold = False
+        self._gate_seen_at = 0.0
+        self.gate_center_last = 0.0
+        # PD 转向：框中心偏差的变化率（2026-11-21 晚修左右摆）
+        self._prev_cx = None
+        self._prev_cx_t = 0.0
+        self.err_dot = 0.0
+        self._osc = OscGuard()      # 左右摆自动阻尼（见 follow_core.OscGuard）
+        self.osc_gain = 1.0
+        # 门内丢人 → 先出门再找人（2026-11-21 用户要求）
+        self._last_side = 0.0        # 最后一次看到人时，人在画面 +1 右 / -1 左
+        self._exit_gate = False      # 正在"顶着丢人把门洞走完"
+        self._exit_elapsed = 0.0
+        self._search_until = 0.0     # 出门后原地找人的截止时间
+        # 整车出门判定（2026-11-21 用户："前雷达出去不等于车出去，我还有后雷达"）
+        self.door_lon = None         # 门线相对车身的纵向位置（360° 合并扫描）
+        self._door_at = 0.0          # 上一次真测到门线的时刻（丢门线时沿用）
+        self.door_is_clear = True
+        # "显示跟随中但车不动"检测（2026-11-21 实机踩坑）：底盘整帧丢弃命令时
+        # 页面完全看不出来。这里对比"我发的 v"和"里程计实际速度"。
+        self.odom_v = 0.0
+        self._odom_at = 0.0
+        self._nomotion_s = 0.0
+        self.nomotion = False
+        self._sel_prev = -1
+
+        self.cmd = self.create_publisher(Twist, '/cmd_vel_manual', 10)
+        self.state = self.create_publisher(String, '/follow/state', 10)
+        self.create_subscription(String, '/robot/vision/persons', self.on_persons, 10)
+        self.create_subscription(String, '/follow/enable', self.on_enable, 10)
+        self.create_subscription(Odometry, '/odom', self.on_odom, 20)
+        self.create_subscription(LaserScan, '/scan_merged', self.on_scan,
+                                 qos_profile_sensor_data)
+        self.create_timer(1.0 / max(1.0, self.follow_hz), self.tick)
+        self.get_logger().info(
+            '跟随节点就绪：框高 %.0f%% 停（%.0f%% 起走）/ %.0f%% 后退，vmax %.2f m/s，'
+            'wmax %.2f rad/s，走廊 ±%.2f m（车头 %.2f m 停 / 车尾 %.2f m 禁退），'
+            '偏离中线 %.0f%% 原地转向，转向 PD kp %.1f/kd %.1f（跟随 ω≤%.2f）'
+            % (self.p['stop_box_h'] * 100, self.p['resume_box_h'] * 100,
+               self.p['back_box_h'] * 100, self.p['vmax'], self.p['wmax'],
+               self.p['corridor_m'], self.p['front_hard_m'], self.p['back_hard_m'],
+               self.p['face_ex'] * 100, self.p['yaw_kp'], self.p['yaw_kd'],
+               self.p['steer_wmax']))
+
+    # ------------------------------------------------------------ 回调
+    def on_odom(self, msg: Odometry) -> None:
+        self.odom_v = float(msg.twist.twist.linear.x)
+        self._odom_at = time.monotonic()
+
+    def on_enable(self, msg: String) -> None:
+        try:
+            data = json.loads(msg.data or '{}')
+        except Exception:                        # noqa: BLE001
+            return
+        want = bool(data.get('on'))
+        self._heartbeat = time.monotonic()
+        if want and not self.enabled:
+            self.get_logger().info('开始跟随')
+        elif not want and self.enabled:
+            self.get_logger().info('取消跟随 → 停车')
+            # ⚠️ 只补发 0.3 s 的零速度：页面可能马上在用摇杆接管，
+            # 补发 2 s（20 帧）会跟摇杆抢同一个 /cmd_vel_manual → 一卡一卡（2026-11-21）。
+            self._zero_until = time.monotonic() + 0.3
+        self.enabled = want
+        if not want:
+            self.v_cmd = self.w_cmd = 0.0
+            self._publish(0.0, 0.0)
+
+    def on_persons(self, msg: String) -> None:
+        try:
+            data = json.loads(msg.data or '{}')
+        except Exception:                        # noqa: BLE001
+            return
+        self._persons = {'sel': int(data.get('sel', -1)),
+                         'tracking': bool(data.get('tracking')),
+                         'lost_s': float(data.get('lost_s', 0.0)),
+                         'persons': data.get('persons', []),
+                         'stamp': time.monotonic()}
+
+    def on_scan(self, msg: LaserScan) -> None:
+        (self.clear_hard, self.clear_slow, self.left, self.right,
+         self.rear_hard, self.rear_slow) = scan_metrics(
+            msg.ranges, msg.angle_min, msg.angle_increment, self.p)
+        gate = passage_metrics(msg.ranges, msg.angle_min, msg.angle_increment, self.p)
+        if gate is None:
+            self.gate_gap = math.inf
+            # 迟滞：门洞消失后保持 gate_hold_s，避免在阈值上抖
+            if self._gate_hold and (time.monotonic() - self._gate_seen_at
+                                    > self.p['gate_hold_s']):
+                self._gate_hold = False
+        else:
+            self.gate_gap, self.gate_center = gate
+            self.gate_center_last = self.gate_center
+            self._gate_hold = True
+            self._gate_seen_at = time.monotonic()
+
+        # 门线位置（前+后雷达，360°）：判断**整车**是否已经开出门框。
+        # 只看前雷达会出现"车头刚过门线就以为出去了，其实车尾还在门里"。
+        door = door_metrics(msg.ranges, msg.angle_min, msg.angle_increment, self.p)
+        now_s = time.monotonic()
+        if door is None:
+            # ⚠️ 2026-11-22：门线**一时没测到**不能立刻当成"整车出去了"。
+            # 遮挡、车身挡住后雷达、门线超出 ±1.3 m 视场都会让 door_metrics 返回 None，
+            # 旧写法直接 door_is_clear=True → 车还在门框里就开始原地转身。
+            # 现在沿用最近 door_lost_hold_s（0.6 s）内的测量；超时才算真出去。
+            if (self.door_lon is not None and
+                    now_s - self._door_at <= self.p['door_lost_hold_s']):
+                self.door_is_clear = door_clear(self.door_lon, self.p)
+            else:
+                self.door_lon = None
+                self.door_is_clear = True
+        else:
+            self.door_lon = door[0]
+            self._door_at = now_s
+            self.door_is_clear = door_clear(door[0], self.p)
+
+    # ------------------------------------------------------------ 主循环
+    def _publish(self, v: float, w: float) -> None:
+        msg = Twist()
+        msg.linear.x = float(v)
+        msg.angular.z = float(w)
+        self.cmd.publish(msg)
+
+    def _state(self, reason: str, v: float, w: float, box_h: float) -> None:
+        fin = lambda x: None if math.isinf(x) else round(x, 2)   # noqa: E731
+        payload = {'on': self.enabled, 'v': round(v, 3), 'w': round(w, 3),
+                   'reason': reason, 'box_h': round(box_h, 3),
+                   'rear_m': round(self.rear_slow, 2) if math.isfinite(self.rear_slow) else 99.0,
+                   'face_ex': self.p['face_ex'], 'back_box_h': self.p['back_box_h'],
+                   'stop_box_h': self.p['stop_box_h'], 'go_box_h': self.p['go_box_h'],
+                   'front_m': fin(self.clear_hard), 'side_l': fin(self.left),
+                   'side_r': fin(self.right),
+                   # 门洞（第四版）：页面/日志都用得上，判断"卡门框"时先看这两个数
+                   'gate_on': bool(self._gate_hold), 'gate_gap': fin(self.gate_gap),
+                   'gate_c': round(self.gate_center, 3),
+                   'gate_exit': bool(self._exit_gate),
+                   'door_lon': (round(self.door_lon, 2)
+                                if self.door_lon is not None else None),
+                   'door_clear': bool(self.door_is_clear),
+                   'door_thresh': round(-(door_swept_radius(self.p)
+                                          + self.p['door_clear_margin_m']), 3),
+                   'mps': (round(self.odom_v, 3)
+                           if (time.monotonic() - self._odom_at) < 1.0 else None),
+                   'nomotion': bool(self.nomotion),
+                   'err_dot': round(float(self.err_dot), 2),
+                   'osc_gain': round(float(self.osc_gain), 2),
+                   'search_side': self._last_side,
+                   'sel': int(self._persons.get('sel', -1)),
+                   'tracking': bool(self._persons.get('tracking', False)),
+                   't': time.time()}
+        self.state.publish(String(data=json.dumps(payload)))
+
+    def tick(self) -> None:
+        now = time.monotonic()
+        dt = 1.0 / max(1.0, self.follow_hz)
+        if self.enabled and (now - self._heartbeat) >= self.heartbeat_timeout:
+            self.get_logger().warn('跟随心跳超时（页面没发 keepalive）→ 停车',
+                                   throttle_duration_sec=5.0)
+            self.enabled = False
+            self._zero_until = now + 2.0
+        if not self.enabled:
+            if now < self._zero_until:      # 关闭后补发 2 s 零速度，确保停稳
+                self._publish(0.0, 0.0)
+            self._state('off', 0.0, 0.0, 0.0)
+            return
+
+        data = self._persons
+        sel = data.get('sel', -1)
+        if sel != self._sel_prev:             # 换人 → 清掉平滑和历史框
+            self._sel_prev = sel
+            self._ema = {'h': None, 'cx': None}
+            self._last_person = None
+            self._size_hold = False
+        person = None
+        for item in data.get('persons', []):
+            # 2026-11-22：检测器在"短暂丢失"的 1 s 内会补发 stale 框（让页面绿框
+            # 不变白）。控制侧**不吃**这种框 —— 继续走自己的 lost_stop_s 0.8 s
+            # 沿用上一帧逻辑，别把"丢失"伪装成"看见"。
+            if item.get('stale'):
+                continue
+            if item.get('id') == sel:
+                person = item
+                break
+        lost_s = 0.0 if data.get('tracking') else float(data.get('lost_s', 0.0) or 0.0)
+
+        if person is not None:
+            self._last_person = dict(person)
+            self._last_seen = now
+            cx_now = float(person.get('x', 0.5)) + float(person.get('w', 0.0)) / 2.0
+            if cx_now > 0.56:            # 人在画面右边（出门后要往右转找）
+                self._last_side = 1.0
+            elif cx_now < 0.44:
+                self._last_side = -1.0
+        elif (self._last_person is not None and sel >= 0
+              and (now - self._last_seen) <= self.p['lost_stop_s']):
+            # ⚠️ 检测器 8 Hz，YOLO 偶尔漏一帧。漏帧时**沿用上一帧的框**继续控制，
+            # 否则每漏一帧就 v=0 急刹一次 → 用户看到的"一卡一卡"（2026-11-21）。
+            person = dict(self._last_person)
+
+        if person is not None:
+            a = max(0.05, min(1.0, self.smooth_alpha))
+            h_raw = float(person.get('h', 0.0))
+            cx_raw = float(person['x']) + float(person['w']) / 2.0
+            self._ema['h'] = h_raw if self._ema['h'] is None else (
+                a * h_raw + (1 - a) * self._ema['h'])
+            self._ema['cx'] = cx_raw if self._ema['cx'] is None else (
+                a * cx_raw + (1 - a) * self._ema['cx'])
+            person = dict(person)
+            person['h'] = self._ema['h']
+            person['x'] = self._ema['cx'] - float(person['w']) / 2.0
+
+            # 平滑后的框中心变化率（给 PD 的阻尼项用）。
+            # 注意必须用**平滑后**的 cx，原始框每帧抖 1~2% 会把 d 项放大成噪声。
+            cx = self._ema['cx']
+            t_now = time.monotonic()
+            if self._prev_cx is None or (t_now - self._prev_cx_t) <= 1e-3:
+                self.err_dot = 0.0
+            else:
+                raw = (cx - self._prev_cx) / (t_now - self._prev_cx_t)
+                raw = max(-3.0, min(3.0, raw))
+                self.err_dot += 0.5 * (raw - self.err_dot)
+            self._prev_cx, self._prev_cx_t = cx, t_now
+        else:
+            self.err_dot = 0.0
+            self._prev_cx = None
+
+        box_h = float(person.get('h', 0.0)) if person else 0.0
+        if person is not None:
+            # 后退迟滞：贴脸(≥92%) 才开始退，退到 85% 以下才停
+            if box_h >= self.p['back_box_h']:
+                self._back_hold = True
+            elif box_h <= self.p['back_release_box_h']:
+                self._back_hold = False
+            if self._back_hold:
+                self._size_hold = False
+            elif box_h >= self.p['stop_box_h']:
+                self._size_hold = True
+            elif box_h <= self.p['resume_box_h']:
+                self._size_hold = False
+
+        # —— 门内丢人状态机（2026-11-21 用户要求：先出门，再原地找人）——
+        lost_now = (person is None) or (lost_s > self.p['lost_stop_s'])
+        if self._exit_gate:
+            self._exit_elapsed += dt
+            if not lost_now:
+                self._exit_gate = False                  # 人回来了 → 恢复正常跟随
+            elif not self._gate_hold and self.door_is_clear:
+                # **整车**都出了门框（门线退到车尾后面）→ 才允许原地转身找人。
+                # 2026-11-21 用户：前雷达出去就转，会把车尾/车角刮在门框上。
+                self._exit_gate = False
+                self._search_until = now + self.p['search_turn_s']
+                side_txt = ('右' if self._last_side > 0 else '左') \
+                    if abs(self._last_side) > 0 else '人最后出现的一侧'
+                self.get_logger().info(
+                    '人先出门了：车已穿过门框，原地向%s转身找人' % side_txt,
+                    throttle_duration_sec=5.0)
+            elif self._exit_elapsed > self.p['gate_exit_max_s']:
+                self._exit_gate = False                  # 出不去就别硬顶
+        elif (lost_now and self._gate_hold and self.p['gate_exit_enabled']
+              and abs(self._last_side) > 0):
+            self._exit_gate = True
+            self._exit_elapsed = 0.0
+        search_now = (not self._exit_gate) and lost_now and now < self._search_until
+
+        v, w, reason, box_h = decide(
+            person, lost_s, self.clear_hard, self.clear_slow,
+            self.left, self.right, self.p, size_hold=self._size_hold,
+            rear_hard=self.rear_hard, rear_slow=self.rear_slow,
+            back_hold=self._back_hold,
+            gate_hold=(self._gate_hold
+                       or (self._exit_gate and not self.door_is_clear)),
+            gate_center=(self.gate_center if self._gate_hold
+                         else self.gate_center_last),
+            gate_exit=self._exit_gate, search=search_now,
+            lost_side=self._last_side, err_dot=self.err_dot)
+
+        # 平滑：加速/减速都限幅（避免一帧跳变把车"顿"一下）；
+        # 安全类原因（障碍/丢人/太近）立刻归零，不做斜坡。
+        # 'rear_blocked'/'facing' 也是"原地不动/只转"，线速度立即归零
+        # 'search' 也是 v=0 但**要转**（每 tick 按方向给 w，别被归零）
+        hard_stop = reason in ('obstacle_stop', 'target_lost', 'target_gone',
+                              'too_close', 'no_target', 'rear_blocked', 'facing',
+                              'gate_align', 'search')
+        if hard_stop:
+            self.v_cmd = 0.0
+        else:
+            dv = self.v_accel * dt
+            self.v_cmd += max(-dv, min(dv, v - self.v_cmd))
+        # 左右摆自动阻尼：只在"跟着人走"的阶段生效（原地对准/找人要满速转，别收）。
+        # 收的是**目标**角速度，再由下面的斜坡限幅平滑，所以不会跳变。
+        if reason in ('following', 'obstacle_slow'):
+            self.osc_gain = self._osc.update(w, dt)
+        else:
+            self.osc_gain = self._osc.update(0.0, dt)
+        w = w * self.osc_gain
+        dw = self.w_accel * dt
+        self.w_cmd += max(-dw, min(dw, w - self.w_cmd))
+        if hard_stop and reason in ('obstacle_stop', 'target_lost', 'target_gone',
+                                    'no_target'):
+            self.w_cmd = 0.0          # 这些必须完全停；facing/rear_blocked 还要转
+
+        if reason == 'target_gone':
+            self.get_logger().warn('目标丢失超过 %.0f s，跟随停止（请重新选人）'
+                                   % self.p['lost_abort_s'], throttle_duration_sec=5.0)
+        # ⚠️ 必须过一遍底盘硬限：|ω| ≤ 0.75、单轮 |v| + |ω|·track/2 ≤ manual_max_speed_mps(0.30)。
+        # 超了 base_bridge 会整帧丢弃（Rejected out-of-range manual velocity），
+        # 表现就是"页面显示正在转向，车却不动"（2026-11-21 实机踩坑）。
+        pv, pw = limit_pair(self.v_cmd, self.w_cmd, self.p)
+        self._publish(pv, pw)
+
+        # "发了指令但车没动"：命令 |v|>0.06 持续 1.5 s、里程计却几乎为 0
+        # → 九成是底盘把整帧丢了（超限/运动门/急停/传感器没就绪）。只报警不干预。
+        odom_fresh = (now - self._odom_at) < 1.0
+        if odom_fresh and abs(pv) > 0.06 and abs(self.odom_v) < 0.03:
+            self._nomotion_s += dt
+        else:
+            self._nomotion_s = 0.0
+        was = self.nomotion
+        self.nomotion = self._nomotion_s > 1.5
+        if self.nomotion and not was:
+            self.get_logger().warn(
+                '指令已发但车没动：v 命令 %.3f m/s，里程计 %.3f m/s（查运动门/急停/底盘硬限）'
+                % (pv, self.odom_v), throttle_duration_sec=10.0)
+
+        self._state(reason, pv, pw, box_h)
+
+    def destroy_node(self):
+        self._publish(0.0, 0.0)
+        return super().destroy_node()
+
+
+def main(args=None) -> None:
+    rclpy.init(args=args)
+    node = PersonFollower()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        try:
+            node.destroy_node()
+        except Exception:                        # noqa: BLE001
+            pass
+        rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
