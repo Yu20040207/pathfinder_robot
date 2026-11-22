@@ -10969,3 +10969,22 @@ git push origin main                        # bf81932..8646811
 1. `main` = 实机跑得通的那版，别在上面乱改；
 2. 每次改动开 `feature/日期-主题`，验证完**合回 main 并 push**；
 3. 每天开工 `git pull`、收工 `git push`，不要攒到几百个提交。
+
+## 2026-11-22 09:33 · 收尾：打 tag v1.1-follow-vision，删旧分支 codex/real-nav2-imu-turn
+
+### 做了什么（用户："做吧"）
+1. **打 tag**：`v1.1-follow-vision`（annotated，指向 `3518ef2`，即当前 main），已 push。
+   内容标注：目标粘住 / PD 转向+OscGuard / 出门扫掠半径 -0.415 m / HP60C UVC+mirror /
+   电池 CH340 按端口绑定。
+2. **删分支** `codex/real-nav2-imu-turn`：先 `git merge-base --is-ancestor 8d2e936 main`
+   确认 **已在 main 历史中**，再 `git branch -D`（`-d` 因上游已被删而拒绝）+ 
+   `git push origin --delete`。
+
+### 已验证
+- `git ls-remote --tags origin` → `v1.1-follow-vision` 在远端（另有历史 v1.6/v1.7 等共 9 个 tag）
+- `git ls-remote --heads origin` → 只剩 `main (3518ef2)`、`feature/dual-lidar (8646811)`
+- 本地 `git branch -vv` → `main`、`feature/dual-lidar`，均与远端同步；工作区干净
+
+### 遗留
+- `feature/dual-lidar` 保留（与 main 同一提交）。下次改动建议新开 `feature/2026-11-23-xxx`，
+  验证完合回 main 再打 tag。
