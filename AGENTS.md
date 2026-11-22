@@ -110,6 +110,15 @@
 - `collision_monitor` 触发一次 `stop` 后会**卡死不再处理指令** →
   `/cmd_vel_auto_safe` 恒为 0、车不动。用 `tools/chain_watchdog.py` 自动重启，
   或手工 `ros2 lifecycle set /collision_monitor_forward deactivate/activate`。
+- ⚠️ **监控"一直是 inactive"也要管（2026-11-22）**：雷达在启动期反复超时重启时，
+  `collision_monitor` 首次 activate 会因 TF 未就绪失败 → `lifecycle_manager` 放弃 →
+  节点**永远停在 inactive**，`/cmd_vel_auto_forward_filtered` 恒无 → 手机端
+  `chain=false`，一直显示「等待安全链（碰撞监控）就绪…」（实测 40 分钟没人恢复）。
+  旧看门狗只判"输入 20 Hz + 输出静默"，且被"不是 active 时没输出正常"早退放过。
+  现在 `chain_watchdog._watch_inactive()`：非 active 持续 > `inactive_grace_s 90 s`
+  就补 `configure/activate`（30 s 冷却、最多 3 次、**只补激活不动车**）；
+  launch 里看门狗加了 `respawn=True` + `PYTHONUNBUFFERED=1`（它的日志以前被
+  4 KB 缓冲吞掉，journald 一行都看不到）。改完**要重启 `fwr-nav` 才生效**。
 - 底盘 `motion_enabled=false` 时所有速度指令被丢弃；
   面板“开始导航”会自己开门，但**手动测试时必须先设 true**。
 

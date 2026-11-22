@@ -11050,3 +11050,60 @@ pytest tests/test_battery_charge.py → 11 passed（含"旧规则那种 1 Hz 方
 ### 未验证
 - 拔枪后 4~5 分钟内应翻回"未充电"（斜率转负 -0.2 V/h 级）—— 未实测。
 - 满电 CV 阶段（V≥24.6 且斜率≈0）靠顶点兜底判"充电中"—— 未实测。
+
+## 2026-11-22 09:55 · 导航"一直等待安全链就绪"：碰撞监控停在 inactive，看门狗放过了
+
+### 现象（用户："导航模式下一直显示等待安全链就绪，怎么这么慢是不是哪里卡住"）
+- 手机端点导航后一直停在「等待安全链（碰撞监控）就绪…（第 N 次检查）」。
+
+### 诊断链
+```
+页面：robotState.chain === false 就一直等
+chain = mqtt_bridge: 2 s 内收到过 /cmd_vel_auto_forward_filtered
+实测：/cmd_vel_auto_unchecked 20 Hz（输入正常）
+      /cmd_vel_auto_forward_filtered  **一帧都没有**
+      ros2 lifecycle get /collision_monitor_forward → inactive [2]
+```
+
+### 根因（三件事叠一起）
+1. **08:41 前后后雷达反复超时重启**（`SL_RESULT_OPERATION_TIMEOUT`，今天共 8 次死亡），
+   collision_monitor 首次 `activate` 时 TF 还没就绪（日志
+   `getTransform: laser_front->base_footprint, Lookup would require extrapolation`）→
+   `lifecycle_manager` 放弃激活 → 节点**永远停在 inactive**（停了 40 分钟）。
+2. **看门狗把它放过了**：`_check()` 里两个早退分支 ——
+   "本次还没见过 active → 静默正常"、"不是 active 时没有输出是正常 → 直接 return"。
+   于是「一直 inactive」这种最需要恢复的情况，恰恰谁也不管。
+3. **看门狗的日志被吞**：`ExecuteProcess(output='screen')` 下 Python stdout 是块缓冲，
+   它的 print 全卡在 4 KB 缓冲里 → journald 里一行没有，看起来像"看门狗没在工作"。
+
+### 处置（已验证）
+```
+ros2 lifecycle set /collision_monitor_forward activate   → Transitioning successful
+ros2 lifecycle get  /collision_monitor_forward           → active [3]
+ros2 topic hz /cmd_vel_auto_forward_filtered             → 20.013 Hz   （chain 立刻恢复）
+/scan 10.36 Hz  /scan_rear 10.06 Hz  /scan_merged 10.00 Hz（雷达现在正常）
+```
+> 只做了"补激活"这一件事，**没有发任何速度、没有动运动门**。
+
+### 代码修复（已部署，**下次重启 fwr-nav 生效**）
+- `tools/chain_watchdog.py`
+  * 新增 `_watch_inactive()`：非 active 持续 > `inactive_grace_s 90 s`（覆盖启动 50 s）
+    就 `_revive()` 补 configure/activate；同节点 30 s 冷却、最多 3 次，失败打 error。
+    放在 `_check()` 宽限期检查之后、两个早退分支**之前**。
+  * `main()` 兜底：未捕获异常 → 打印 traceback + `fatal` + 返回 1（让 launch 重拉），
+    以前是静默退出。
+- `launch/real_navigation.launch.py`：看门狗 `ExecuteProcess` 加
+  `respawn=True, respawn_delay=5.0, additional_env={'PYTHONUNBUFFERED': '1'}`。
+- 部署：`tools/chain_watchdog.py` → 仓库 `tools/`；launch → `src/fwr_bringup/launch/`
+  （install 里的 launch 是软链到 build，build 再软链到 src，实测 `readlink -f` 指回 src）。
+  `py_compile` 两个文件通过，`grep -c _watch_inactive` = 3、`grep -c respawn=True` = 3。
+
+### 未验证
+- 新看门狗逻辑**尚未在运行中的栈里生效**（当前 fwr-nav 是 08:41 起的老进程）。
+  下次重启 fwr-nav 后应能在 journald 看到无缓冲日志，
+  并在"监控长时间 inactive"时看到 `补 configure/activate` 一行。
+- 后雷达 460800 波特率下今天 8 次超时重启（集中在 08:36~08:41）；若再复发要查线材/供电。
+
+### 下一步
+用户侧：刷新页面或直接重试导航，现在 chain 已通。
+重启导航栈前记得 **`motion_enabled` / `manual_enabled` 会复位成 false，需要重新开**。

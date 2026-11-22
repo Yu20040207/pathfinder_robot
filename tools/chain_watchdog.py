@@ -122,6 +122,10 @@ class Watchdog(Node):
         }
         self.create_timer(1.0, self._check)
         self.declare_parameter('out_silent_s', 10.0)
+        # 2026-11-22：监控"一直不是 active"也要管。见 _watch_inactive()。
+        self.declare_parameter('inactive_grace_s', 90.0)
+        self._inactive_since = {}
+        self._inactive_retry = {}
         self.create_timer(5.0, self._health)
         self.get_logger().info(
             f'看门狗启动（{"只报告" if dry_run else "自动重启"}）：{IN_TOPIC} → {OUT_TOPIC}')
@@ -299,6 +303,53 @@ class Watchdog(Node):
     def _out_fresh(self, window: float = 2.0) -> bool:
         """监控输出是否新鲜（用它验证恢复是否真的生效）。"""
         return bool(self._last_out) and (time.monotonic() - self._last_out) < window
+
+    def _watch_inactive(self, now: float) -> None:
+        """监控长时间不是 active 就补齐 configure/activate。
+
+        为什么需要（2026-11-22 现场）：
+          * 启动期 TF 没就绪（雷达刚重启）会让 collision_monitor 首次 activate
+            失败，lifecycle_manager 直接放弃 → 节点永远停在 inactive；
+          * 旧逻辑只在"输入有帧、输出静默"时才恢复，而"不是 active 时没有输出
+            是正常的"这条早退把它放过了；`not any(_ever_active)` 又放过一次；
+          * 结果：手机端一直「等待安全链（碰撞监控）就绪…」，直到人工 activate。
+
+        这里只看状态本身：非 active 持续 > inactive_grace_s（默认 90 s，
+        足够覆盖启动 50 s）就 `_revive()` 一次；同一节点 30 s 冷却、最多 3 次，
+        避免把 lifecycle 状态机刷坏。**只补激活，不做任何运动指令。**
+        """
+        if self._dry:
+            return
+        grace = float(self.get_parameter('inactive_grace_s').value)
+        for m in MONITORS:
+            st = self._cm_state.get(m)
+            if st == 'active':
+                self._inactive_since.pop(m, None)
+                self._inactive_retry.pop(m, None)
+                continue
+            if st is None and m not in self._inactive_since:
+                # 状态还没查到：交给 _seed_state，这里不猜
+                continue
+            since = self._inactive_since.setdefault(m, now)
+            if now - since < grace:
+                continue
+            if now - self._last_fix.get(m, 0.0) < self._fix_cooldown_s:
+                continue
+            n = self._inactive_retry.get(m, 0) + 1
+            self._inactive_retry[m] = n
+            self._inactive_since[m] = now
+            self._last_fix[m] = now
+            self.get_logger().warn(
+                f'{m} 已是 {st or "unknown"} 超过 {grace:.0f}s（第 {n}/3 次）'
+                f' → 补 configure/activate（只补激活，不动车）')
+            if self._revive(m, gap=3.0):
+                self.get_logger().info(f'{m} 补激活成功，安全链应已恢复')
+                self._inactive_retry.pop(m, None)
+                self._inactive_since.pop(m, None)
+            elif n >= 3:
+                self.get_logger().error(
+                    f'{m} 连续 {n} 次补激活失败 → 请人工检查'
+                    f'（ros2 lifecycle set /{m} configure/activate）')
 
     def _fix(self, name: str, reason: str) -> None:
         """分级恢复：冷却 → deactivate/activate → cleanup/configure/activate
@@ -549,6 +600,14 @@ class Watchdog(Node):
         if now - self._started < self._grace_s:
             self._in = self._out = 0
             return
+        # 2026-11-22：**先补激活，再谈"静默是否正常"**。
+        # 用户报"导航模式一直显示等待安全链就绪"。实测 collision_monitor_forward
+        # 停在 inactive [2] 40 分钟没人管：08:41 后雷达反复超时重启，
+        # 监控首次激活时 TF 还没就绪（getTransform 外推失败）→
+        # lifecycle_manager 放弃激活 → 节点永远 inactive。
+        # 而下面两个早退分支（"还没见过 active"、"不是 active 时静默正常"）
+        # 都会直接 return，谁也不去补 activate → 过滤后速度恒无 → chain=false。
+        self._watch_inactive(now)
         # 状态未知就每 15 秒补查一次（放到线程里，避免 CLI 卡住定时器）
         if any(v is None for v in self._cm_state.values()) and \
                 now - self._state_seed_at > 15.0:
@@ -671,6 +730,13 @@ def main() -> int:
         rclpy.spin(node)
     except (KeyboardInterrupt, ExternalShutdownException):
         pass          # 重启导航栈时被 SIGINT/SIGTERM 打断属于正常，不要报"崩溃"
+    except Exception:                           # noqa: BLE001
+        # 2026-11-22：以前任何未捕获异常都会静默退出（launch 没有 respawn），
+        # 之后安全链再也没人守 —— 日志里连一行都没有。现在打印再以非 0 退出。
+        import traceback
+        traceback.print_exc()
+        node.get_logger().fatal('看门狗异常退出，交给 launch respawn')
+        return 1
     finally:
         node.destroy_node()
         if rclpy.ok():

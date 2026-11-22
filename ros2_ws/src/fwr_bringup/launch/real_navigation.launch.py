@@ -121,8 +121,14 @@ def generate_launch_description():
              condition=IfCondition(LaunchConfiguration('trail_reverser')),
              parameters=[{'use_sim_time': use_sim_time}]),
         # 碰撞监控看门狗（同上）。用源码树里的 tools/chain_watchdog.py。
+        # 2026-11-22：加 respawn —— 看门狗自己崩了以后**没人守安全链**
+        # （现场：节点停在 inactive 40 分钟，手机端一直"等待安全链就绪"）。
+        # 同时把 stdout 设成无缓冲，否则它的日志会卡在 4 KB 缓冲里，
+        # journald 里一行都看不到（排查死了半天）。
         ExecuteProcess(
             cmd=[_py(), _watchdog()], output='screen',
+            respawn=True, respawn_delay=5.0,
+            additional_env={'PYTHONUNBUFFERED': '1'},
             condition=IfCondition(LaunchConfiguration('collision_watchdog'))
             if _watchdog() else IfCondition('false')),
         Node(package='fwr_bringup', executable='frontier_explorer',
