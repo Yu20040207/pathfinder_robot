@@ -780,6 +780,9 @@ bash tools/check_stack.sh /tmp/fwr_runs/<本次日志>.log
 
 ## 5. 安全红线
 
+- **电量低于 21.6 V（单节 3.60 V）不要跑自动导航/长距离**：2026-11-22 08:40
+  就是低电整机掉电（`last` 标 crash、无关机序列，掉电前 JSY 表 USB 先消失、后雷达串口超时）。
+  低电会把「雷达崩 / 面板 `--` / 安全链卡 inactive」全搅在一起，排查时先看 `journalctl --list-boots`。
 - **未经用户在当前会话明确同意，不向实机发运动命令**，不直接 `ros2 topic pub /cmd_vel`，不把 `motion_enabled` 改成 true。
 - 不自动 `git commit` / `git push`；需要时先问用户。
 - 不把 API key、密码写进仓库或配置文件；使用 `FWR_LLM_API_KEY` 等环境变量。
