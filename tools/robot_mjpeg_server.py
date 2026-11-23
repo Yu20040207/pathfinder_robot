@@ -52,6 +52,45 @@ VISION_LATEST: dict = {'json': '', 't': 0.0}
 VISION_PUB = [None]
 FOLLOW_LATEST: dict = {'json': '', 't': 0.0}
 FOLLOW_PUB = [None]
+
+# 2026-11-23（用户要求）：视觉/跟随服务**只在切到跟随模式时启动**，
+# 离开跟随就停掉。原来两个 systemd 服务常驻，导航时白吃 ~25% CPU
+# （YOLO 推理 + 跟随控制），而导航根本用不到它们。
+#   cfg  = 最近一次下发的目标状态（True=要跑，False=要停，None=还没定）
+#   at   = 最后一次收到页面心跳的时间
+#   busy = 已有一个 systemctl 在跑（页面每 1 s 心跳一次，不能一次刷一堆）
+FOLLOW_SVC: dict = {'cfg': None, 'at': 0.0, 'busy': False}
+FOLLOW_HEARTBEAT_LOST_S = 15.0     # 页面关掉/断网后多久停服务（页面 1 s 一次心跳）
+FOLLOW_UNITS = ('fwr-vision', 'fwr-follow')
+
+
+def _follow_services(on: bool, force: bool = False) -> None:
+    """按需启动/停止视觉与跟随服务（后台线程，不阻塞 HTTP）。"""
+    if FOLLOW_SVC['busy']:
+        return
+    if not force and FOLLOW_SVC['cfg'] == on:
+        return
+    FOLLOW_SVC['cfg'] = on
+    FOLLOW_SVC['busy'] = True
+
+    def run() -> None:
+        try:
+            if not on:
+                time.sleep(0.6)     # 先让跟随节点把 on=0 的零速发出去再停
+            subprocess.run(['sudo', '-n', 'systemctl',
+                            'start' if on else 'stop', *FOLLOW_UNITS],
+                           timeout=40, check=False)
+            if not on:
+                # 节点收到 SIGTERM 会以 1 退出，systemd 记成 failed（功能没问题，
+                # 但 `systemctl is-active` 一直显示 failed 很误导），清一下。
+                subprocess.run(['sudo', '-n', 'systemctl', 'reset-failed',
+                                *FOLLOW_UNITS], timeout=20, check=False)
+        except Exception:           # noqa: BLE001
+            pass
+        finally:
+            FOLLOW_SVC['busy'] = False
+
+    threading.Thread(target=run, daemon=True).start()
 CORS = {'Access-Control-Allow-Origin': '*'}
 
 
@@ -292,6 +331,11 @@ async def handle_select(request: web.Request) -> web.Response:
 async def handle_follow(request: web.Request) -> web.Response:
     """开始/取消跟随。on=1 兼心跳：页面每 1 s 发一次，节点 2 s 收不到就停车。"""
     on = request.query.get('on', '0') in ('1', 'true', 'yes')
+    # 2026-11-23：进跟随模式才拉起视觉/跟随服务；退出就停掉。
+    # on=1 同时是心跳，_follow_services 自带去重，不会每 1 s 刷一次 systemctl。
+    _follow_services(on)
+    if on:
+        FOLLOW_SVC['at'] = time.monotonic()
     pub = FOLLOW_PUB[0]
     if pub is None:
         return web.Response(text=json.dumps({'ok': False, 'err': 'follow 未就绪'}),
@@ -315,12 +359,50 @@ async def handle_follow_state(request: web.Request) -> web.Response:
     return web.Response(text=body, content_type='application/json', headers=CORS)
 
 
+async def _follow_service_watchdog(_app) -> None:
+    """页面关掉/断网后自动收回：>15 s 没有 on=1 心跳就停服务、发 on=0。"""
+    while True:
+        await asyncio.sleep(2.0)
+        if not FOLLOW_SVC['cfg']:
+            continue
+        if time.monotonic() - FOLLOW_SVC['at'] < FOLLOW_HEARTBEAT_LOST_S:
+            continue
+        print('[follow] 心跳丢失 %.0f s → 停跟随/视觉服务'
+              % (time.monotonic() - FOLLOW_SVC['at']), flush=True)
+        pub = FOLLOW_PUB[0]
+        if pub is not None:
+            try:
+                from std_msgs.msg import String as RosString
+                pub.publish(RosString(
+                    data=json.dumps({'on': False, 't': time.time()})))
+            except Exception:       # noqa: BLE001
+                pass
+        _follow_services(False)
+
+
+async def _start_follow_watchdog(app) -> None:
+    """把守护协程挂成**后台任务**。
+
+    2026-11-23：一开始直接 `app.on_startup.append(_follow_service_watchdog)`，
+    而 aiohttp 会 **await** 启动回调 —— 那个函数是死循环，于是服务永远卡在
+    启动阶段、8081 根本没监听（手机连不上、curl 空响应）。
+    """
+    app['follow_task'] = asyncio.create_task(_follow_service_watchdog(app))
+
+
+async def _follow_services_baseline(_app) -> None:
+    """服务启动时先确保视觉/跟随是停的（巡航/导航不需要它们）。"""
+    _follow_services(False, force=True)
+
+
 def build_app(hub: FrameHub, topic: str, uvc: 'UvcSource' = None) -> web.Application:
     app = web.Application()
     app['hub'] = hub
     app['topic'] = topic
     app['uvc'] = uvc
     app['t0'] = time.monotonic()
+    app.on_startup.append(_follow_services_baseline)
+    app.on_startup.append(_start_follow_watchdog)
     app.add_routes([
         web.get('/', handle_index),
         web.get('/video', handle_stream),

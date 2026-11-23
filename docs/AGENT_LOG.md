@@ -11235,3 +11235,44 @@ last -x: "manbaout :0  08:22:29 - crash (00:18)"
 - `fwr-nav` active（10:43:46 启动）、`fwr-mqtt-bridge`/`fwr-battery`/`fwr-media`/
   `fwr-camera`/`fwr-vision`/`fwr-follow` 均 active
 - 看门狗 pid 5382（新代码）；监控 active
+
+## 2026-11-23 11:20 · 视觉/跟随服务改成「进跟随模式才启动」
+
+### 会话目标
+用户原话：「视觉 YOLO 和跟随服务只在切换跟随模式的时候启动」。
+背景：三者常驻白吃 ~25% CPU（YOLO 推理 + 跟随控制），导航时完全用不到，
+而 11:10 那次负载已到 load 8.6、安全链时序被打乱。
+
+### 仓库改动 `tools/robot_mjpeg_server.py`
+- 新增 `FOLLOW_SVC`（cfg/at/busy）与 `_follow_services(on)`：后台线程跑
+  `sudo -n systemctl start|stop fwr-vision fwr-follow`（去重，页面 1 s 心跳不会刷爆）
+- `GET /follow?on=1` → 拉起两个服务并记心跳；`on=0` → 先让节点发完零速再停
+- **心跳守护**：`on=1` 后 >15 s 没心跳（页面关掉/切后台/iOS 挂起）→
+  自动发 `on=0` 并停服务
+- 服务启动时 `_follow_services(False, force=True)`：**基准状态就是「不跑」**
+- 停止后补 `systemctl reset-failed`（节点收 SIGTERM 以 1 退出，不清会一直显示 failed）
+
+### 仓库外改动（机器人）
+- `sudo systemctl disable fwr-vision fwr-follow` —— 不再开机自启
+  （`Removed .../multi-user.target.wants/`）
+
+### 踩的坑（写下来避免重犯）
+把守护协程直接 `app.on_startup.append(_follow_service_watchdog)`，而 aiohttp 会
+**await** 启动回调 —— 那个函数是 `while True` 死循环，于是**服务永远卡在启动阶段、
+8081 根本没监听**（现象：`ss -tln` 没有 8081、curl 空响应、手机连不上）。
+改成 `asyncio.create_task(...)` 挂后台任务后正常。
+
+### 已验证（curl 模拟手机，实机）
+```
+起始            vision=inactive follow=inactive      ← 服务启动时自动停
+/follow?on=1    vision=active   follow=active        ← 点跟随模式即拉起
+连续心跳 20 s   保持 active
+停止心跳 20 s   vision=inactive follow=inactive      ← 日志「心跳丢失 16 s → 停」
+/follow?on=0    vision=inactive follow=inactive
+```
+`GET /healthz` → `{"ok":true,"fps":15.0,...}`；端口 8081 监听正常。
+
+### 遗留
+- 本项属于**长期有效的运行方式**（视觉/跟随按需启动），
+  按 AGENTS.md「不在会话中途改本文件」的规则，收尾时再折进 §3 视觉章节。
+- 负载待观察：停掉视觉后应明显下降，用户下次导航时可对比。
