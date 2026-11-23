@@ -1703,7 +1703,7 @@ function eventPoint(e) {
   const r = joy.getBoundingClientRect();
   return {x: t.clientX - r.left - r.width / 2, y: t.clientY - r.top - r.height / 2};
 }
-function dragStart(e) { e.preventDefault(); joyActive = true; const p = eventPoint(e); moveKnob(p.x, p.y); sendCmd(); }
+function dragStart(e) { e.preventDefault(); joyActive = true; ensureManualArm(); const p = eventPoint(e); moveKnob(p.x, p.y); sendCmd(); }
 function dragMove(e) {
   if (!joyActive || fJoyActive) return;   // 小摇杆正在拖时，别让手动摇杆抢同一个事件
   e.preventDefault(); const p = eventPoint(e); moveKnob(p.x, p.y);
@@ -1716,6 +1716,30 @@ joy.addEventListener('touchcancel', dragEnd);
 joy.addEventListener('mousedown', dragStart);
 window.addEventListener('mousemove', dragMove);
 window.addEventListener('mouseup', dragEnd);
+
+/* ---------------- 摇杆一动就自动授权（2026-11-23 用户要求） ----------------
+   手动 / 跟随 / 建图三个摇杆原来偶尔还要先点一下「手动授权」才能动。
+   现在：手指一碰摇杆就自动发一次授权请求，并每 2 s 重试一次，
+   授权到位（车端 robotState.manual=true）后摇杆指令立刻生效，不用再点。 */
+let autoArmAt = 0;
+function ensureManualArm() {
+  if (robotState.manual) return true;          // 已授权，什么都不做
+  const now = Date.now();
+  if (now - autoArmAt < 2000) return false;    // 拖杆期间节流重试
+  autoArmAt = now;
+  if (!wsReady) return false;
+  try {
+    ws.send(JSON.stringify({type: 'nav', action: 'manual'}));
+    const dbg = $('dbg');
+    if (dbg) dbg.textContent = '摇杆已动 → 正在自动授权…';
+    const armEl = $('armState');
+    if (armEl && armEl.textContent === '未授权') {
+      armEl.textContent = '授权中…';
+      armEl.style.color = '#d29922';
+    }
+  } catch (e) { /* 连不上就等下一次 */ }
+  return false;
+}
 
 function sendCmd(cx, cy) {
   const px = (typeof cx === 'number') ? cx : jx;
@@ -1731,7 +1755,11 @@ function sendCmd(cx, cy) {
     wsReady = false; setTimeout(connect, 1000);
   }
 }
-sendTimer = setInterval(() => { if (joyActive || jx || jy) sendCmd(); }, 50);
+sendTimer = setInterval(() => {
+  if (!(joyActive || jx || jy)) return;
+  ensureManualArm();      // 一边推杆一边等授权，开了就直接动
+  sendCmd();
+}, 50);
 
 /* ---------------- 摇杆（建图探索） ---------------- */
 const mapJoyEl = $('mapJoy'), mapKnobEl = $('mapKnob');
@@ -1756,7 +1784,7 @@ function mapResetKnob() {
 function bindMapJoystick() {
   if (!mapJoyEl || !mapKnobEl) return;
 mapJoyEl.addEventListener('touchstart', (e) => {
-  e.preventDefault(); mapJoyActive = true;
+  e.preventDefault(); mapJoyActive = true; ensureManualArm();
   const p = mapEventPoint(e); mapMoveKnob(p.x, p.y); sendCmd(mjx, mjy);
 }, {passive: false});
 mapJoyEl.addEventListener('touchmove', (e) => {
@@ -1766,7 +1794,7 @@ mapJoyEl.addEventListener('touchmove', (e) => {
 mapJoyEl.addEventListener('touchend', () => { mapResetKnob(); sendCmd(0, 0); });
 mapJoyEl.addEventListener('touchcancel', () => { mapResetKnob(); sendCmd(0, 0); });
 mapJoyEl.addEventListener('mousedown', (e) => {
-  e.preventDefault(); mapJoyActive = true;
+  e.preventDefault(); mapJoyActive = true; ensureManualArm();
   const p = mapEventPoint(e); mapMoveKnob(p.x, p.y); sendCmd(mjx, mjy);
 });
 window.addEventListener('mousemove', (e) => {
@@ -1777,7 +1805,11 @@ window.addEventListener('mouseup', () => {
   if (!mapJoyActive) return;
   mapResetKnob(); sendCmd(0, 0);
 });
-setInterval(() => { if (mapJoyActive || mjx || mjy) sendCmd(mjx, mjy); }, 50);
+setInterval(() => {
+  if (!(mapJoyActive || mjx || mjy)) return;
+  ensureManualArm();
+  sendCmd(mjx, mjy);
+}, 50);
 }
 bindMapJoystick();
 
@@ -4106,7 +4138,7 @@ function fTakeOver() {
   if (followOn) { followStop(false); $('followHint').textContent = '已切到手动摇杆'; }
 }
 function fStart(e) {
-  e.preventDefault(); fJoyActive = true; joyActive = true; fTakeOver();
+  e.preventDefault(); fJoyActive = true; joyActive = true; ensureManualArm(); fTakeOver();
   const p = fEventPoint(e); fMoveKnob(p.x, p.y); sendCmd();   // 与手动模式完全一样
 }
 followJoyEl.addEventListener('touchstart', fStart, { passive: false });
