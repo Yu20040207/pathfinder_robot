@@ -11362,3 +11362,48 @@ last -x: "manbaout :0  08:22:29 - crash (00:18)"
 - **真车手感未验**（授权要多久生效、推杆多久车动）——需要用户现场试
 - 页面同时存在两套授权机制（`autoArm` 仅建图 / `ensureManualArm` 三摇杆），
   以后若要合并，保留 `ensureManualArm` 的"不归零"语义
+
+## 2026-11-23 11:50 · 跟随模式「一直在说没在跑」的真因 + 提示词移到顶部
+
+### 会话目标
+用户：「切换到跟随模式的时候提示正在启动，后面还是说人体识别没在跑，
+并且把这些提示词放在上面，就像导航模式上面的提示词一样」。
+
+### 真因：页面只在**点「开始跟随」之后**才发 `/follow?on=1`
+`followKeepalive()` 开头就是 `if (!followOn || !followWanted) return;`，
+而 `followOn` 要用户选了人、点了「开始跟随」才为真。
+所以**只是切到跟随模式**时，页面一条 `/follow` 都不发 →
+我昨天做的「按需启动服务」永远收不到信号 → 视觉/跟随根本没起 → 12 s 宽限期一到
+就显示「人体识别没在跑」。日志佐证：11:15~11:22 之间 `fwr-vision` **零条 journal**
+（没有任何启动尝试），而手机会话确实连着 8081（`clients: 1`）。
+
+### 修复
+1. **媒体服务加 `prep=1`**（`tools/robot_mjpeg_server.py`）
+   - `GET /follow?prep=1` = 「我要用跟随了，把服务拉起来」，**只启动服务、不发布 `/follow/enable`**
+     （不会莫名其妙开始跟随）
+   - 返回 `{"ok":true,"prep":true,"vision":<cfg>}`，不碰跟随节点
+   - 服务状态**变化时才打日志**：`[follow] 视觉/跟随服务 → 启动/停止`
+   - 心跳超时阈值按新的 prep 节奏（5 s 一次）放宽到 **25 s**
+2. **页面**（`cloud/web/car.html`）
+   - 新增 `followPrep()`（5 s 节流）：进跟随模式立即发一次，`followPollOnce()` 每 200 ms
+     带上它兼作心跳
+   - **提示词移到顶部**：新增 `#followTop` 绝对定位条（与 `#navInfo` 同款深色半透明、
+     12 px 居中），`#followHint` 从 `#followBar` 移到里面，id 不变（JS 全部照旧）
+
+### 已验证（实机）
+```
+(停掉两服务)               vision=inactive follow=inactive
+GET /follow?prep=1       → {"ok":true,"prep":true,"vision":true}
+10 s 后                   vision=active follow=active
+GET /boxes               → {"w":640,"h":480,"infer_ms":48.9,
+                             "persons":[{"id":1,"x":0.7188,"y":0.2938,"w":0.0688,"h":0.3354,"s":0.637}]}
+GET /followstate         → {"on":false,"reason":"off",...}
+停 27 s 不发 prep          → 日志「心跳丢失 27 s（页面可能关了）→ 停」，
+                            vision=inactive follow=inactive
+```
+- `node --check` 通过；线上页面 `followTop` × 1、`followPrep` × 7，
+  `/home/boat_control/car.html` 与 `/opt/jc/web/car.html` md5 一致
+
+### 未验证 / 遗留
+- **手机端实点未验**：需要用户强制刷新页面后切一次跟随模式确认
+- `#followRefresh` 在右下角，与顶部提示条不冲突（已核对 CSS）

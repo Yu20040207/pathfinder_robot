@@ -60,7 +60,8 @@ FOLLOW_PUB = [None]
 #   at   = 最后一次收到页面心跳的时间
 #   busy = 已有一个 systemctl 在跑（页面每 1 s 心跳一次，不能一次刷一堆）
 FOLLOW_SVC: dict = {'cfg': None, 'at': 0.0, 'busy': False}
-FOLLOW_HEARTBEAT_LOST_S = 15.0     # 页面关掉/断网后多久停服务（页面 1 s 一次心跳）
+FOLLOW_HEARTBEAT_LOST_S = 25.0     # 页面关掉/断网后多久停服务（页面 5 s 一次 prep 心跳）
+FOLLOW_LAST_CFG = [None]           # 上一次生效的服务状态（只在变化时打日志）
 FOLLOW_UNITS = ('fwr-vision', 'fwr-follow')
 
 
@@ -72,6 +73,9 @@ def _follow_services(on: bool, force: bool = False) -> None:
         return
     FOLLOW_SVC['cfg'] = on
     FOLLOW_SVC['busy'] = True
+    if FOLLOW_LAST_CFG[0] != on:
+        FOLLOW_LAST_CFG[0] = on
+        print('[follow] 视觉/跟随服务 → %s' % ('启动' if on else '停止'), flush=True)
 
     def run() -> None:
         try:
@@ -331,11 +335,20 @@ async def handle_select(request: web.Request) -> web.Response:
 async def handle_follow(request: web.Request) -> web.Response:
     """开始/取消跟随。on=1 兼心跳：页面每 1 s 发一次，节点 2 s 收不到就停车。"""
     on = request.query.get('on', '0') in ('1', 'true', 'yes')
+    # 2026-11-23：prep=1 = 「我要用跟随了，把服务拉起来」但**不进跟随控制**。
+    # 页面一进跟随模式就发 prep（不等用户点「开始跟随」），否则要等用户点按钮才启动，
+    # 中间一直是「人体识别没在跑」。
+    prep = request.query.get('prep', '0') in ('1', 'true', 'yes')
     # 2026-11-23：进跟随模式才拉起视觉/跟随服务；退出就停掉。
-    # on=1 同时是心跳，_follow_services 自带去重，不会每 1 s 刷一次 systemctl。
-    _follow_services(on)
-    if on:
+    # 请求自带去重，不会每 5 s 刷一次 systemctl。
+    _follow_services(True if (on or prep) else False)
+    if on or prep:
         FOLLOW_SVC['at'] = time.monotonic()
+    if prep:
+        return web.Response(
+            text=json.dumps({'ok': True, 'prep': True,
+                             'vision': FOLLOW_SVC['cfg']}),
+            content_type='application/json', headers=CORS)
     pub = FOLLOW_PUB[0]
     if pub is None:
         return web.Response(text=json.dumps({'ok': False, 'err': 'follow 未就绪'}),
@@ -367,7 +380,7 @@ async def _follow_service_watchdog(_app) -> None:
             continue
         if time.monotonic() - FOLLOW_SVC['at'] < FOLLOW_HEARTBEAT_LOST_S:
             continue
-        print('[follow] 心跳丢失 %.0f s → 停跟随/视觉服务'
+        print('[follow] 心跳丢失 %.0f s（页面可能关了）→ 停跟随/视觉服务'
               % (time.monotonic() - FOLLOW_SVC['at']), flush=True)
         pub = FOLLOW_PUB[0]
         if pub is not None:
