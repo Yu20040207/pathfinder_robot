@@ -1176,8 +1176,26 @@ function connect(force) {
           }
         }
         if (!m.accepted && navSwitchPending) {
-          // 栈还没起来/服务没就绪：这是"等"，不是"失败"，别吓用户
-          setProgressLabel('导航栈还没就绪，等它就绪后自动重新定位…');
+          // 2026-11-23：这里原来把所有失败都报成"导航栈还没就绪"，可实际上
+          // 栈是好的、失败的是**地图匹配**（残差过大/贴墙率不足）→ 高层的
+          // 8 秒重试于是每轮显示一次"已就绪→还没就绪"，看着像反复横跳。
+          // 现在按原因分开说，并且定位失败 3 次就停手，别让用户无限等。
+          const why = String(m.reason || '');
+          const stackIssue = /导航栈|未就绪|请稍候|not ready/i.test(why);
+          if (stackIssue) {
+            setProgressLabel('导航栈还没就绪，等它就绪后自动重新定位…');
+            return;
+          }
+          relocFails += 1;
+          if (relocFails >= 3) {
+            clearInterval(navReadyTimer);
+            navSwitchPending = false;
+            finishProgress('自动定位失败：' + why +
+                           '（请点 📍 重新定位，或用 2D Pose Estimate 指定位置）');
+            showToast('自动定位失败，请手动定位', false);
+          } else {
+            setProgressLabel(`重新定位失败（第 ${relocFails} 次）：${why}，再试一次…`);
+          }
           return;
         }
         $('navInfo').textContent = m.accepted
@@ -1829,6 +1847,7 @@ let switchTimer = null;
 let progressTimer = null;
 let navSwitchPending = false;
 let navReadyTries = 0;
+let relocFails = 0;          // 重定位**本身**失败次数（区别于"导航栈没起来"）
 let navReadyTimer = null;
 let restartGuard = null;
 let progressActive = false;
@@ -1856,6 +1875,7 @@ function startProgress(label, durationMs) {
 function startNavReadyWatch(prefix) {
   navSwitchPending = true;
   navReadyTries = 0;
+  relocFails = 0;
   clearInterval(navReadyTimer);
   const tick = () => {
     if (!navSwitchPending) return;
@@ -1875,8 +1895,10 @@ function startNavReadyWatch(prefix) {
     } else if (wsReady) {
       // 栈确实起来了才开始重新定位
       ws.send(JSON.stringify({type: 'nav', action: 'relocalize'}));
+      // 2026-11-23：别再说"已就绪"——栈在 ≠ 定位成功。定位失败时下一行
+      // 会立刻改成"重新定位失败"，两者一上一下就像在反复横跳。
       setProgressLabel(
-        `导航栈已就绪，正在重新定位（第 ${navReadyTries} 次）…`);
+        `正在重新定位（第 ${navReadyTries} 次，地图匹配约 1~3 秒）…`);
     }
     if (navReadyTries > 18) {
       clearInterval(navReadyTimer);

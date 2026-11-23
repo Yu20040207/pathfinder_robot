@@ -11407,3 +11407,56 @@ GET /followstate         → {"on":false,"reason":"off",...}
 ### 未验证 / 遗留
 - **手机端实点未验**：需要用户强制刷新页面后切一次跟随模式确认
 - `#followRefresh` 在右下角，与顶部提示条不冲突（已核对 CSS）
+
+## 2026-11-23 12:00 · 「导航已就绪 ↔ 还没就绪」反复横跳的真因
+
+### 会话目标
+用户：「切到导航模式，上面提示一直说导航已就绪，过一会又说还没就绪，看看什么情况」。
+
+### 真因：不是栈在抖，是**重定位失败**被显示成了「栈没起来」
+`startNavReadyWatch()` 每 8 s 打一拍：
+1. `stackUp`（`robotState.nav` 是真实值）→ 发 `relocalize`，标 `导航栈已就绪，正在重新定位（第 N 次）…`；
+2. 车端 `/localization/reseed` 做地图匹配，**匹配失败**（残差过大/贴墙率不足）→ 回 `accepted=false`；
+3. 页面 `else if (m.action === 'relocalize')` 里那句
+   `if (!m.accepted && navSwitchPending) → '导航栈还没就绪…'` **把任何失败都说成栈没起来**；
+4. 于是「已就绪…第 N 次」→「还没就绪」→ 8 s 后再「已就绪…第 N+1 次」→ 用户看到反复横跳。
+
+**车端证据**（同一时间窗）：
+```
+11:23:14/22/30/38  mqtt_bridge: 收到 nav 动作: relocalize     ← 页面每 8 s 一发
+11:22:59~11:23:39  auto_initial_pose: checkpoint does not fit  ← 每发一次匹配一次，全失败
+11:25:41           auto_initial_pose: 重新定位成功 (0.66,-1.12,-81°) 残差 0.085 m
+```
+**手工验证**（12:00，纯定位、不发运动）：
+```
+ros2 service call /localization/reseed std_srvs/srv/Trigger
+→ 连调 3 次全部 success=True，残差 0.084 / 0.107 / 0.093 m
+```
+说明服务与栈都正常，**抖的是定位结果**（车当时位姿/场景与地图对不上）。
+
+### 修复
+1. `cloud/web/car.html`
+   - 去掉误导：失败原因里含 `导航栈|未就绪|请稍候` 才说"栈还没就绪"，
+     否则如实显示 `重新定位失败（第 N 次）：<真实原因>，再试一次…`
+   - **失败 3 次就收手**：`自动定位失败：<原因>（请点 📍 重新定位，或用 2D Pose Estimate 指定位置）`
+     + toast，不再无限打 8 s 轮询
+   - 第 1 步文案从 `导航栈已就绪，正在重新定位` 改成 `正在重新定位（第 N 次，地图匹配约 1~3 秒）…`
+     （栈好在 ≠ 定位成功，两个说法别再混）
+   - 新增 `relocFails` 计数，`startNavReadyWatch` 时复位
+2. `ros2_ws/src/fwr_bringup/fwr_bringup/auto_initial_pose.py`：匹配失败打 WARN
+   `重新定位失败: <原因>（残差 x m，贴墙 y%，未知区 z%）`（原来车端不留痕）
+3. `ros2_ws/src/fwr_bringup/fwr_bringup/mqtt_bridge.py`：`_on_nav_done` 失败时 WARN
+   `nav 动作失败: relocalize → <原因>`（5 s 节流）
+
+### 已验证
+- `pytest ros2_ws/src/fwr_bringup/test tests -q` → **680 passed**
+- `node --check` 通过；线上页面 `自动定位失败`×2、`stackIssue`×2、`relocFails`×5
+- `fwr-mqtt-bridge` 重启后 active；build 副本已同步
+- 手工 reseed 3/3 成功（残差 0.084~0.107 m）
+
+### 未验证 / 遗留
+- 手机端实点未验（需强制刷新后切导航模式观察）
+- `auto_initial_pose` 的新日志要**下次起导航栈**才生效（当前栈是旧进程）
+- 根因里的"为什么那几次匹配会失败"没查到底：checkpoint 位姿与现场不符是诱因
+  （`checkpoint does not fit`），但全局匹配也失败说明那段扫描质量/场景有变化。
+  下次复现请抓 `重新定位失败:` 那条 WARN 的残差/贴墙率数字。

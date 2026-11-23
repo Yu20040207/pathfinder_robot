@@ -234,6 +234,11 @@ class AutoInitialPose(Node):
         if sane and score > float(self.get_parameter('max_score_m').value):
             sane, why = False, '残差 %.3f m 过大' % score
         if not sane:
+            # 2026-11-23：原来失败只回给手机、车端不留痕迹，现场排查时
+            # 只能看到手机那句"导航栈还没就绪"，完全查不到真实原因。
+            self.get_logger().warn(
+                '重新定位失败: %s（残差 %.3f m，贴墙 %.0f%%，未知区 %.0f%%）' % (
+                    why, score, 100 * on_wall, 100 * unknown_frac))
             response.success = False
             response.message = '定位失败（%s），请手动核对后点 2D Pose Estimate' % why
             return response

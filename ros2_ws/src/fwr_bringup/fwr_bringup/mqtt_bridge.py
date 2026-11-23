@@ -1854,6 +1854,12 @@ class MqttBridge(Node):
             ok, reason = bool(res.success), res.message
         except Exception as exc:                 # noqa: BLE001
             reason = f'服务调用失败: {exc}'
+        # 2026-11-23：失败结果以前只发给手机、车上不留痕；现场排查
+        # "一直说没就绪"时完全看不到真实原因（残差过大/贴墙率不足…）。
+        if not ok:
+            self.get_logger().warn(
+                'nav 动作失败: %s → %s' % (self._last_nav_action, reason),
+                throttle_duration_sec=5.0)
         if ok and self._last_nav_action == 'mapping_save':
             saved = self._promote_saved_map()
             if saved:
