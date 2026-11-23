@@ -11170,3 +11170,68 @@ last -x: "manbaout :0  08:22:29 - crash (00:18)"
 
 ### 下一步
 用户要做时说一声，先做 P0（纯代码 + 单测），等二楼地图建好再做 P1 实机两趟。
+
+## 2026-11-23 11:10 · 「安全链老是等待中」的真凶：看门狗自己的死亡螺旋
+
+### 会话目标
+用户报「导航过程中显示安全链等待中，这个安全链怎么老是出问题」。
+
+### 现场数据（今天 10:43 起到 11:00）
+| 指标 | 数值 |
+| --- | --- |
+| `collision_monitor_forward` 进程重拉 | **14 次** |
+| 看门狗**三级**（杀进程） | **12 次** |
+| 看门狗"状态 inactive"告警 | 9 次 |
+| 看门狗"补 configure/activate" | 2 次 |
+| `process has died` | 29（含被 -9 杀的监控与 lifecycle_manager） |
+
+### 根因（两处，都在 `tools/chain_watchdog.py`）
+1. **拿旧状态下判断**：`_health` 里 `_poll_state()` 是**异步**的，紧接着
+   `state = self._cm_state.get(name)` 读到的是上一轮的旧值。监控被 respawn 后
+   旧值仍是 `inactive` → 判"无效"。
+2. **已 active 时立刻判"恢复失败"**：`_revive()` 在 `st == 'active'` 时直接
+   `return self._out_fresh()`，而刚 respawn 的节点还没开始发布（2 s 窗口）→
+   返回 False → 判"二级恢复失败" → **三级再杀一次**。
+
+两处合起来 = 死亡螺旋：杀 → respawn → 9 s 后被判死 → 再杀，约 30 s 一轮。
+证据（10:57:22.9 → 10:57:32.5）：
+```
+[lifecycle_manager_collision]: Server collision_monitor_forward connected with bond.
+[lifecycle_manager_collision]: Managed nodes are active          ← 明明活着
+[chain_watchdog]: collision_monitor_forward 一级无效 → 二级恢复    ← 9 s 后
+[chain_watchdog]: collision_monitor_forward 二级恢复失败 → 三级：杀掉监控进程
+[ERROR] [collision_monitor-29]: process has died [pid 4429, exit code -9]
+```
+手机端看到的就是每 30 s 一次的"安全链等待中"（`chain=false`，mqtt_bridge 判据是
+`/cmd_vel_auto_forward_filtered` 2 s 内有帧）。
+
+### 仓库改动 `tools/chain_watchdog.py`
+- 新增 `self._state_at`：状态结果时间戳；`_health` **只对 <10 s 的新鲜状态下判断**
+- `_revive()`：`st == 'active'` 时**先等 8 s 再看输出**（不再当场判死）
+- `_kill_safety_processes()`：杀完立刻清空 `_cm_state` / `_state_at` / inflight，
+  旧状态一律作废（否则下一轮又拿旧值判死）
+- **熔断**：5 分钟内杀满 4 次 → 停止自动重启并报错（说明根因没解决，
+  继续杀只会制造抖动）
+
+### 已验证
+- `PYTHONPATH=ros2_ws/src/fwr_bringup .venv/bin/python -m pytest ros2_ws/src/fwr_bringup/test -q`
+  → **452 passed**（新增 `test_watchdog_never_acts_on_stale_state`）
+- 部署：scp 到 `~/Company_Project/Four-wheel-robot/tools/chain_watchdog.py`，
+  `pkill` 后 launch 的 `respawn=True` 于 **11:01:50** 自动拉起（pid 5382）
+- **11:01:50 之后看门狗零动作**（无三级/无补激活/无静默告警）；
+  `collision_monitor_forward` = active；`/cmd_vel_auto_forward_filtered` 20.2 Hz、
+  `/cmd_vel_auto_safe` 20.0 Hz
+- **导航栈没有重启**，用户当时的导航任务未被打断
+
+### 未验证 / 遗留
+- 负载仍偏高（load 8.6）：`frontier_explorer 38%`、`mqtt_bridge 26%`、
+  `dm_imu_node 25%`、`base_bridge 24%`、`selector 22%`、相机 19.5%、
+  MJPEG 17.5%，另有 `fwr-vision`（YOLO）在导航期间也常驻。
+  **导航时并不需要视觉/跟随**，可按需 `systemctl stop fwr-vision fwr-follow` 降负载。
+- CPU governor 仍为 `powersave`（当前 2706 MHz）。
+- 机器人 IP 由 `192.168.0.20` 变为 **`192.168.0.24`**（DHCP）。
+
+### 当前运行状态
+- `fwr-nav` active（10:43:46 启动）、`fwr-mqtt-bridge`/`fwr-battery`/`fwr-media`/
+  `fwr-camera`/`fwr-vision`/`fwr-follow` 均 active
+- 看门狗 pid 5382（新代码）；监控 active

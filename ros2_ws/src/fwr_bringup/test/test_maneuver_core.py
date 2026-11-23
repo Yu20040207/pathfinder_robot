@@ -358,3 +358,23 @@ def test_watchdog_detects_fake_active_monitor():
     assert 'out_nz == 0' in src, '必须能识别"有输出但全零"'
     assert '_blocked_pts' in src, '必须确认前停区里没有真实障碍，避免把真停车当假活'
     assert '假活' in src
+
+
+def test_watchdog_never_acts_on_stale_state():
+    """看门狗不能拿"上一轮的旧状态"下判断（2026-11-23 死亡螺旋）。
+
+    现场：collision_monitor 已被 lifecycle_manager 拉成 active（日志
+    "Managed nodes are active"），但看门狗 9 秒后判"一级无效"→ 二级恢复
+    →（已 active，_out_fresh 立刻 False）→ 三级杀进程 → 新进程刚起来又被判死。
+    一天 12 次三级重启、14 次进程重拉，手机端就是"安全链老是等待中"。
+
+    三个必要条件：状态要有时间戳 + 只认新鲜状态 + 已 active 时要等输出。
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[4] / 'tools' / 'chain_watchdog.py').read_text()
+    assert '_state_at' in src, '状态必须带结果时间戳'
+    assert 'fresh = (now - self._state_at.get(name, 0.0)) < 10.0' in src, \
+        '必须只对新鲜状态下判断'
+    assert "and self._ever_active.get(name) and fresh" in src
+    assert "elif st == 'active':" in src, '已是 active 时要等输出再判'
+    assert 'self._state_at.clear()' in src, '杀进程后必须作废旧状态'

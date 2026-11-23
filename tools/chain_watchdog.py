@@ -108,7 +108,15 @@ class Watchdog(Node):
                 TransitionEvent, f'/{_m}/transition_event',
                 (lambda msg, name=_m: self._on_transition(name, msg)), 10)
         self._state_seed_at = 0.0
-        self._state_inflight = set()      # 正在异步查状态的监控
+        self._state_inflight = set()
+        # 2026-11-23：每次状态结果的时间戳。_health 里原来是"发起异步查询后
+        # 立刻读 _cm_state"，读到的是**上一次**的旧值 —— 节点刚 respawn 成
+        # active 时旧值还是 inactive → 误判 → 杀进程 → 再误判（死循环）。
+        self._state_at = {}
+        # 2026-11-23：熔断。5 分钟内杀到 4 次就停手 —— 说明"杀进程"这条路
+        # 已经治不好它了（多半是 TF/雷达的根因没解决），继续杀只会让手机端
+        # 一直"安全链等待中"。宁可放它静默，也不要制造 30 s 一轮的抖动。
+        self._kill_times = []      # 正在异步查状态的监控
         self._last_cli_seed = 0.0         # 上次用 CLI 兜底的时间（必须有节流）
         self.create_subscription(LaserScan, '/scan', self._on_scan,
                                  qos_profile_sensor_data)
@@ -201,6 +209,7 @@ class Watchdog(Node):
                 self._cm_active_at = time.monotonic()
             self._ever_active[name] = True
         self._cm_state[name] = label
+        self._state_at[name] = time.monotonic()
 
     def _on_in(self, msg):
         self._in += 1
@@ -255,12 +264,27 @@ class Watchdog(Node):
         只有换一个进程才恢复。SIGKILL 是必须的（SIGTERM 实测会被忽略，
         结果新旧 manager 抢同一个监控）。
         """
+        now = time.monotonic()
+        self._kill_times = [t for t in self._kill_times if now - t < 300.0]
+        if len(self._kill_times) >= 4:
+            self.get_logger().error(
+                '5 分钟内已重启安全进程 4 次 → 熔断，停止自动重启。'
+                '请人工检查（ros2 lifecycle get /collision_monitor_forward、'
+                '/scan 频率、/tf 是否齐全）')
+            return
+        self._kill_times.append(now)
         subprocess.run(['pkill', '-9', '-f',
                         'nav2_collision_monito[r]/collision_monitor'],
                        timeout=5, check=False)
         subprocess.run(['pkill', '-9', '-f',
                         '__node:=lifecycle_manager_collision'],
                        timeout=5, check=False)
+        # 进程换了，缓存的旧状态一律作废（否则下一轮 _health 又拿旧值判死）
+        for m in MONITORS:
+            self._cm_state[m] = None
+        self._state_at.clear()
+        self._state_inflight.clear()
+        self._cm_active_at = time.monotonic()
 
     def _revive(self, name, gap: float = 12.0):
         """按当前生命周期状态补齐 configure/activate。
@@ -278,6 +302,12 @@ class Watchdog(Node):
         if st == 'inactive':
             self._cli(name, 'activate')
             time.sleep(max(gap, 8.0))     # 激活后给监控 8 秒转起来再判定
+        elif st == 'active':
+            # 2026-11-23：**已经是 active 时不能立刻用 2 s 输出窗口判死**。
+            # 刚被 respawn 的节点要几秒才重新发布，原来 _out_fresh() 立刻返回
+            # False → 判"二级恢复失败" → 三级再杀一次（死亡螺旋的一环）。
+            time.sleep(max(gap, 8.0))
+            st = self._state_of(name)
         return self._out_fresh()
 
     def _restart(self, name):
@@ -578,9 +608,17 @@ class Watchdog(Node):
                 continue
             self._poll_state(name)              # 异步，毫秒级
             state = self._cm_state.get(name)
+            # 2026-11-23：**只在状态是新鲜的时候才下判断**。
+            # _poll_state 是异步的，回调要等几毫秒~几秒；原来这一行紧接着就读
+            # _cm_state，读到的是上一轮的旧值。节点被 respawn 后旧值仍是
+            # 'inactive'，于是刚恢复的监控被判"无效"→ 杀掉 → 再判 → 再杀，
+            # 2026-11-23 实测一天 12 次三级重启、14 次进程重拉，
+            # 手机端就表现为"安全链老是等待中"。
+            fresh = (now - self._state_at.get(name, 0.0)) < 10.0
             if state == 'active':
                 self._ever_active[name] = True
-            if state not in ('active', 'unknown') and self._ever_active.get(name):
+            if (state not in ('active', 'unknown')
+                    and self._ever_active.get(name) and fresh):
                 self.get_logger().warn('%s 处于 %s，自动恢复' % (name, state))
                 self._fix(name, f'状态 {state}')
             elif state not in ('active', 'unknown'):
