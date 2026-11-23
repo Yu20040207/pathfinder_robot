@@ -23,6 +23,7 @@ import json
 import math
 import os
 from pathlib import Path
+import socket
 import subprocess
 import threading
 import time
@@ -446,6 +447,8 @@ class MqttBridge(Node):
             self.get_logger().error(f'MQTT 连接启动失败: {exc}')
         self.get_logger().info(
             f'mqtt_bridge 启动：{self._host}:{self._port} device={self._device}')
+        self._lan_ip_cache = ''
+        self._lan_ip_at = 0.0
 
     def _publish_online_heartbeat(self) -> None:
         """周期性重申在线状态（retained），顺便自愈被旧会话 LWT 覆盖的情况。"""
@@ -1903,6 +1906,37 @@ class MqttBridge(Node):
         except Exception:                        # noqa: BLE001
             return None
 
+    def _lan_ip(self) -> str:
+        """本机 LAN 地址（30 s 缓存，取不到返回空串）。
+
+        UDP `connect` 不发包，只让内核选路由 —— 比 gethostbyname 准
+        （后者在 /etc/hosts 里可能解析到 127.0.1.1）。
+        """
+        now = time.monotonic()
+        if self._lan_ip_cache and now - self._lan_ip_at < 30.0:
+            return self._lan_ip_cache
+        ip = ''
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                sock.settimeout(0.2)
+                sock.connect(('8.8.8.8', 80))
+                ip = sock.getsockname()[0]
+            finally:
+                sock.close()
+        except Exception:                    # noqa: BLE001
+            ip = ''
+        if not ip or ip.startswith('127.'):
+            try:
+                ip = socket.gethostbyname(socket.gethostname())
+            except Exception:                # noqa: BLE001
+                ip = ''
+        if ip.startswith('127.'):
+            ip = ''
+        self._lan_ip_cache = ip
+        self._lan_ip_at = now
+        return ip
+
     def _publish_state(self):
         if not self._connected:
             return
@@ -1924,6 +1958,11 @@ class MqttBridge(Node):
             body = json.loads(payload.decode('utf-8'))
         except (ValueError, AttributeError):
             body = {}
+        # 2026-11-23：上报本机 IP。云端 /api/devices/{id}/media 的取值顺序是
+        # JC_MEDIA_HOSTS → 状态里的 lan_ip。机器人 IP 由 DHCP 分配，
+        # 今天从 .20 变成 .24 就导致手机黑屏、跟随页全废（要手工改云端配置）。
+        # 带上 lan_ip，云端清空 JC_MEDIA_HOSTS 后就能自动跟上换网/换 IP。
+        body['lan_ip'] = self._lan_ip()
         # 安全链是否通畅（过滤后速度 2 s 内有帧）。建图模式没有这条链，给 True。
         body['chain'] = (True if self._mapping_mode else
                          (time.monotonic() - self._last_filtered) < 2.0)

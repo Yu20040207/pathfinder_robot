@@ -11276,3 +11276,54 @@ last -x: "manbaout :0  08:22:29 - crash (00:18)"
 - 本项属于**长期有效的运行方式**（视觉/跟随按需启动），
   按 AGENTS.md「不在会话中途改本文件」的规则，收尾时再折进 §3 视觉章节。
 - 负载待观察：停掉视觉后应明显下降，用户下次导航时可对比。
+
+## 2026-11-23 11:35 · 摄像头黑屏真因（IP 漂移）+ 跟随模式启动提示
+
+### 会话目标
+用户：「hp60c 插上了但看不到画面，黑屏，插在 hub 上」「做（lan_ip），
+并且切到跟随模式时提示人体识别没在跑，在就绪前加上提示」。
+
+### 结论：摄像头没坏，是云端指着一个不存在的 IP
+- 车端实测：14.9 fps、累计 1932 帧、坏帧 0；快照 480×360、平均亮度 **110.1**、
+  暗像素 3.8% —— 画面完全正常（hub 也没问题）。
+- 真因：机器人 IP 由 DHCP 从 **192.168.0.20 → 192.168.0.24**，
+  而云端 `JC_MEDIA_HOSTS='{"car-001":"192.168.0.20"}'` 没跟着变 →
+  手机拿到的播放地址是死地址 → 黑屏；`/follow`、`/boxes`、`/select` 同样全废。
+
+### 仓库改动
+1. `ros2_ws/src/fwr_bringup/fwr_bringup/mqtt_bridge.py`
+   - 新增 `_lan_ip()`（UDP connect 选路由，30 s 缓存；取不到回退 gethostbyname，
+     拒绝 127.x）
+   - 状态里加 `lan_ip`（云端 `/api/devices/{id}/media` 在 `JC_MEDIA_HOSTS`
+     为空时就用它 → 换 IP / 换网自动跟上）
+2. `cloud/web/car.html`
+   - 新增 `followEnteredAt`；切到跟随模式后 **12 s 内** `/boxes` 还是 stale 时
+     显示「**正在启动人体识别…（首次启动需几秒）**」，超时才显示原来的
+     「人体识别没在跑」。因为视觉服务已改成按需启动，起来要 2~4 秒。
+   - ⚠️ 仓库里的 car.html 比线上**旧 32 行**（线上 2026-11-22 加了
+     「底轮机器人一代」产品卡与 `car_gen1.html` 跳转）。本次以线上为基准打补丁，
+     再把结果写回仓库，两边已对齐。
+3. `ros2_ws/src/fwr_bringup/test/test_mqtt_bridge.py`：新增
+   `test_state_reports_lan_ip`（钉死上报 + 缓存）。
+
+### 仓库外改动
+- ECS `jc-api`：`/etc/systemd/system/jc-api.service.d/media.conf`
+  改成 `JC_MEDIA_HOSTS='{}'`（备份 `/tmp/media.conf.bak2.*`），daemon-reload + 重启
+- ECS 页面真实部署位置（**重要，以前记错了**）：
+  手机访问 `http://8.163.69.109:8080/car.html` 由 **`python3 -m http.server 8080`**
+  提供，根目录是 **`/home/boat_control/`**，**不是** `/opt/jc/web/`。
+  本次两份都更新了，备份 `car.html.bak.*`。
+
+### 已验证
+- `pytest ros2_ws/src/fwr_bringup/test tests -q` → **680 passed**
+- 车端重启 `fwr-mqtt-bridge` 后订阅 `robot/car-001/state`：
+  `lan_ip = '192.168.0.24'`，`chain = True`，字段存在
+- 云端直接调函数验证回退链：
+  `_media_hosts() = {}` → `media.url = http://192.168.0.24:8081/video`
+- 页面：`curl 127.0.0.1:8080/car.html` → 200，新提示与新变量都在
+
+### 未验证 / 遗留
+- 手机端实际看到画面（要用户刷新页面后确认；车端 `/healthz` 的 `clients`
+  应从 0 变 1）
+- 部署链路混乱（页面在 `/home/boat_control` 用裸 `http.server` 跑），
+  建议后续迁到 nginx 或 `/opt/jc/web` 统一

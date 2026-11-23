@@ -78,3 +78,19 @@ def test_yaw_of_quarter_turn():
     q.z = math.sin(math.pi / 4)
     q.w = math.cos(math.pi / 4)
     assert yaw_of(q) == pytest.approx(math.pi / 2)
+
+
+def test_state_reports_lan_ip():
+    """状态必须上报本机 IP（2026-11-23）。
+
+    机器人 IP 由 DHCP 分配，今天 .20→.24，云端 JC_MEDIA_HOSTS 还写着旧的 .20，
+    手机端画面全黑、跟随页也连不上。云端 /api/devices/{id}/media 的取值顺序是
+    JC_MEDIA_HOSTS → 状态里的 lan_ip，所以只要 bridge 上报 lan_ip，
+    云端清空配置后就能自动跟上换 IP / 换网。
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[4] / 'ros2_ws' / 'src' / 'fwr_bringup'
+           / 'fwr_bringup' / 'mqtt_bridge.py').read_text()
+    assert 'def _lan_ip(self)' in src, '必须有 _lan_ip()'
+    assert "body['lan_ip'] = self._lan_ip()" in src, '状态里必须带上 lan_ip'
+    assert 'self._lan_ip_cache' in src, 'IP 查询必须带缓存（状态 10 Hz）'

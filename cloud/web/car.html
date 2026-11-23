@@ -455,6 +455,13 @@
 <div id="productView" class="hidden">
   <div class="productHead">选择产品</div>
   <div class="productGrid">
+    <!-- 2026-11-22 用户要求：最上面加「底轮机器人一代」。一代是独立工程
+         （Four-wheel-robot 仓库，Flask/MQTT，端口 5000），控制页为 car_gen1.html。 -->
+    <div class="productCard" id="prodWheelGen1">
+      <div class="prodIcon">🛞</div>
+      <div class="prodName">底轮机器人一代</div>
+      <div class="prodDesc">四轮底盘 · 手动 / 巡游避障 / 视觉</div>
+    </div>
     <div class="productCard" id="prodWheel">
       <div class="prodIcon">🛞</div>
       <div class="prodName">底轮机器人</div>
@@ -729,6 +736,12 @@ function showMain() {
   setTimeout(placeProgressBar, 300);
   if (!wsReady) connect();
 }
+// 2026-11-22 用户要求：产品页最上面加「底轮机器人一代」。一代跑的是另一个仓库
+// （Four-wheel-robot，Flask + MQTT，:5000）那套页面，本仓库给它做了独立控制页
+// car_gen1.html（手动模式 / 巡游避障 / 视觉系统），这里直接跳转。
+$('prodWheelGen1').onclick = () => {
+  location.href = 'car_gen1.html';
+};
 $('prodWheel').onclick = () => {
   localStorage.setItem('jc_product', 'wheel');
   showMain();
@@ -3726,6 +3739,10 @@ let followWanted = false;
 let followPoll = null;
 let followMedia = null;
 let followData = { persons: [], sel: -1, tracking: false };
+// 2026-11-23：跟随服务改成「进跟随模式才启动」，起来要 2~4 秒。
+// 这段时间 /boxes 天然 stale，原来直接说「人体识别没在跑」像坏了，
+// 现在给 12 s 启动宽限，超时才说真话。
+let followEnteredAt = 0;
 let followSel = -1;
 let followOn = false;            // 是否正在驱动车跟随（控制节点在执行）
 let followStateData = null;      // /followstate 最新状态
@@ -3814,7 +3831,11 @@ function drawFollow() {
            ? ' · <span style="color:#fca5a5">⚠ 指令已发但车没动（查运动门/急停）</span>'
            : '');
     } else if (followData.stale) {
-      hint.textContent = '人体识别没在跑（机器人上启动 person_detector）';
+      if (Date.now() - followEnteredAt < 12000) {
+        hint.textContent = '正在启动人体识别…（首次启动需几秒）';
+      } else {
+        hint.textContent = '人体识别没在跑（机器人上启动 person_detector）';
+      }
     } else if (followSel >= 0 && followData.tracking) {
       hint.textContent = '已锁定目标 · 点「开始跟随」让车跟过去';
     } else if (followSel >= 0) {
@@ -4003,6 +4024,7 @@ window.addEventListener('pageshow', (e) => {
 
 async function startFollow() {
   followWanted = true;
+  followEnteredAt = Date.now();
   const img = $('followImg');
   if (!followMedia) {
     try {
@@ -4157,11 +4179,9 @@ if (token) {
   showLogin(false);
   // 开机就先看一眼 token 是否过期：过期且存了密码就静默重登（2026-11-21）
   if (tokenExpired(token)) ensureFreshToken();
-  if (localStorage.getItem('jc_product') === 'wheel') {
-    showMain();
-  } else {
-    showProductPage();
-  }
+  // 2026-11-22 用户要求：关掉再打开一律回到「选择产品」页，
+  // 不要因为上次点过「底轮机器人」就自动进控制页（原来读 jc_product 那段已去掉）。
+  showProductPage();
 } else {
   showLogin(true);
 }
