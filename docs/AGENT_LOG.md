@@ -12085,3 +12085,46 @@ inactive 告警 210 次 / 补 configure 196 次 / 二级恢复 64 次 / 三级�
   同尺寸换图清掩码、源码结构守门）；连同 `ros2_ws/src/fwr_bringup/test` +
   `tests/test_mode_split|page_nav_startup|bringup|interface_contract` 共 **474 例通过**。
 - 未验证：用户自己再走一遍「建图 → 保存 → 切导航 → 重新定位」。
+
+## 2026-11-24 17:05 · P1：雷达腿部跟踪（只发布、不发速度）
+
+### 会话目标
+用户追问「雷达怎么知道跟踪的是脚」→ 给方案后决定「先写 P1」。
+P1 = 纯逻辑 + 节点 + 单测，**只发布观测**，用来先采集数据调参；不接控制。
+
+### 仓库改动
+- 新增 `ros2_ws/src/fwr_bringup/fwr_bringup/leg_track.py`（纯逻辑，无 ROS）：
+  点过滤（0.20~6.0 m + 车身矩形）→ 聚类（断距 0.10 m）→ 腿簇（宽 0.03~0.30 m）
+  → 腿对（间距 0.15~0.60 m、宽度比 <2、距离差 <0.25 m）→ 时间确认（有相机 3 帧 /
+  无相机 6 帧）→ 卡尔曼 `[x,y,vx,vy]`（关联门限 0.40 m）→ 滑行 1.5 s 删轨迹；
+  静止且相机从未背书的轨迹 10 s 丢弃并**拉黑 60 s**（防椅子腿每 10 s 轮回新轨迹）。
+  含 `birth_requires_cam`（P1 默认 False，P2 建议 True）。
+- 新增 `ros2_ws/src/fwr_bringup/fwr_bringup/leg_tracker.py`（节点）：
+  订阅 `/scan_merged`、`/odom`、`/robot/vision/persons`；发布
+  `/robot/lidar/persons`（JSON，含 odom 系 x/y/vx/vy + 车体系 range/bearing + cam 标记）
+  与 `/robot/lidar/persons_markers`（RViz 球 + id 文本，绿=相机背书/橙=未背书）。
+  每秒打一行自检：`簇 N 个 | 最佳腿对 间距… | 轨迹 1：#1(1.85,0.12) v=0.42`。
+  **AST 单测钉死：不出现 cmd_vel / Twist / motion_enabled / manual_enabled 赋值。**
+- `ros2_ws/src/fwr_bringup/setup.py`：新增 `leg_tracker = fwr_bringup.leg_tracker:main`。
+- 新增 `tests/test_leg_track.py`（**26 例**）：点过滤、聚类（腿/墙）、腿对（正常/门框 0.9 m/
+  一前一后/一腿只用一次）、卡尔曼收敛、3 帧确认、无相机 6 帧、`birth_requires_cam`、
+  滑行→删除、双目标 id、静止剔除 + 黑名单、走动目标不被误杀、方位角、`describe`、
+  节点 import 名字存在、节点不发速度（AST）。
+- 新增 `tools/record_leg_demo.sh`：录 `/scan_merged`、`/odom`、本节点输出、
+  `/robot/vision/persons`、`/follow/state`、`/tf`；`WITH_IMAGE=1` 时加相机压缩图。
+- 新增 `docs/plans/2026-11-24-lidar-leg-tracking-plan.md`：原理、参数表、演示协议
+  （4 个场景 + 通过标准）、P2 融合计划、做不做得到的边界。
+
+### 已验证 / 未验证
+- ✅ **已验证（本地）**：`PYTHONPATH=ros2_ws/src/fwr_bringup .venv/bin/python -m pytest
+  tests/test_leg_track.py -q` → **26 passed**；与既有套件合跑
+  （`test_leg_track + test_follow_core + test_person_detector`）→ **106 passed**；
+  `py_compile` 两个新文件 OK；`bash -n tools/record_leg_demo.sh` OK。
+- ⚠️ **未验证**：真机雷达数据（阈值 0.03~0.30 m 腿宽、0.15~0.60 m 腿距、6 m 上限
+  都是先验值）；节点在车上能否 import（需 `colcon build` 出入口）；RViz 标记显示。
+
+### 未做（等用户点头）
+- **未部署**、**未启动**（按 AGENTS.md §3.99）。
+- 下一步顺序：① 部署 2 个 py + setup.py 到车上（src 与 build 两处都要）→
+  `colcon build --packages-select fwr_bringup --symlink-install`；② 启动 `ros2 run
+  fwr_bringup leg_tracker`；③ 按演示协议走一趟 + 录 bag；④ 回放调参。
