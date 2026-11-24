@@ -5,16 +5,60 @@ from pathlib import Path
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, TimerAction
+from launch.actions import (DeclareLaunchArgument, ExecuteProcess,
+                            RegisterEventHandler)
+from launch.event_handlers import OnProcessExit
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
+
+
+def _repo_root():
+    # symlink-install 下 __file__ 指向源码树，parents[4] 是仓库根
+    from pathlib import Path
+    return Path(__file__).resolve().parents[4]
+
+
+def _py():
+    from pathlib import Path
+    import sys
+    v = _repo_root() / '.venv' / 'bin' / 'python'
+    return str(v) if v.is_file() else sys.executable
+
+
+def _wait_ready():
+    from pathlib import Path
+    p = _repo_root() / 'tools' / 'wait_ready.py'
+    return str(p) if Path(p).is_file() else ''
 
 
 def generate_launch_description():
     share = Path(get_package_share_directory('fwr_bringup'))
     description = (share / 'description' / 'fwr_chassis_demo.urdf').read_text()
     use_sim_time = LaunchConfiguration('use_sim_time')
+
+    # 2026-11-18：双雷达时 slam_toolbox 2.6.10 只能吃一路，
+    # 所以改用 scan_merger 合成的 /scan_merged（360°）；
+    # 单雷达（start_rear_lidar:=false）仍用 /scan_mapping。
+    scan_topic = PythonExpression([
+        "'/scan_merged' if '", LaunchConfiguration('start_rear_lidar'),
+        "' == 'true' else '/scan_mapping'"])
+    slam_gate = ExecuteProcess(
+        cmd=[_py(), _wait_ready(),
+             '--topic', scan_topic,
+             '--msg-type', 'sensor_msgs/msg/LaserScan',
+             '--min-hz', '8', '--window', '3.0', '--timeout-s', '60',
+             '--label', '扫描数据'],
+        output='screen', respawn=False,
+        condition=IfCondition(LaunchConfiguration('start_slam')),
+        additional_env={'PYTHONUNBUFFERED': '1'})
+    slam_node = Node(
+        package='slam_toolbox', executable=LaunchConfiguration('slam_executable'),
+        name='slam_toolbox', output='screen',
+        remappings=[('/map', LaunchConfiguration('slam_map_topic'))],
+        condition=IfCondition(LaunchConfiguration('start_slam')),
+        parameters=[LaunchConfiguration('slam_params'),
+                    {'scan_topic': scan_topic}])
     return LaunchDescription([
         DeclareLaunchArgument('use_sim_time', default_value='false'),
         DeclareLaunchArgument('lidar_port', default_value='/dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_Controller_e00aaf475431f111b7818c5f30d20014-if00-port0'),
@@ -104,23 +148,14 @@ def generate_launch_description():
              name='ekf_filter_node', output='screen',
              remappings=[('odometry/filtered', '/odom')],
              parameters=[str(share / 'config' / 'real_ekf.yaml')]),
-        # 2026-11-19：slam_toolbox 延后 35 秒启动（TimerAction 实际值）。
-        # 原因：建图栈刚起时后雷达/scan_merger 还没出数据，SLAM 用"半圈"的
-        # 首帧就把地图窗口定死了；车不动时 slam 不会重算，地图就永远缺一半。
-        # 等双雷达+合并稳定后再开始吃扫描，首帧就是 360°。
-        TimerAction(period=35.0, actions=[
-        Node(package='slam_toolbox', executable=LaunchConfiguration('slam_executable'),
-             name='slam_toolbox', output='screen',
-             remappings=[('/map', LaunchConfiguration('slam_map_topic'))],
-             condition=IfCondition(LaunchConfiguration('start_slam')),
-             # 2026-11-18：双雷达时 slam_toolbox 2.6.10 只能吃一路，
-             # 所以改用 scan_merger 合成的 /scan_merged（360°）；
-             # 单雷达（start_rear_lidar:=false）仍用 /scan_mapping。
-             parameters=[LaunchConfiguration('slam_params'),
-                         {'scan_topic': PythonExpression([
-                             "'/scan_merged' if '", LaunchConfiguration('start_rear_lidar'),
-                             "' == 'true' else '/scan_mapping'"])}]),
-        ]),
+        # 2026-11-24：**不再用 35 秒硬延时**，改成"扫描数据真的稳了再起 SLAM"。
+        # 原来延后的原因仍然成立：栈刚起时后雷达/scan_merger 还没出数据，
+        # SLAM 用"半圈"首帧就把地图窗口定死，车不动时地图永远缺一半。
+        # 但双雷达实测 5~8 秒就稳，白等 27 秒；现在由 `tools/wait_ready.py`
+        # 盯着 scan 话题达到 --min-hz 且窗口填满才放行（快时快、慢时也够稳）。
+        slam_gate,
+        RegisterEventHandler(OnProcessExit(target_action=slam_gate,
+                                           on_exit=[slam_node])),
         # 给 RViz 看的降采样地图：slam_toolbox 的 /map 是 Reliable+TransientLocal、
         # 一帧 149 KB，RViz 在 WiFi 上做可靠消费者会触发重传风暴（实测放大 23 倍、
         # 遥控明显卡顿）。这路改成 1/2 降采样 + 0.5 Hz + Best Effort。

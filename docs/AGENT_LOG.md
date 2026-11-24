@@ -11705,3 +11705,83 @@ inactive 告警 210 次 / 补 configure 196 次 / 二级恢复 64 次 / 三级�
 ### 遗留
 - 安全链现在**比 Nav2 更早就绪 12 s**，页面不会再出现「等待安全链」。
 - 若 TF 到 90 s 都没稳定，脚本报错退出、看门狗兜底；这条路径**未实测**（今天 TF 2 s 就稳）。
+
+## 2026-11-24 10:45 · 启动 65 s → 11 s：砍掉"收尾空转"+ 建图 35 s 改成就绪网关
+
+### 会话目标
+用户问「why 现在都是延迟，直接按照顺序一个一个先后就绪不就好了」。查明后发现
+导航栈里其实**已经没有固定延时**（40 s 那个 10:30 已删），65 s 里有 **48 s 是收尾**
+（停旧栈 + 清场脚本），并批准"两个都做"。
+
+### 时间分解（改前，10:25:59 实测）
+```
+10:25:59 restart → 10:26:19 SIGKILL 旧栈      20 s  systemd TimeoutStopSec=20
+10:26:20 → 10:26:32  4 个 ros2 CLI 调用       12 s  没旧栈也在等超时
+10:26:32 → 10:26:48  start_mapping stop+sleep  16 s  sleep 8 + sleep 2
+10:26:48 → 10:26:52  定位 + 安全链             4 s
+10:26:52 → 10:27:04  Nav2 激活                12 s  真实开销
+```
+→ 真正启动只占 16 s，**48 s 在收尾**。
+
+### 仓库改动
+- `scripts/run_navigation.sh`
+  * **没有旧栈就跳过清理**：先 `pgrep -f "[f]wr_bringup/base_bridge"`，没有就
+    打 `== 没有旧栈在跑，跳过清理（省约 28 s）==` 直接往下走。
+  * `sleep 8`（等旧栈退出）→ **轮询**（`seq 1 16`，0.5 s 一次，最多 8 s）；
+    `pkill` 后的 `sleep 2` 同样改轮询（0.25 s × 8）。
+  * ESP32 串口占用检查从"清理分支"里**提到 if/elif 之外**——跳过清理时也要查
+    （幽灵句柄会让新实例静默失效）。
+- `tools/wait_ready.py`（新）：话题频率网关。等话题在 `--window` 秒内达到 `--min-hz`
+  才退出 0；超时报错退出 1（提示"继续启动但可能缺数据"）。支持任意 `pkg/msg/Name`。
+- `ros2_ws/src/fwr_bringup/launch/real_mapping.launch.py`
+  * 删掉 `TimerAction(period=35.0)`，改成 `slam_gate`（`wait_ready.py` 盯
+    `/scan_merged`（单雷达时 `/scan_mapping`）≥ 8 Hz、窗口 3 s）
+    \+ `RegisterEventHandler(OnProcessExit(... on_exit=[slam_node]))`。
+  * 顶层提出 `scan_topic = PythonExpression(...)` 供网关和 slam 共用。
+- `tests/test_wait_ready_gate.py`（新，5 例）：网关要按真实频率判、失败要软、
+  建图 launch 不能再有 TimerAction、清理要能跳过、串口检查两条路径都要跑。
+- `AGENTS.md`：把"延后 35 秒启动（TimerAction）"改成"等扫描就绪再启动"。
+
+### 仓库外改动（实机）
+- `/etc/systemd/system/fwr-nav.service`、`fwr-map.service`：`TimeoutStopSec=20 → 6`
+  （备份 `*.bak.<时间戳>`），`systemctl daemon-reload`。
+
+### 已验证（实机）
+1) **有旧栈的重启** 10:32:36 → 10:32:55（**19 s**，原来 65 s）
+```
+10:32:36 Stopping → 10:32:42 Started          6 s（原 20 s）
+10:32:42 == 没有旧栈在跑，跳过清理 ==          （原 28 s）
+10:32:47 碰撞监控激活
+10:32:55 Nav2 active
+```
+2) **干净启动**（先 stop 再 start，模拟开机）10:34:50 → 10:35:01（**11 s**）
+```
+10:34:50 Started → 跳过清理 → launch
+10:34:55 collision_monitor active
+10:35:01 planner/controller active
+```
+   两次都：`collision_monitor_forward: active [3]`、
+   `/cmd_vel_auto_forward_filtered` **20.0~20.3 Hz**。
+3) **建图就绪网关**：`wait_ready.py --topic /scan_merged --min-hz 8 --window 3`
+   实测 `已就绪：10 Hz（等了 3.1 s）`；切 fwr-map 实跑时 10:36:28 打印
+   `已就绪：8 Hz（等了 7.2 s）`，**同一秒 `async_slam_toolbox_node` 起来**
+   （原来固定等 35 s）。
+4) `ros2 launch fwr_bringup real_mapping.launch.py --show-args` 正常列出参数（launch 可解析）。
+5) `pytest` → **697 passed**。
+
+### 未验证 / 遗留
+- ⚠️ **切建图时后雷达被看门狗杀掉**：10:36:20 `sllidar_node-5(rear)` 一起就
+  `exit code -9`，`scan_merger` 随后 "只用一路雷达（另一路掉线）" 降级跑。
+  `fwr-lidar-watchdog` 没有"栈切换/进程刚起"的宽限期（`--stale 2.5`），
+  切换瞬间就把新起的节点杀掉了。**建图因此是单雷达视场**，待修：
+  给看门狗加启动宽限（如新进程出现后 5 s 内不杀）或 `cooldown` 覆盖切换窗口。
+- 跳过清理这条路径要求"旧栈真的死了"（systemd 已先 SIGKILL 整组，通常成立）；
+  若 base_bridge 被别人手工拉起，仍走完整清理。
+- 收尾优化没有在**真正断电重启**上验证（只做了 `stop`+`start`，等价路径）。
+
+### 当前运行状态
+`fwr-nav` active、`collision_monitor_forward` active、输出 20 Hz、MQTT `chain=True`。
+实机仓库 `scripts/`、`tools/`、`ros2_ws/src`、`build`、`install` 均已同步。
+
+### 下一步
+拆常驻底盘层（`fwr-base`）仍未做 —— 用户尚未在"拆/不拆"上拍板。

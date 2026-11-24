@@ -48,8 +48,10 @@
   - 单雷达回退 `start_rear_lidar:=false` 时才退回 `/scan_mapping`（老的 260° 视场）
   - **改视场必须改 launch**（`real_mapping.launch.py` 的 `rear_half_angle_rad`），
     改节点默认值无效（launch 传参覆盖）。2026-10-31 就因为 launch 写死 π/2，长期停在 180°
-  - slam_toolbox **延后 35 秒启动**（`TimerAction`），等两路+合并稳定，否则首帧只有半圈、
-    车不动时地图永远缺一半
+  - slam_toolbox **等扫描就绪再启动**（`tools/wait_ready.py` 盯扫描频率，达标后
+    `OnProcessExit` 才起；2026-11-24 之前是写死的 `TimerAction 35 s`）。
+    原因仍是等两路+合并稳定，否则首帧只有半圈、车不动时地图永远缺一半；
+    实测 5~8 s 就稳，白等 27 s
   - `fwr-lidar-watchdog` 管**两路**（`--stale 2.5 --cooldown 15`），任一路断流就杀对应节点等 launch 重拉；
     remaps 必须用配对写法 `(('/scan','/scan_rear'),)`，扁平写法会让看门狗自己崩（2026-11-20，一天 67 次）
 
