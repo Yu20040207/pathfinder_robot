@@ -350,11 +350,13 @@
   #loginLinks span:active { color: #eaf7ff; }
   #login .linkBtn { width: 100%; margin-top: 12px; padding: 8px; border: 0;
                     background: none; color: #6f9cbd; font-size: 13px; letter-spacing: 1px; }
-  /* 导航视图 */
-  /* 2026-11-24 用户要求：地图画布从绿色状态行**下面**开始，不被顶部提示条压住。
-     提示条是绝对定位浮层、高度随文字换行变化，所以 --navTopH 由 JS 实时量（layoutNavTop）。 */
-  #navView { height: 100%; position: relative; --navTopH: 0px; }
-  #mapCanvas { width: 100%; height: calc(100% - var(--navTopH)); margin-top: var(--navTopH);
+  /* 导航视图
+     2026-11-24 用户要求（截图）：① 绿字那行要**单独一行**、不能挤在白字那行的框里；
+     ② 白字那行上面不要一大块黑色间隙；③ 地图从提示条下面开始。
+     所以顶部两条提示改成**正常流式排版**（原来是 absolute 浮层 + JS 量高度补偿，
+     既会重叠又要靠测量）。现在 navView 是竖排 flex：提示条占位 → 画布自动吃掉剩余高度。 */
+  #navView { height: 100%; position: relative; display: flex; flex-direction: column; }
+  #mapCanvas { flex: 1 1 auto; width: 100%; height: auto; min-height: 0;
                display: block; touch-action: none; background: #0b0f14; }
   .navBar { position: absolute; left: 10px; right: 10px; bottom: 10px; display: flex;
             gap: 8px; }
@@ -456,7 +458,7 @@
   #navCamErr { padding: 14px 12px; color: #ff7b72; font-size: 12px; line-height: 1.6;
                text-align: center; }
   #navCamErr.hidden { display: none; }
-  #navTopWrap { position: absolute; left: 0; right: 0; top: 3px; z-index: 6;
+  #navTopWrap { position: relative; flex: none; z-index: 6; margin-top: 3px;
                 display: flex; flex-direction: column; gap: 4px;
                 pointer-events: none; }
   #navInfo { position: static; font-size: 12px;
@@ -2141,8 +2143,8 @@ function applyMode(mode) {
   $('manualView').classList.toggle('hidden', nav || isFollow);
   if (mode !== 'nav' && typeof closeNavCam === 'function') closeNavCam();
   $('navView').classList.toggle('hidden', !nav);
-  // 地图画布要贴着绿色状态行下面（必须在 navView 显示**之后**量，否则量到 0）
-  if (nav && typeof layoutNavTop === 'function') layoutNavTop(true);
+  // 画布尺寸跟着提示条重新算（必须在 navView 显示**之后**，否则量到 0）
+  if (nav && typeof ensureNavCanvas === 'function') ensureNavCanvas(true);
   if ($('followView')) $('followView').classList.toggle('hidden', !isFollow);
   if ((nav || isFollow) && typeof closeCam === 'function') closeCam();  // 离开手动模式就断流
   // 跟随模式：进来就拉流 + 开始轮询人体框；离开就彻底停（否则后台还在每 200 ms 请求）
@@ -3138,31 +3140,26 @@ function resizeCanvas() {
   render();
 }
 window.addEventListener('resize', () => {
-  if (!$('navView').classList.contains('hidden')) { layoutNavTop(true); resizeCanvas(); }
+  if (!$('navView').classList.contains('hidden')) { ensureNavCanvas(true); resizeCanvas(); }
 });
 
-/* 2026-11-24 用户要求：导航模式下**地图从绿色状态行下面开始画**，不让顶部提示条压住地图。
-   提示条（#navInfo + #navStatus）是绝对定位浮层，高度会随文字换行变化，
-   所以这里每次实时量「绿色那行的底边」，换算成画布的上边距（--navTopH）。
-   ⚠️ 只量 #navStatus 的底边，**不要量 #navTopWrap 的高度**：摄像头画面也挂在这个容器里，
-   一开画面就会把地图挤没。 */
-let navTopH = -1;
-function layoutNavTop(force) {
-  const navViewEl = $('navView'), st = $('navStatus'), cv = $('mapCanvas');
-  if (!navViewEl || !st || !cv) return;
+/* 顶部提示条现在是流式排版（占位），画布自动拿到剩余高度，不再需要量高度。
+   但提示文字换行时容器会变高 → 画布尺寸跟着变，这里只在「尺寸真变了」时重算一次。 */
+let navCanvasW = 0, navCanvasH = 0;
+function ensureNavCanvas(force) {
+  const navViewEl = $('navView'), cv = $('mapCanvas');
+  if (!navViewEl || !cv) return;
   if (navViewEl.classList.contains('hidden')) return;
-  const r = st.getBoundingClientRect();
-  const base = navViewEl.getBoundingClientRect();
-  const h = Math.max(0, Math.round(r.bottom - base.top + 4));   // +4 留一条缝
-  if (!force && h === navTopH) return;
-  navTopH = h;
-  navViewEl.style.setProperty('--navTopH', h + 'px');
+  const r = cv.getBoundingClientRect();
+  const w = Math.round(r.width), h = Math.round(r.height);
+  if (!force && w === navCanvasW && h === navCanvasH) return;
+  navCanvasW = w; navCanvasH = h;
   resizeCanvas();
 }
-// 绿色状态行文字长度会变（切地图/切模式/安全链），换行就变高 → 定期对一下
+// 绿色状态行文字长短会变（切地图/切模式/安全链），换行就变高 → 定期对一下
 setInterval(() => {
   const v = $('navView');
-  if (v && !v.classList.contains('hidden')) layoutNavTop();
+  if (v && !v.classList.contains('hidden')) ensureNavCanvas();
 }, 1500);
 
 const DEFAULT_VIEW_METERS = 14;   // 切换导航模式时默认显示约 14 米宽
@@ -3517,25 +3514,7 @@ function render() {
     ctx.textAlign = 'center';
     ctx.fillText(String(i + 1), p.x, p.y + 5 * dpr);
   });
-  // 比例尺
-  if (mapMeta) {
-    const mPerPx = mapMeta.resolution / view.scale;
-    let nice = 1;
-    for (const v of [0.5, 1, 2, 5, 10, 20]) { if (v / mPerPx <= 130) nice = v; }
-    const len = nice / mPerPx;
-    const bx = 20 * dpr, by = canvas.height - 30 * dpr;
-    ctx.strokeStyle = '#fff';
-    ctx.lineWidth = 3 * dpr;
-    ctx.beginPath();
-    ctx.moveTo(bx, by); ctx.lineTo(bx + len, by);
-    ctx.moveTo(bx, by - 5 * dpr); ctx.lineTo(bx, by + 5 * dpr);
-    ctx.moveTo(bx + len, by - 5 * dpr); ctx.lineTo(bx + len, by + 5 * dpr);
-    ctx.stroke();
-    ctx.fillStyle = '#fff';
-    ctx.font = `${12 * dpr}px sans-serif`;
-    ctx.textAlign = 'left';
-    ctx.fillText(nice + ' m', bx, by - 10 * dpr);
-  }
+  // 比例尺图例（左下角「1 m」+ 括号线）已按用户要求删除（2026-11-24）
 
   // 机器人：按真实尺寸画矩形（长 0.52 m × 宽 0.36 m），随地图缩放
   if (poseDisp) {
