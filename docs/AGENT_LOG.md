@@ -11960,3 +11960,12 @@ inactive 告警 210 次 / 补 configure 196 次 / 二级恢复 64 次 / 三级�
   删掉 `layoutNavTop()` 与 `--navTopH`，换成 `ensureNavCanvas()`（尺寸真变了才重算画布）。
 - 删除 `render()` 里的比例尺绘制段（左下角「1 m」+ 括号线）。
 - 部署：云端 md5 `683ccc10…`（与本地一致）；效果待用户确认。
+
+### 2026-11-24 11:52 · 顶部两行合并成一块扁平框 + 修 flex 顺序 bug（按用户确认的模拟图）
+- 用户报「白字行和绿字行跑到下面来了」。根因：`#navTopWrap` 改成流式后，
+  **画布在 DOM 里排在它前面**，`flex:1 1 auto` 的画布先吃掉剩余高度 → 两行被挤到底部。
+  修法：`#navTopWrap{order:1}` / `#mapCanvas{order:2}`（并写注释钉住，删了就复现）。
+- 按用户要求把两行合进**一个扁平框**：背景放在 `#navTopWrap`（`rgba(13,17,23,.72)`），
+  白字行/绿字行都 `background:none` + `border-radius:0` + 居中，**不要圆角边框**。
+- 模拟图（确认过）：`docs/images/nav_top_mockup.png`（扁平框版本见线上页面）。
+- 部署：云端 md5 `d7f90589…`（与本地一致）；效果待用户确认。
