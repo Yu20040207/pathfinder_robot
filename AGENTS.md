@@ -72,6 +72,37 @@
 - Nav2 / AMCL / EKF / Collision Monitor 已能运行；`real_navigation.launch.py use_saved_map:=true` 曾连续运行 23 小时以上。
 - 已知坑：旧的 `sllidar_node` 可能残留成僵尸发布者，导致 `/scan` 有 2 个 publisher；重启导航栈前先清理。
 - `base_bridge` 默认 `motion_enabled=false`、`manual_enabled=false`，不会让车动。
+
+### 🧩 开机 = 手动模式；模式栈按需启动（2026-11-24 用户要求，已实机验证）
+
+用户原话：「开机之后就先切到手动模式…要切换模式的时候就启动其他模式的，
+**切模式时先把现有的模式清理干净**」。为此把"硬件"和"算法"分开：
+
+| 服务 | 开机 | 内容 |
+| --- | --- | --- |
+| **`fwr-base`** | **enabled（常驻）** | `real_base.launch.py`：base_bridge、双雷达、IMU、EKF、scan_merger、rear_guard、静态 TF |
+| `fwr-nav` | **disabled（按需）** | `real_navigation.launch.py start_base:=false`：AMCL/map_server/Nav2/collision_monitor |
+| `fwr-map` | disabled（按需） | `real_mapping.launch.py start_base:=false start_slam:=true` |
+| `fwr-vision` / `fwr-follow` | disabled（按需） | 人体识别 / 跟随控制 |
+| `fwr-lidar-watchdog` | enabled（带 `--no-spawn`） | 只负责"发现活着但不出数据的雷达 → SIGKILL 让 fwr-base 的 respawn 重拉"；**不允许自己 `ros2 run sllidar_node`**（会和 fwr-base 抢串口、造出两个 publisher） |
+
+- 硬件节点在 `real_mapping.launch.py` 里用 `start_base` 门控（`_both()` 组合其它开关），
+  **只有一处节点定义**，`real_base.launch.py` 只是 `start_slam:=false` 的薄包装。
+- 导航栈的 `scripts/run_navigation.sh` 在 `FWR_START_BASE=false`（`fwr-nav.service` 里设）
+  时**跳过整套"清理旧栈"**：否则它会 pkill 掉 fwr-base 的 `base_bridge`，
+  再因为"进程又回来了"误判旧栈仍在 → `exit 1` → 重启循环（2026-11-24 10:48 踩过）。
+- 切模式由 `mqtt_bridge` 的 **`mode` 动作**（手机发 `{type:'nav',action:'mode',mode:...}`）：
+  1. 确认 `fwr-base` active（不在就拉起来）；
+  2. **停掉所有不属于目标模式的栈**，每个都等 systemd 真报 `inactive/failed`；
+  3. 再启动目标栈；4. 状态上报 `mode` = `manual|nav|map|follow`（`_sync_mapping_mode` 每 5 s 按真实服务状态对账）。
+- ⚠️ 新增 launch 文件后必须 `colcon build --packages-select fwr_bringup --symlink-install`，
+  否则 `ros2 launch` 报 `file 'xxx.launch.py' was not found in the share directory`。
+- ⚠️ systemd 单元必须带 `Environment=HOME=/home/manbaout`（+ `ROS_LOG_DIR`/`FASTRTPS_...`），
+  缺 HOME 会让节点报 `failed to configure logging: Failed to get logging directory` 后 abort
+  （2026-11-24 fwr-base 起来就崩，就是这个）。
+- 实机验证（2026-11-24）：`mode=map` → nav 停/map 起、**base_bridge 始终 1 个**、
+  `/scan_merged` 10 Hz；`mode=nav` → map 停、amcl active、安全链输出 20 Hz；
+  `mode=manual` → 导航/建图全停、只剩硬件层、扫描 10 Hz。
 - 实机 RViz 的“两点导航”面板：**单击一次**表示从当前位置前往点击点（`/explore/start_fixed_goal`）；**连续点击两次**表示先到起点再到终点（`/explore/start_two_point_goal`）。现场人员点击“开始导航”时面板自行开启 `motion_enabled`、等待 `/base/ready`、申请 `/base/arm_auto`，然后发送目标；点击“停止导航”或任务结束/失败时请求停机并关闭运动门。无需另开终端运行授权脚本。该按钮流程已构建和通过单元测试，**尚未由现场人员验证完整实车按钮操作**；最新证据见 `docs/AGENT_LOG.md` 末尾。代理不得代替用户点击按钮或打开运动门，除非本次会话另有明确授权。
 
 

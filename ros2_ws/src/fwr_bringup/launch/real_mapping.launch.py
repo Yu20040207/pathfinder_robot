@@ -32,6 +32,15 @@ def _wait_ready():
     return str(p) if Path(p).is_file() else ''
 
 
+def _both(a, b):
+    """两个 launch 开关都要是 true（Humble 没有 AndSubstitution）。"""
+    from launch.conditions import IfCondition
+    from launch.substitutions import LaunchConfiguration, PythonExpression
+    return IfCondition(PythonExpression([
+        "'", LaunchConfiguration(a), "' == 'true' and '",
+        LaunchConfiguration(b), "' == 'true'"]))
+
+
 def generate_launch_description():
     share = Path(get_package_share_directory('fwr_bringup'))
     description = (share / 'description' / 'fwr_chassis_demo.urdf').read_text()
@@ -66,6 +75,10 @@ def generate_launch_description():
         # IMU 航向尺度修正：2026-10-30 雷达互相关标定（转一圈 355.04° vs 真值 359.55°）
         DeclareLaunchArgument('imu_yaw_scale', default_value='1.019'),  # 2026-10-30 雷达互相关实测
         DeclareLaunchArgument('start_slam', default_value='true'),
+        # 2026-11-24：硬件层（底盘/雷达/IMU/EKF/合并/车尾守卫）可以单独关掉 ——
+        # 常驻服务 fwr-base 起这些，导航/建图栈用 start_base:=false 只起算法层，
+        # 避免两边同时开串口（base_bridge/雷达会抢设备）。
+        DeclareLaunchArgument('start_base', default_value='true'),
         # 2026-11-12：雷达可以由外部看门狗独占（start_lidar:=false），
         # 避免 launch 与看门狗同时开串口 → sllidar_node 死锁在 futex 上、/scan 断流。
         DeclareLaunchArgument('start_lidar', default_value='true'),
@@ -81,15 +94,16 @@ def generate_launch_description():
         DeclareLaunchArgument('slam_params',
                               default_value=str(share / 'config' / 'real_slam.yaml')),
         Node(package='fwr_bringup', executable='base_bridge', name='base_bridge',
-             output='screen', parameters=[{'motion_enabled': False,
-                                           'use_sim_time': use_sim_time}]),
+             output='screen', condition=IfCondition(LaunchConfiguration('start_base')),
+             parameters=[{'motion_enabled': False,
+                          'use_sim_time': use_sim_time}]),
         Node(package='fwr_imu', executable='dm_imu_node', name='dm_imu_l1',
-             condition=IfCondition(LaunchConfiguration('start_imu')), output='screen',
+             condition=_both('start_base', 'start_imu'), output='screen',
              parameters=[{'use_sim_time': use_sim_time,
                           # 2026-10-30 实测：六轴航向少算 1.25%，乘 1.0127 修正
                           'yaw_scale': LaunchConfiguration('imu_yaw_scale')}]),
         Node(package='sllidar_ros2', executable='sllidar_node', name='sllidar_node',
-             condition=IfCondition(LaunchConfiguration('start_lidar')),
+             condition=_both('start_base', 'start_lidar'),
              output='screen', respawn=True, respawn_delay=2.0,
              parameters=[{
                  'channel_type': 'serial', 'serial_port': LaunchConfiguration('lidar_port'),
@@ -98,7 +112,7 @@ def generate_launch_description():
                  'scan_mode': 'Standard', 'use_sim_time': use_sim_time,
              }]),
         Node(package='fwr_bringup', executable='scan_mapping_filter',
-             name='scan_mapping_filter', output='screen',
+             name='scan_mapping_filter', output='screen', condition=IfCondition(LaunchConfiguration('start_base')),
              parameters=[{'use_sim_time': use_sim_time,
                           # 2026-11-18：遮罩 ±80°（**200° 视场**）——重叠从 80° 降到 40°，
                           # 重复点减半，同时保留 40° 冗余（单雷达故障时仍有 200° 覆盖）。
@@ -109,7 +123,7 @@ def generate_launch_description():
         # 与车头那只同型号（C1），frame=laser_rear，话题 remap 到 /scan_rear，
         # 不占用 /scan（车头那路仍供单雷达回退使用）。
         Node(package='sllidar_ros2', executable='sllidar_node', name='sllidar_node_rear',
-             condition=IfCondition(LaunchConfiguration('start_rear_lidar')),
+             condition=_both('start_base', 'start_rear_lidar'),
              output='screen', respawn=True, respawn_delay=2.0,
              parameters=[{
                  'channel_type': 'serial',
@@ -123,7 +137,7 @@ def generate_launch_description():
         # 遮罩同样 0°±70°（两只雷达的 scan 0 都指向车体内部）。
         Node(package='fwr_bringup', executable='scan_mapping_filter',
              name='scan_mapping_filter_rear',
-             condition=IfCondition(LaunchConfiguration('start_rear_lidar')),
+             condition=_both('start_base', 'start_rear_lidar'),
              output='screen',
              parameters=[{'use_sim_time': use_sim_time,
                           'rear_half_angle_rad': math.radians(80.0)}],
@@ -134,7 +148,7 @@ def generate_launch_description():
         # ---- 双雷达合并：slam_toolbox 只吃单路，把两路 220° 合成 360° ----
         # （Cartographer 原生支持多路，不需要这个节点；只在使用 slam 引擎时有用）
         Node(package='fwr_bringup', executable='scan_merger', name='scan_merger',
-             condition=IfCondition(LaunchConfiguration('start_rear_lidar')),
+             condition=_both('start_base', 'start_rear_lidar'),
              output='screen',
              parameters=[{'use_sim_time': use_sim_time,
                           'scan_a': '/scan_mapping',
@@ -142,10 +156,10 @@ def generate_launch_description():
                           'output_topic': '/scan_merged',
                           'target_frame': 'base_link'}]),
         Node(package='robot_state_publisher', executable='robot_state_publisher',
-             name='robot_state_publisher', output='screen',
+             name='robot_state_publisher', output='screen', condition=IfCondition(LaunchConfiguration('start_base')),
              parameters=[{'robot_description': description, 'use_sim_time': use_sim_time}]),
         Node(package='robot_localization', executable='ekf_node',
-             name='ekf_filter_node', output='screen',
+             name='ekf_filter_node', output='screen', condition=IfCondition(LaunchConfiguration('start_base')),
              remappings=[('odometry/filtered', '/odom')],
              parameters=[str(share / 'config' / 'real_ekf.yaml')]),
         # 2026-11-24：**不再用 35 秒硬延时**，改成"扫描数据真的稳了再起 SLAM"。
@@ -181,18 +195,19 @@ def generate_launch_description():
         # 未设置时保存到 ~/robot_maps。
         Node(package='fwr_bringup', executable='slam_map_save',
              name='slam_map_save', output='screen',
+             condition=IfCondition(LaunchConfiguration('start_slam')),
              parameters=[{'map_topic': LaunchConfiguration('slam_map_topic')}]),
         # 后向四路 A22 超声（DYP-E08 / RS485）：发布 4 路 Range。
         # 2026-11-18：车尾已有后雷达（200° 视场、水平面测距、比超声可靠），
         # 默认不再启动超声；需要时 start_ultrasonic:=true 切回。
         Node(package='fwr_bringup', executable='ultrasonic_rear',
              name='ultrasonic_rear', output='screen',
-             condition=IfCondition(LaunchConfiguration('start_ultrasonic')),
+             condition=_both('start_base', 'start_ultrasonic'),
              parameters=[{'use_sim_time': use_sim_time}]),
         # 车尾守卫：近障时禁止后退（不产生任何前进/倒车指令）。
         # 源默认改成后雷达的正后方 ±35° 扇区；source:=ultrasonic 可切回超声。
         Node(package='fwr_bringup', executable='rear_guard',
-             name='rear_guard', output='screen',
+             name='rear_guard', output='screen', condition=IfCondition(LaunchConfiguration('start_base')),
              parameters=[{'use_sim_time': use_sim_time,
                           'source': PythonExpression([
                               "'ultrasonic' if '",
@@ -201,25 +216,25 @@ def generate_launch_description():
                           'scan_topic': '/scan_rear_mapping'}]),
         # 四只探头的静态 TF（安装见 docs/hardware/rear-a22-ultrasonic-layout.md）
         Node(package='tf2_ros', executable='static_transform_publisher',
-             name='tf_ultrasonic_rear_left_out', output='log',
+             name='tf_ultrasonic_rear_left_out', output='log', condition=IfCondition(LaunchConfiguration('start_base')),
              arguments=['--x', '-0.26', '--y', '0.105', '--z', '0.14',
                         '--yaw', '3.316125578789226', '--pitch', '0', '--roll', '0',
                         '--frame-id', 'base_footprint',
                         '--child-frame-id', 'ultrasonic_rear_left_out']),
         Node(package='tf2_ros', executable='static_transform_publisher',
-             name='tf_ultrasonic_rear_left_in', output='log',
+             name='tf_ultrasonic_rear_left_in', output='log', condition=IfCondition(LaunchConfiguration('start_base')),
              arguments=['--x', '-0.26', '--y', '0.05', '--z', '0.14',
                         '--yaw', '3.141592653589793', '--pitch', '0', '--roll', '0',
                         '--frame-id', 'base_footprint',
                         '--child-frame-id', 'ultrasonic_rear_left_in']),
         Node(package='tf2_ros', executable='static_transform_publisher',
-             name='tf_ultrasonic_rear_right_in', output='log',
+             name='tf_ultrasonic_rear_right_in', output='log', condition=IfCondition(LaunchConfiguration('start_base')),
              arguments=['--x', '-0.26', '--y', '-0.05', '--z', '0.14',
                         '--yaw', '3.141592653589793', '--pitch', '0', '--roll', '0',
                         '--frame-id', 'base_footprint',
                         '--child-frame-id', 'ultrasonic_rear_right_in']),
         Node(package='tf2_ros', executable='static_transform_publisher',
-             name='tf_ultrasonic_rear_right_out', output='log',
+             name='tf_ultrasonic_rear_right_out', output='log', condition=IfCondition(LaunchConfiguration('start_base')),
              arguments=['--x', '-0.26', '--y', '-0.105', '--z', '0.14',
                         '--yaw', '2.9670597283903604', '--pitch', '0', '--roll', '0',
                         '--frame-id', 'base_footprint',

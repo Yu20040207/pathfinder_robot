@@ -11785,3 +11785,75 @@ inactive 告警 210 次 / 补 configure 196 次 / 二级恢复 64 次 / 三级�
 
 ### 下一步
 拆常驻底盘层（`fwr-base`）仍未做 —— 用户尚未在"拆/不拆"上拍板。
+
+## 2026-11-24 10:54 · 开机=手动模式；模式栈按需启动，切模式先清理
+
+### 会话目标
+用户要求：「开机之后就先切到手动模式，然后可以用手动模式的功能，如果要切换到
+其他模式的时候就启动其他模式的就好了，**记住切换模式的时候先把现有的模式清理干净**」。
+
+### 仓库改动
+- **新增** `ros2_ws/src/fwr_bringup/launch/real_base.launch.py`：纯硬件层薄包装
+  （`IncludeLaunchDescription(real_mapping, start_slam:=false, start_base:=true,
+  start_ultrasonic:=false)`）。
+- `ros2_ws/src/fwr_bringup/launch/real_mapping.launch.py`：新增 `start_base` 门控
+  （`_both()` 用 `PythonExpression` 组合多个开关，Humble 没有 `AndSubstitution`），
+  13 个硬件节点挂 `IfCondition`；`slam_map_save` 改由 `start_slam` 控制。
+- `real_localization/real_navigation/run_navigation.launch.py`：`start_base` 透传。
+- `scripts/run_navigation.sh`：`FWR_START_BASE=false` 时**跳过整套清理**（否则会 pkill
+  fwr-base 的 base_bridge → 误判"旧栈仍在"→ exit 1 → 重启循环，10:48 实机踩过）；
+  ESP 串口检查同样跳过；`exec` 里加 `"start_base:=${FWR_START_BASE:-true}"`。
+- `mqtt_bridge.py`：新增 `action == 'mode'` → `_switch_mode(target)`
+  （`MODE_UNITS` 表 + 确认 fwr-base → 停非目标栈并等 inactive → 起目标栈 → 回报）；
+  `_sync_mapping_mode()` 按真实服务状态对账 `_current_mode`（manual/nav/map/follow），
+  状态里上报 `mode`。
+- `cloud/web/car.html`：新增 `sendModeSwitch(mode)`，手动/导航/建图/跟随四处切换
+  统一走 `{type:'nav',action:'mode',mode}`；对账 tick 也改走它；导航启动提示改为
+  「加载地图 → 启动导航栈 → 等待定位就绪」，超时 60 s → 120 s。
+- `tools/lidar_watchdog.py`：新增 `--no-spawn`（硬件归属 fwr-base 后，看门狗只许
+  杀不许起，否则抢串口造出两个 publisher）。
+- `tests/test_mode_split.py`（新，8 例）：门控/透传/脚本跳过清理/mode 动作顺序/
+  页面单一入口/看门狗不自己起节点。
+- `AGENTS.md`：新增「开机 = 手动模式；模式栈按需启动」一节（服务表 + 三个坑）。
+
+### 仓库外改动（实机 192.168.0.24）
+- 新建 `/etc/systemd/system/fwr-base.service`（`real_base.launch.py`，`Restart=always`，
+  `TimeoutStopSec=6`，`Environment=HOME=/home/manbaout` + `ROS_LOG_DIR`/`FWR_LOG_DIR`/
+  `FASTRTPS_DEFAULT_PROFILES_FILE`），**enable**。
+- `fwr-nav.service`：加 `Environment=FWR_START_BASE=false`、`After=... fwr-base.service`，
+  **disable**（不再开机自启）。
+- `fwr-map.service`：ExecStart 加 `start_base:=false`、`After=... fwr-base.service`。
+- `fwr-lidar-watchdog.service`：ExecStart 加 `--no-spawn`，重新 enable+start。
+- 备份：`/etc/systemd/system/fwr-{nav,map,lidar-watchdog}.service.bak.<ts>`。
+- 云端页面 `/home/boat_control/car.html` 与 `/opt/jc/web/car.html`（md5 `8373d516…`）。
+
+### 已验证（实机，Asia/Shanghai）
+- 纯硬件层：`fwr-base` active，`base_bridge` 1 个，`/scan_merged` **9.995 Hz**，
+  TF `odom→base_footprint` 正常，无 slam/amcl。
+- `mode=map`（MQTT 发布模拟手机）：`fwr-nav inactive` / `fwr-map active` /
+  **base_bridge 始终 1 个** / slam 1 个 / `/scan_merged` 10.003 Hz。
+- `mode=nav`：`fwr-map inactive` / `fwr-nav active` / `/amcl active [3]` /
+  `/cmd_vel_auto_forward_filtered` **20.0 Hz**。
+- `mode=manual`：导航、建图全停，只剩 `fwr-base`，`/scan_merged` 9.997 Hz。
+- `pytest ros2_ws/src/fwr_bringup/test tests`：**704 passed**。
+
+### 踩过的坑（都已修）
+1. 新 launch 文件没 `colcon build` → `file 'real_base.launch.py' was not found in the
+   share directory`（install 里的 symlink 是 build 时生成的）。
+2. systemd 单元缺 `HOME` → 节点 `failed to configure logging: Failed to get logging
+   directory` 后 abort，10 秒内重启 10 次。
+3. `run_navigation.sh` 的清理段 pkill `base_bridge`（此时它归 fwr-base）→ 误判旧栈
+   仍在 → `exit 1` → fwr-nav 重启循环。
+4. 旧 `fwr-lidar-watchdog` 自己 `ros2 run sllidar_node` → 与 fwr-base 抢串口。
+
+### 未验证 / 遗留问题
+- **断电重启全流程未验证**：需真机重启一次确认「只起 fwr-base + mqtt_bridge，
+  页面进手动可开」。
+- 页面需手机**强制刷新**才会用新 JS。
+- 跟随模式（vision+follow）的按需启停只做了代码路径，未实跑。
+
+### 当前运行状态
+- `fwr-base` active（base_bridge、双雷达、IMU、EKF、scan_merger、rear_guard）；
+  `fwr-nav`/`fwr-map`/`fwr-vision`/`fwr-follow` inactive；`fwr-mqtt-bridge`、
+  `fwr-lidar-watchdog`（`--no-spawn`）、`fwr-media`、`fwr-camera` active。
+- 车处于**手动模式**，`motion_enabled=false`、`manual_enabled=false`（未开门）。

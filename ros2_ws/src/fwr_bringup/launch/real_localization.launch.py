@@ -27,6 +27,8 @@ def generate_launch_description():
         DeclareLaunchArgument('use_sim_time', default_value='false'),
         DeclareLaunchArgument('lidar_port', default_value='/dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_Controller_e00aaf475431f111b7818c5f30d20014-if00-port0'),
         DeclareLaunchArgument('start_imu', default_value='true'),
+        # 2026-11-24：硬件层由常驻 fwr-base 起，模式栈传 false 避免抢串口
+        DeclareLaunchArgument('start_base', default_value='true'),
         DeclareLaunchArgument('map', default_value=str(share / 'maps' / 'real_map_merged.yaml')),
         # localizer:=amcl 用通用 AMCL + 地图图片；localizer:=slam 走 slam_toolbox
         # 的 localization 模式（加载建图时序列化的 posegraph，边定位边微调地图）。
@@ -45,6 +47,7 @@ def generate_launch_description():
                 'lidar_port': LaunchConfiguration('lidar_port'),
                 'start_imu': LaunchConfiguration('start_imu'),
                 'start_slam': start_slam,
+                'start_base': LaunchConfiguration('start_base'),
                 'start_lidar': LaunchConfiguration('start_lidar'),
                 'start_rear_lidar': LaunchConfiguration('start_rear_lidar'),
                 'slam_params': LaunchConfiguration('slam_params'),

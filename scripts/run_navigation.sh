@@ -87,7 +87,13 @@ fi
 # 一个 DDS 客户端（没节点就等超时，实测合计 ~12 s），再加 sleep 8 + sleep 2。
 # 开机第一次启动时这里白白多花 ~28 s（65 s 的启动里有 48 s 是收尾）。
 # 先看一眼有没有旧栈，有才清场。
-if [[ "$STOP" -eq 1 ]] && ! pgrep -f "[f]wr_bringup/base_bridge" >/dev/null 2>&1; then
+# 2026-11-24：硬件层（base_bridge/雷达/IMU）由常驻 fwr-base.service 托管，
+# 导航栈用 FWR_START_BASE=false 起。这时**不能做任何"清理旧栈"的动作** ——
+# 原来会 pkill base_bridge（把硬件层杀了又发现它被 launch 拉回来，于是误判
+# "旧栈仍有 base_bridge 进程" 直接 exit 1，导航栈进入重启循环（10:48 实测）。
+if [[ "$STOP" -eq 1 ]] && [[ "${FWR_START_BASE:-true}" == "false" ]]; then
+  echo "== 硬件层由 fwr-base 托管，跳过清理（不动 base_bridge/串口）=="
+elif [[ "$STOP" -eq 1 ]] && ! pgrep -f "[f]wr_bringup/base_bridge" >/dev/null 2>&1; then
   echo "== 没有旧栈在跑，跳过清理（省约 28 s）=="
 elif [[ "$STOP" -eq 1 ]]; then
   echo "== 关闭旧栈运动门并停止建图 =="
@@ -127,7 +133,7 @@ fi
 
 # 2026-11-24：串口检查从"清理分支"里提出来 —— 跳过清理时也要确认 ESP32 没被
 # 幽灵句柄占住（否则新实例看起来正常却写不出指令：面板发 0.2、固件 setpoint 恒 0）。
-if [[ "$STOP" -eq 1 ]]; then
+if [[ "$STOP" -eq 1 ]] && [[ "${FWR_START_BASE:-true}" != "false" ]]; then
   ESP_PORT=$(ls /dev/serial/by-id/ 2>/dev/null | grep -i "Espressif" | head -1)
   if [ -n "$ESP_PORT" ] && [ -e "/dev/serial/by-id/$ESP_PORT" ]; then
     if fuser -s "/dev/serial/by-id/$ESP_PORT" 2>/dev/null; then
@@ -144,7 +150,10 @@ echo "  DDS : $FASTRTPS_DEFAULT_PROFILES_FILE"
 echo "  运动门保持关闭；在 RViz 面板点“开始导航”时由面板自行开门。"
 echo
 
+# 2026-11-24：硬件层由常驻 fwr-base.service 起，导航栈不再重复开串口。
+# 开机只有手动模式；切到导航模式时 mqtt_bridge 才 fwr-nav start。
 exec ros2 launch fwr_bringup run_navigation.launch.py \
   "map:=$MAP" \
   "start_rviz:=$RVIZ" \
+  "start_base:=${FWR_START_BASE:-true}" \
   "start_lidar:=$START_LIDAR"

@@ -90,6 +90,8 @@ def generate_launch_description():
         # → 车完全不动。看门狗交给 launch 托管，随栈启动/退出，不会像
         # 手工 nohup 那样被 ssh 会话带走。
         DeclareLaunchArgument('collision_watchdog', default_value='true'),
+        # 2026-11-24：硬件层由常驻 fwr-base 起（见 real_base.launch.py）
+        DeclareLaunchArgument('start_base', default_value='true'),
         # amcl（地图图片）或 slam（slam_toolbox localization + posegraph）
         DeclareLaunchArgument('localizer', default_value='amcl'),
         DeclareLaunchArgument('map', default_value=str(share / 'maps' / 'real_map_merged.yaml')),
@@ -99,6 +101,7 @@ def generate_launch_description():
                 ["'", use_saved_map, "' != 'true' and '",
                  LaunchConfiguration('slam_engine'), "' != 'carto'"])),
             launch_arguments={'use_sim_time': use_sim_time,
+                              'start_base': LaunchConfiguration('start_base'),
                               'lidar_port': LaunchConfiguration('lidar_port'),
                               'start_lidar': LaunchConfiguration('start_lidar'),
                               'start_imu': LaunchConfiguration('start_imu')}.items()),

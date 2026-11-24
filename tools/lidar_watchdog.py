@@ -122,8 +122,12 @@ class LidarState:
 
 class Watchdog(Node):
     def __init__(self, stale_s: float, cooldown_s: float, dry_run: bool,
-                 clear: bool = True, clear_period_s: float = 0.0):
+                 clear: bool = True, clear_period_s: float = 0.0,
+                 no_spawn: bool = False):
         super().__init__('lidar_watchdog')
+        # 2026-11-24：硬件层常驻 fwr-base（launch respawn=True），
+        # 本脚本只杀卡死节点、不自己拉起（否则抢串口 → 重复 publisher）。
+        self._no_spawn = bool(no_spawn)
         self._stale = stale_s
         self._cooldown = cooldown_s
         self._dry = dry_run
@@ -230,6 +234,10 @@ class Watchdog(Node):
             if state.last_msg and time.monotonic() - state.last_msg < 1.0:
                 self.get_logger().info(f'{state.topic} 已恢复（launch respawn 生效）')
                 return
+        if self._no_spawn:
+            self.get_logger().warn(
+                f'{state.node} 仍无数据，但 --no-spawn：交给 fwr-base 的 launch respawn')
+            return
         self._fallback_start(state)
 
     def _fallback_start(self, state: LidarState) -> None:
@@ -296,11 +304,14 @@ def main() -> int:
     ap.add_argument('--clear-period', type=float, default=0.0,
                     help='每隔多少秒额外清一次代价地图（0=不清）')
     ap.add_argument('--dry-run', action='store_true', help='只报告不重启')
+    ap.add_argument('--no-spawn', action='store_true',
+                    help='断流后不自己拉起节点（硬件由 fwr-base 托管时用）')
     args = ap.parse_args()
 
     rclpy.init()
     node = Watchdog(args.stale, args.cooldown, args.dry_run,
-                    clear=not args.no_clear, clear_period_s=args.clear_period)
+                    clear=not args.no_clear, clear_period_s=args.clear_period,
+                    no_spawn=args.no_spawn)
     executor = MultiThreadedExecutor(num_threads=4)
     executor.add_node(node)
     try:

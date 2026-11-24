@@ -872,9 +872,8 @@ function modeReconcileTick() {
   if (now - modeResendAt < 15000) return;
   modeResendAt = now;
   modeResendN += 1;
-  const action = lastMode === 'map' ? 'mapping_start' : 'mapping_stop';
-  console.log('模式不一致，重发', action, '车端=', robotMode, '页面=', lastMode);
-  ws.send(JSON.stringify({ type: 'nav', action }));
+  console.log('模式不一致，重发 mode=', lastMode, '车端=', robotMode);
+  sendModeSwitch(lastMode);
 }
 setInterval(modeReconcileTick, 1000);
 let shutdownPending = false;
@@ -2066,6 +2065,13 @@ function stopAutoArm() {
   clearInterval(autoArmTimer);
   autoArmTimer = null;
 }
+// 2026-11-24 用户要求：开机只跑硬件层（手动模式），切模式时**先清理现有模式**
+// 再启动目标模式。车端 mqtt_bridge 的 'mode' 动作负责：确认 fwr-base 在跑 →
+// 停掉所有不属于目标模式的栈（等 systemd 真报 inactive）→ 再启动目标栈。
+function sendModeSwitch(mode) {
+  console.log('切换模式 →', mode);
+  if (wsReady) ws.send(JSON.stringify({ type: 'nav', action: 'mode', mode: mode }));
+}
 function applyMode(mode) {
   // 2026-11-19：必须在改 lastMode 之前记住上一模式。
   // 原先结尾用 `lastMode !== 'map'` 判断，而 lastMode 已经被赋成新值，
@@ -2073,6 +2079,11 @@ function applyMode(mode) {
   // 连点模式按钮还会重复发 mapping_start，两个 systemctl 序列互相停对方的栈。
   const prevMode = lastMode;
   if (mode === 'manual') {
+    if (prevMode && prevMode !== 'manual') {
+      // 切回手动：把导航/建图/跟随栈全部停掉，只留硬件层（串口/CPU 都还回来）
+      sendModeSwitch('manual');
+      $('navInfo').textContent = '手动模式（正在清理其它模式的栈…）';
+    }
     // 切到手动模式：取消未完成的导航切换/重定位和进度条
     clearInterval(navReadyTimer);
     clearTimeout(switchTimer);
@@ -2100,7 +2111,10 @@ function applyMode(mode) {
   if ($('followView')) $('followView').classList.toggle('hidden', !isFollow);
   if ((nav || isFollow) && typeof closeCam === 'function') closeCam();  // 离开手动模式就断流
   // 跟随模式：进来就拉流 + 开始轮询人体框；离开就彻底停（否则后台还在每 200 ms 请求）
-  if (isFollow) { try { startFollow(); } catch (e) { console.warn('跟随模式启动失败', e); } }
+  if (isFollow) {
+    if (prevMode !== 'follow') sendModeSwitch('follow');
+    try { startFollow(); } catch (e) { console.warn('跟随模式启动失败', e); }
+  }
   else { try { stopFollow(); } catch (e) { /* 首屏时函数可能还没定义 */ } }
   $('navBar').classList.toggle('hidden', isMap);
   $('mapCtl').classList.toggle('hidden', !isMap);
@@ -2134,7 +2148,7 @@ function applyMode(mode) {
       render();
       try { mapResetKnob(); } catch (e) { dbgErr = '摇杆归零失败:' + e; }
       startProgress('正在切换到建图探索：停止导航栈 → 启动建图栈 → 等待 SLAM 地图…', 60000);
-      if (wsReady) ws.send(JSON.stringify({type: 'nav', action: 'mapping_start'}));
+      sendModeSwitch('map');
       autoArmForMapping();
       $('navInfo').textContent = '正在切换到建图探索（约 40~60 秒，等待雷达地图）…';
       } catch (e) {
@@ -2147,7 +2161,7 @@ function applyMode(mode) {
     }
   } else if ((prevMode === 'map' || robotMode === 'map') && mode === 'nav') {
     startProgress('正在切回导航模式：停止建图栈 → 启动导航栈 → 加载地图…', 120000);
-    if (wsReady) ws.send(JSON.stringify({type: 'nav', action: 'mapping_stop'}));
+    sendModeSwitch('nav');
     startNavReadyWatch('等待导航栈就绪');
     $('navInfo').textContent =
       '正在重启导航栈切回导航模式（约 1~2 分钟，请稍候）…';
@@ -2178,7 +2192,9 @@ function applyMode(mode) {
     mapMeta = null;
     liveMapSeen = false;
     loadMap();
-    startProgress('正在连接导航栈：加载地图 → 等待定位就绪…', 60000);
+    // 2026-11-24：导航栈不再开机自启，进导航模式要显式启动（车端会先清理别的栈）
+    sendModeSwitch('nav');
+    startProgress('正在连接导航栈：加载地图 → 启动导航栈 → 等待定位就绪…', 120000);
     if (wsReady) ws.send(JSON.stringify({type: 'nav', action: 'relocalize'}));
     $('navInfo').textContent = '已请求重新定位，等待导航栈就绪…';
     startNavReadyWatch('等待导航栈就绪');

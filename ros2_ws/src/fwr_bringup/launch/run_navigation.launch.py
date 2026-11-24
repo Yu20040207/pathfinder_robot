@@ -61,6 +61,8 @@ def generate_launch_description() -> LaunchDescription:
             default_value='/dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_Controller_e00aaf475431f111b7818c5f30d20014-if00-port0'),
         DeclareLaunchArgument('start_imu', default_value='true'),
         DeclareLaunchArgument('localizer', default_value='amcl'),
+        # 2026-11-24：fwr-nav 传 false（硬件在常驻 fwr-base 里）
+        DeclareLaunchArgument('start_base', default_value='true'),
         DeclareLaunchArgument('start_rviz', default_value='true'),
         DeclareLaunchArgument('start_rear_lidar', default_value='true'),
         IncludeLaunchDescription(
@@ -73,6 +75,7 @@ def generate_launch_description() -> LaunchDescription:
                 'start_imu': LaunchConfiguration('start_imu'),
                 'map': map_file,
                 'localizer': LaunchConfiguration('localizer'),
+                'start_base': LaunchConfiguration('start_base'),
                 'start_explorer': 'true',
                 'start_rear_lidar': LaunchConfiguration('start_rear_lidar'),
             }.items()),

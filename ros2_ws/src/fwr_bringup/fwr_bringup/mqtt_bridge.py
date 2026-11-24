@@ -311,6 +311,9 @@ class MqttBridge(Node):
         self._active_map_path = ''
         self._pending_map_path = ''
         self._mapping_mode = False
+        # 2026-11-24：模式改成"开机手动 + 按需启栈"后，手机要能区分
+        # manual / nav / map / follow（原来只有 map/nav 两态）。
+        self._current_mode = 'manual'
         self._mode_lock = threading.Lock()
         self._mode_running = False
         self._mode_running_action = ''
@@ -919,6 +922,12 @@ class MqttBridge(Node):
             if action in ('mapping_start', 'mapping_stop', 'mapping_restart'):
                 self._run_service_action(action)
                 return
+            if action == 'mode':
+                # 2026-11-24 用户要求：切模式时**先把现有模式清理干净**
+                # （停掉所有不属于目标模式的栈，确认真的停了再起目标栈），
+                # 开机只跑 fwr-base（硬件层）→ 手动模式。
+                self._switch_mode(str(obj.get('mode') or 'manual'))
+                return
             if action == 'relocalize':
                 client = self._reseed_client
                 if not client.service_is_ready():
@@ -1145,6 +1154,114 @@ class MqttBridge(Node):
         self.get_logger().warn(
             f'{unit} 等待 {wanted} 超时，当前={self._service_state(unit) or "unknown"}')
         return False
+
+    # ---- 2026-11-24：模式栈（按需启停）----
+    # 开机只有 fwr-base（硬件层，手动模式可用）；导航/建图/跟随按需启动。
+    # 切模式的第一条规则是**先清理干净**：停掉所有不属于目标模式的栈，
+    # 等到 systemd 真的报 inactive 再启动目标栈（否则两套节点同抢
+    # /scan、/tf、串口 → "建图和导航打架"）。
+    MODE_UNITS = {
+        'manual': (),
+        'nav': ('fwr-nav.service',),
+        'map': ('fwr-map.service',),
+        'follow': ('fwr-vision.service', 'fwr-follow.service'),
+    }
+    ALL_MODE_UNITS = ('fwr-nav.service', 'fwr-map.service',
+                      'fwr-vision.service', 'fwr-follow.service')
+    BASE_UNIT = 'fwr-base.service'
+
+    def _switch_mode(self, target: str) -> None:
+        import threading
+        target = (target or 'manual').strip().lower()
+        if target not in self.MODE_UNITS:
+            target = 'manual'
+        self._nav = 'unknown'
+        with self._mode_lock:
+            if self._mode_running:
+                self._mode_pending_mode = target
+                self.get_logger().warn(
+                    f'mode={target} 排队（{self._mode_running_action} 正在切换）')
+                return
+            self._mode_running = True
+            self._mode_running_action = f'mode:{target}'
+        want = self.MODE_UNITS[target]
+
+        def worker():
+            try:
+                # 1) 硬件层必须活着（手动模式全靠它）
+                if self._service_state(self.BASE_UNIT) != 'active':
+                    self.get_logger().warn('fwr-base 未运行，先拉起硬件层')
+                    self._systemctl('reset-failed', self.BASE_UNIT, timeout=20)
+                    self._systemctl('start', self.BASE_UNIT, timeout=90)
+                    if not self._wait_service_state(self.BASE_UNIT, ('active',),
+                                                   timeout=45.0):
+                        self.get_logger().error('fwr-base 起不来，模式切换中止')
+                        self._publish_result('nav', False, '硬件层启动失败',
+                                             action='mode')
+                        return
+                # 2) 先清理：把不属于目标模式的栈全部停掉
+                for unit in self.ALL_MODE_UNITS:
+                    if unit in want:
+                        continue
+                    if self._service_state(unit) in ('inactive', 'failed', None):
+                        continue
+                    self.get_logger().warn(f'切到 {target}：先停 {unit}')
+                    self._systemctl('stop', unit, timeout=90)
+                    if not self._wait_service_state(unit, ('inactive', 'failed'),
+                                                   timeout=45.0):
+                        self.get_logger().error(
+                            f'{unit} 未能停止，中止切换到 {target}')
+                        self._publish_result('nav', False,
+                                             f'{unit} 未能停止，已取消', action='mode')
+                        return
+                if target == 'manual':
+                    self._mapping_mode = False
+                    self._publish_result('nav', True, '手动模式（已清理其它模式）',
+                                         action='mode')
+                    self.get_logger().warn('已切到手动模式（只保留硬件层）')
+                    return
+                # 3) 再启动目标模式的栈
+                for unit in want:
+                    self._systemctl('reset-failed', unit, timeout=20)
+                    self._systemctl('start', unit, timeout=120)
+                    if not self._wait_service_state(unit, ('active',), timeout=45.0):
+                        self.get_logger().warn(f'{unit} 未 active，重试一次')
+                        self._systemctl('reset-failed', unit, timeout=20)
+                        self._systemctl('start', unit, timeout=120)
+                        if not self._wait_service_state(unit, ('active',),
+                                                       timeout=45.0):
+                            self.get_logger().error(f'{unit} 启动失败')
+                            self._publish_result('nav', False,
+                                                 f'{unit} 启动失败', action='mode')
+                            return
+                # 4) 模式标志
+                if target == 'map':
+                    self._mapping_mode = True
+                    self._mapping_grace_until = time.monotonic() + 25.0
+                    self._live_map = None
+                    self._live_map_dirty = False
+                    self._publish_live_map_reset()
+                    self._mapping_suppress_until = 0.0
+                else:
+                    self._mapping_mode = False
+                    self._mapping_suppress_until = time.monotonic() + 20.0
+                self.get_logger().warn(f'已切到 {target} 模式（其它模式已清理）')
+                self._publish_result('nav', True, f'{target} 模式已就绪',
+                                     action='mode')
+            except Exception as exc:             # noqa: BLE001
+                self.get_logger().error(f'模式切换到 {target} 失败: {exc}')
+                self._publish_result('nav', False, f'切换失败: {exc}', action='mode')
+            finally:
+                with self._mode_lock:
+                    self._mode_running = False
+                    self._mode_running_action = ''
+                    pending_mode = getattr(self, '_mode_pending_mode', '')
+                    self._mode_pending_mode = ''
+                if pending_mode and pending_mode != target:
+                    self.get_logger().warn(f'执行排队中的模式切换: {pending_mode}')
+                    self._switch_mode(pending_mode)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _run_service_action(self, action: str) -> None:
         """建图/导航栈切换：后台线程执行 systemctl。
@@ -1691,10 +1808,30 @@ class MqttBridge(Node):
         }
 
     def _sync_mapping_mode(self) -> None:
+        """每 5 秒对一次账：当前跑的是哪个模式的栈。
+
+        2026-11-24：不再只有 map/nav 两态 —— 开机只跑 fwr-base（手动模式），
+        导航/建图/跟随按需启动。这里用 systemctl 的真实状态算模式，
+        别用"我以为切到哪了"，否则手机显示和车端会长期不一致。
+        """
+        def _act(unit: str) -> bool:
+            try:
+                out = subprocess.run(['systemctl', 'is-active', unit],
+                                     capture_output=True, text=True, timeout=3)
+                return out.stdout.strip() == 'active'
+            except Exception:                    # noqa: BLE001
+                return False
+
         try:
-            out = subprocess.run(['systemctl', 'is-active', 'fwr-map'],
-                                 capture_output=True, text=True, timeout=3)
-            self._mapping_mode = out.stdout.strip() == 'active'
+            self._mapping_mode = _act('fwr-map')
+            if self._mapping_mode:
+                self._current_mode = 'map'
+            elif _act('fwr-nav'):
+                self._current_mode = 'nav'
+            elif _act('fwr-follow') or _act('fwr-vision'):
+                self._current_mode = 'follow'
+            else:
+                self._current_mode = 'manual'
         except Exception:                        # noqa: BLE001
             pass
 
@@ -1958,7 +2095,7 @@ class MqttBridge(Node):
                                       self._speed, self._yaw_rate,
                                       self._leg, self._legs,
                                       self._front_at, self._rear_at,
-                                      mode='map' if self._mapping_mode else 'nav')
+                                      mode=self._current_mode)
         # build_state_payload 返回的是 JSON bytes，这里解回 dict 才能加字段
         try:
             body = json.loads(payload.decode('utf-8'))
