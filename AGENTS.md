@@ -122,7 +122,8 @@
   `#mapCanvas` `order:2; flex:1 1 auto; min-height:0` 因此**铺满整个 #navView、从最顶上开始画**；
   打开摄像头时 `#navCamPane`（`order:0`）先占位，画布自动排在它下面吃掉剩余高度。
   ⚠️ **文字压在白色地图上必须靠描边**：两条子行都有
-  `-webkit-text-stroke:2.2px rgba(0,0,0,.82)` + `paint-order:stroke fill` + 深色 text-shadow。
+  `-webkit-text-stroke:1.1px rgba(0,0,0,.78)` + `paint-order:stroke fill` + 一层浅 text-shadow
+  （2.2px 太粗，用户 2026-11-24 让改细；再调就动这一个数字）。
   Safari/WebKit 的 `paint-order` 让描边画在字心下面，字不会变细；改动这两条文字样式时别把描边删了，
   否则白底上白字直接看不见。
   ⚠️ **`pointer-events:none` 不能删**：否则浮层会吃掉地图的捏合/拖动/点击。

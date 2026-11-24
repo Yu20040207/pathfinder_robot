@@ -427,9 +427,9 @@
                color: #3fb950; background: none; padding: 0 10px 5px;
                white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
                border-radius: 0; text-align: center; pointer-events: none;
-               -webkit-text-stroke: 2.2px rgba(0,0,0,.82);
+               -webkit-text-stroke: 1.1px rgba(0,0,0,.78);
                paint-order: stroke fill;
-               text-shadow: 0 0 4px rgba(0,0,0,.9), 0 1px 2px #000; }
+               text-shadow: 0 1px 2px rgba(0,0,0,.75); }
   #zoomCtl { position: absolute; right: 10px; bottom: 62px; display: flex;
              flex-direction: column; gap: 8px; }
   #zoomCtl button { width: 44px; height: 44px; border-radius: 10px; font-size: 20px;
@@ -479,9 +479,9 @@
              text-align: center; letter-spacing: .3px;
              white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
              border-radius: 0; pointer-events: none;
-             -webkit-text-stroke: 2.2px rgba(0,0,0,.82);   /* Safari/iOS 主用：给字描一圈黑边 */
+             -webkit-text-stroke: 1.1px rgba(0,0,0,.78);   /* Safari/iOS 主用：细黑边，刚好压住白底 */
              paint-order: stroke fill;                     /* 描边画在填充下面，字心不变细 */
-             text-shadow: 0 0 4px rgba(0,0,0,.9), 0 1px 2px #000; }
+             text-shadow: 0 1px 2px rgba(0,0,0,.75); }
 </style>
   <link rel="manifest" href="manifest.webmanifest">
   <meta name="theme-color" content="#0d1117">
