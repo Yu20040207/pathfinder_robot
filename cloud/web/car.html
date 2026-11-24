@@ -432,6 +432,30 @@
      各占各的；提示一换行就压住下面的绿色状态条（用户截图：重启后那句长提示
      直接盖在「位置 无定位 · stopped · …」上面）。现在两条放进同一个竖排容器，
      谁高谁低由内容决定，不会再重叠。 */
+  /* 2026-11-24 用户要求：导航模式也要能看摄像头，做成"悬浮在上面"，
+     和手动模式那颗 📷 按钮一致；画面盖在地图上，不挤布局。 */
+  #navCamBtn { position: absolute; right: 10px; top: 62px; z-index: 7;
+               width: 44px; height: 44px; border-radius: 12px; font-size: 20px;
+               line-height: 1; display: inline-flex; align-items: center;
+               justify-content: center; padding: 0;
+               background: rgba(22,27,34,.92); color: #e6edf3;
+               border: 1px solid #30363d; }
+  #navCamBtn.on { background: #103246; color: #7dd3fc; border-color: #1f6feb; }
+  #navCamPane { position: absolute; left: 8px; right: 8px; top: 114px; z-index: 40;
+                border-radius: 12px; overflow: hidden;
+                background: #000; border: 1px solid #30363d;
+                box-shadow: 0 8px 24px rgba(0,0,0,.55); }
+  #navCamPane.hidden { display: none; }
+  #navCamPane img { display: block; width: 100%; height: auto; max-height: 46vh;
+                    object-fit: contain; background: #000; }
+  #navCamClose { position: absolute; right: 6px; top: 6px; width: 34px; height: 34px;
+                 border-radius: 9px; border: 1px solid #30363d; padding: 0;
+                 background: rgba(22,27,34,.92); color: #e6edf3; font-size: 16px;
+                 line-height: 1; display: inline-flex; align-items: center;
+                 justify-content: center; }
+  #navCamErr { padding: 14px 12px; color: #ff7b72; font-size: 12px; line-height: 1.6;
+               text-align: center; }
+  #navCamErr.hidden { display: none; }
   #navTopWrap { position: absolute; left: 0; right: 0; top: 3px; z-index: 6;
                 display: flex; flex-direction: column; gap: 4px;
                 pointer-events: none; }
@@ -641,6 +665,12 @@
     <div id="navTopWrap">
       <div id="navInfo">导航模式：双指缩放/旋转，单指拖动，轻点添加航点</div>
       <div id="navStatus">定位中…</div>
+    </div>
+    <button id="navCamBtn" title="摄像头画面" aria-label="摄像头">📷</button>
+    <div id="navCamPane" class="hidden">
+      <img id="navCamImg" alt="摄像头画面">
+      <button id="navCamClose" title="关闭画面" aria-label="关闭">✕</button>
+      <div id="navCamErr" class="hidden"></div>
     </div>
     <div id="zoomCtl">
       <button id="relocBtn" title="重新定位（一键播种）">📍</button>
@@ -2107,6 +2137,7 @@ function applyMode(mode) {
   if (!isMap) stopAutoArm();
   const nav = (mode === 'nav' || isMap);
   $('manualView').classList.toggle('hidden', nav || isFollow);
+  if (mode !== 'nav' && typeof closeNavCam === 'function') closeNavCam();
   $('navView').classList.toggle('hidden', !nav);
   if ($('followView')) $('followView').classList.toggle('hidden', !isFollow);
   if ((nav || isFollow) && typeof closeCam === 'function') closeCam();  // 离开手动模式就断流
@@ -3904,6 +3935,83 @@ function closeCam() {
   document.body.classList.remove('cam-on');
   $('camBtn').classList.remove('on');
 }
+
+/* 2026-11-24 用户要求：导航模式里也要看摄像头，按钮像手动模式那样浮在上面。
+   复用同一路 MJPEG（`/video`），但**独立一套 img**：手动模式那块是在布局流里，
+   这块是盖在地图上的悬浮层，互不影响。两个不会同时开（切模式会关掉）。 */
+let navCamWanted = false;
+
+async function openNavCam() {
+  navCamWanted = true;
+  $('navCamPane').classList.remove('hidden');
+  $('navCamBtn').classList.add('on');
+  $('navCamErr').classList.add('hidden');
+  $('navCamImg').classList.remove('hidden');
+  try {
+    // 每次现问服务端要地址（地址可能过期/换网），和手动模式同一套接口
+    const media = await api('/api/devices/' + DEVICE + '/media');
+    camMedia = media;
+    if (location.protocol === 'https:' && String(media.url).indexOf('http://') === 0) {
+      $('navCamImg').classList.add('hidden');
+      $('navCamErr').classList.remove('hidden');
+      $('navCamErr').innerHTML = '页面是 HTTPS，浏览器拦掉了 HTTP 画面<br>' +
+        '<span style="color:#9fb3c8">用 http:// 打开本页即可内嵌显示</span>';
+      return;
+    }
+    $('navCamImg').src = media.url + '?t=' + Date.now();
+  } catch (e) {
+    $('navCamImg').classList.add('hidden');
+    $('navCamErr').classList.remove('hidden');
+    $('navCamErr').innerHTML = '无法获取摄像头地址<br><span style="color:#9fb3c8">' +
+      String(e.message || e) + '</span>';
+  }
+}
+
+function closeNavCam() {
+  navCamWanted = false;
+  $('navCamImg').removeAttribute('src');
+  $('navCamPane').classList.add('hidden');
+  $('navCamBtn').classList.remove('on');
+}
+
+if ($('navCamBtn')) {
+  $('navCamBtn').onclick = () => {
+    if (navCamWanted) closeNavCam(); else openNavCam();
+  };
+}
+if ($('navCamClose')) {
+  $('navCamClose').onclick = (e) => { e.stopPropagation(); closeNavCam(); };
+}
+// 断流自愈：和手动模式一致（iPhone 切后台/媒体服务重启会静默掐断长连接）
+if ($('navCamImg')) {
+  $('navCamImg').onerror = () => {
+    if (!navCamWanted || !camMedia) return;
+    setTimeout(() => {
+      if (!navCamWanted || !camMedia) return;
+      const i = $('navCamImg');
+      i.removeAttribute('src');
+      i.src = camMedia.url + '?t=' + Date.now();
+    }, 600);
+  };
+}
+setInterval(() => {
+  if (!navCamWanted || document.hidden || !camMedia) return;
+  const i = $('navCamImg');
+  if (!i || !i.getAttribute('src')) return;
+  if (i.complete && i.naturalWidth === 0) {
+    i.removeAttribute('src');
+    i.src = camMedia.url + '?t=' + Date.now();
+  }
+}, 3000);
+// 切后台就断流（省电省带宽），回来再自动接上
+document.addEventListener('visibilitychange', () => {
+  if (!navCamWanted) return;
+  if (document.hidden) {
+    $('navCamImg').removeAttribute('src');
+  } else if (camMedia) {
+    $('navCamImg').src = camMedia.url + '?t=' + Date.now();
+  }
+});
 
 /* ---------- 跟随模式：人体识别框 + 点框选人（2026-11-21） ----------
    画面走同一路 MJPEG（服务端已缩到 480x360），人体框来自 person_detector 节点

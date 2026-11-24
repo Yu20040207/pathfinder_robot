@@ -109,6 +109,10 @@
 - 实机验证（2026-11-24）：`mode=map` → nav 停/map 起、**base_bridge 始终 1 个**、
   `/scan_merged` 10 Hz；`mode=nav` → map 停、amcl active、安全链输出 20 Hz；
   `mode=manual` → 导航/建图全停、只剩硬件层、扫描 10 Hz。
+- 📷 **导航模式也有摄像头（2026-11-24 用户要求）**：`#navCamBtn`（右上角悬浮）→
+  `#navCamPane`（盖在地图上的悬浮层，`z-index 40`，地图编辑器 60 在它上面）。
+  复用同一路 MJPEG `/video`，但**独立一个 `<img>`**（手动模式那块在布局流里，不能共用）。
+  切出导航模式会在 `applyMode()` 里自动关掉；断流自愈 / 切后台断流与手动模式同款。
 - 实机 RViz 的“两点导航”面板：**单击一次**表示从当前位置前往点击点（`/explore/start_fixed_goal`）；**连续点击两次**表示先到起点再到终点（`/explore/start_two_point_goal`）。现场人员点击“开始导航”时面板自行开启 `motion_enabled`、等待 `/base/ready`、申请 `/base/arm_auto`，然后发送目标；点击“停止导航”或任务结束/失败时请求停机并关闭运动门。无需另开终端运行授权脚本。该按钮流程已构建和通过单元测试，**尚未由现场人员验证完整实车按钮操作**；最新证据见 `docs/AGENT_LOG.md` 末尾。代理不得代替用户点击按钮或打开运动门，除非本次会话另有明确授权。
 
 
@@ -201,6 +205,14 @@
   `Transitioning successful` / `active [3]`），恢复后 `/cmd_vel_auto_forward_filtered` 20 Hz 正常。
   页面手动模式**急停右侧 📷** 打开；地址由 `GET /api/devices/{id}/media` 下发（云端
   `JC_MEDIA_HOSTS`）。⚠️ **8080 不要用**（页面会重定向到 `/car/`）；**HTTPS 页面会拦 HTTP 视频**。
+- 🌡 **主控温度怎么读（2026-11-24 查清）**：`/sys/class/thermal/thermal_zone*` 在本机是
+  **zone0=acpitz（恒定 27.8 °C，不是 CPU）**、zone1=iwlwifi_1（无线网卡，常比 CPU 热）、
+  **zone2=x86_pkg_temp（真正的 CPU 封装温度）**。`mqtt_bridge.py` 顶部还留着一张旧的
+  `TEMP_PATHS`（cpu→zone0），**它没被使用**，别照着它读。
+  ⚠️ `x86_pkg_temp` 会**偶发单次虚高**：同一秒连读 20 次得到 50/51/50/68/70/50 °C，
+  而当时整机 CPU 稳定 25%、功率没跳 → 那 18 °C 是采样毛刺。手机上就是「温度来回跳 10 度」
+  （用户 2026-11-24 报）。现在 `read_temps()` 对每个键保留最近 5 个样本发**中位数**，
+  实测 25 帧跨度只剩 **1 °C**；真实升温 2~3 s 仍跟得上。有单测 `tests/test_temp_smoothing.py`。
 - 启用/关闭/回滚步骤见 `docs/agent/ros-mcp-setup.md`；不要用 `FWR_ROS_MCP_MODE=full` 连实机。
 
 ### 视觉：跟随模式的人体识别（2026-11-21 新建）

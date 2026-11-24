@@ -11889,3 +11889,36 @@ inactive 告警 210 次 / 补 configure 196 次 / 二级恢复 64 次 / 三级�
 ### 遗留
 - 手机页面若已弃守（`navReadyTries > 18` 会结束进度条），需重新点一次「导航模式」或刷新。
 - 云端 API 无自动化测试，目前只有仓库内静态回归（字段白名单漂移就报错）。
+
+## 2026-11-24 11:25 · 导航模式加摄像头按钮；查清 CPU 温度「跳 10 度」
+
+### 一、导航模式摄像头（用户要求：像手动模式那颗按钮一样浮在上面）
+- `cloud/web/car.html`：
+  - 新增 `#navCamBtn`（右上角悬浮，44×44，避开两行顶部提示条）、
+    `#navCamPane`（`z-index 40`，盖在地图上，不进布局流）、`#navCamImg`、`#navCamClose`、`#navCamErr`。
+  - `openNavCam()` 每次现问 `/api/devices/<id>/media` 拿地址（换网/过期都能自愈），
+    HTTPS 页面拦 HTTP 混合内容时给明确提示（和手动模式同一套话术）。
+  - 断流自愈：`onerror` 600 ms 重连 + 3 s 一次 `naturalWidth===0` 检查；
+    切后台断流、回来重连；`applyMode()` 里 `mode !== 'nav'` 自动 `closeNavCam()`。
+  - 与手动模式**各自一个 `<img>`**（手动那块在布局流里，不能共用同一个元素）。
+- 已部署云端 `/home/boat_control/car.html` 与 `/opt/jc/web/car.html`（md5 `f2d3a10d…`）。
+- ⚠️ 尚未由用户实机点开验证（需要手机刷新后点 📷）。
+
+### 二、CPU 温度跳动（用户报「相差 10 度」）
+- 定位：本机温区 `zone0=acpitz`（恒定 27.8 °C）、`zone1=iwlwifi_1`（61~62 °C）、
+  **`zone2=x86_pkg_temp`=真 CPU**（50~52 °C 常态）。
+- 抓现场：0.25 s 采样时 CPU 连续 `50/51/50/**68**/50`；20 ms 连读 20 次出现
+  `50 50 51 50 50 51 50 **64 70** 50` —— 同一秒内 18 °C 的"跳变"，
+  而 `/proc/stat` 每秒总占用稳定 23~27%、RAPL 功率无跳变 → **采样毛刺，不是真温升**。
+- 修复：`mqtt_bridge.read_temps()` 增加 `smooth_temp()`，每个键保留最近 5 个样本取**中位数**。
+- 验证：重启桥接后连续 25 帧 `temps.cpu` = `52,52,…,52,51`，
+  **min/max 跨度 1.0 °C**（修复前 20 °C）；`tests/test_temp_smoothing.py` 3 例。
+- 顺带记录：`mqtt_bridge.py` 顶部的 `TEMP_PATHS`（cpu→zone0）是旧常量、**未被使用**，
+  以后别照它读温度。
+
+### 已验证
+- `pytest ros2_ws/src/fwr_bringup/test tests`：**709 passed**。
+- 桥接重启后 `temps` 稳定；页面 JS 语法检查通过、id 唯一、云端 md5 一致。
+
+### 未验证
+- 手机端实际点开摄像头画面（需用户刷新页面后确认）；建图模式下的按钮遮挡情况。

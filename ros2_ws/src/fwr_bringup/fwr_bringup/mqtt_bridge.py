@@ -97,6 +97,29 @@ TEMP_PATHS = {
 }
 
 
+# 2026-11-24：`x86_pkg_temp` 会**偶发单次虚高**（实测同一秒内 50/51/50/68/50 °C，
+# 20 ms 一次连读时更明显）。那 18 °C 不是真温升（当时整机 CPU 稳定 25%、
+# 功率也没跳），是传感器/EC 的采样毛刺，手机上就表现成「温度来回跳 10 度」。
+# 这里对每个温区保留最近 5 个样本、发布**中位数**：单点毛刺进不来，
+# 真实趋势（持续升温）2~3 s 就跟上。
+_TEMP_HIST: dict = {}
+_TEMP_HIST_LEN = 5
+
+
+def smooth_temp(key: str, value):
+    """中位数滤波：干掉单次采样毛刺，保留真实趋势。"""
+    if value is None:
+        return None
+    hist = _TEMP_HIST.setdefault(key, [])
+    hist.append(float(value))
+    del hist[:-_TEMP_HIST_LEN]
+    ordered = sorted(hist)
+    mid = len(ordered) // 2
+    if len(ordered) % 2:
+        return round(ordered[mid], 1)
+    return round((ordered[mid - 1] + ordered[mid]) / 2.0, 1)
+
+
 def read_temps():
     """读主控温度（CPU / WiFi / NVMe，单位 °C，读不到返回 None）。"""
     out = {}
@@ -128,7 +151,7 @@ def read_temps():
                 continue
     except Exception:                            # noqa: BLE001
         pass
-    return out
+    return {k: smooth_temp(k, v) for k, v in out.items()}
 
 
 def build_state_payload(battery, pose, nav_state, fault, armed, ready=False,
