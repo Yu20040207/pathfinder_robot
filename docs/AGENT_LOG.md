@@ -12266,3 +12266,45 @@ P1 = 纯逻辑 + 节点 + 单测，**只发布观测**，用来先采集数据�
 - ✅ 已验证：18 例单测、27 场景黑盒、节点可装配（订阅 `/robot/lidar/persons`）。
 - ⚠️ 未验证：**实机**（未部署、未启动 `fwr-follow`）；相机与雷达同时在线时的认领质量；
   以及"人绕到车后"时原地转身的实际体感（黑盒里 `w=0.70` 是满转，实机可能想更慢）。
+
+## 2026-11-24 18:24 · 「有时候提示人体识别没在跑」真因：服务和页面互相拉扯
+
+### 现场证据
+- `journalctl` 里 fwr-vision 在 18:16:32 / 18:17:59 / 18:18:46 / 18:18:57 **每十几秒被 stop 一次**，
+  每次退出都是 `ExternalShutdownException` → `finally` 里二次 `rclpy.shutdown()` →
+  `RCLError: rcl_shutdown already called` → 18:19:01 直接 **core-dump（status=6/ABRT）**。
+- 但 `mqtt_bridge` 只收到过 **2 次** `nav 动作: mode`（18:15:49、18:18:30，都是 follow），
+  说明停服务**不是模式切换**干的。
+- 真凶在 `tools/robot_mjpeg_server.py`：旧 `handle_follow` 把 **`on=0`** 当成"停服务"。
+  页面切后台（`visibilitychange`）、点「取消跟随」都会发 `on=0`，
+  而页面仍在跟随模式里每 5 s 发 `prep=1` → **stop/start 死循环**。
+  重启窗口里 `/boxes` 是 stale，手机端就显示"人体识别没在跑"。
+
+### 修法（部署后实测）
+1. `follow_service_target(on, prep, leave)`：`on=1`/`prep=1` 起、**`leave=1` 停**、`on=0` **不动**；
+   页面 `stopFollow()`（真离开跟随模式）发 `/follow?leave=1`。
+2. `person_detector` / `person_follower` 的 `main()` 只关一次 rclpy
+   （`ExternalShutdownException` + `if rclpy.ok()`），不再 core-dump。
+3. 手机提示分三种：请求失败 →「连不上机器人」；12 s 内 →「正在启动人体识别…」；
+   服务端 stale →「人体识别暂时没有数据（可能刚启动或正忙）」。
+   另外 **P2 雷达接管时状态行显示 `📡 雷达跟踪 · 雷达接管中… · 距离 137 cm`**
+   （相机在跟时仍是 `目标框 62%`），并新增 5 条 `lidar_*` 原因文案。
+
+### 已验证（实机，2026-11-24 18:22）
+| 动作 | 结果 |
+| --- | --- |
+| `prep=1` | `{"ok":true,"vision":true}` → vision/follow **active** |
+| 连发两次 `on=0` | vision/follow **仍 active**（旧版会停） |
+| `leave=1` | 两个服务 `Deactivated successfully`（**干净退出，无 core-dump**） |
+| 再 `prep=1` | 回到 active |
+| `journalctl -u fwr-vision --since 18:23` | Traceback **0** 次（18:20 那 2 条是旧代码） |
+| `GET /boxes` | `infer_ms 28.1`、字段正常（画面里没人时 persons 为空） |
+| `GET /followstate` | 带 `src/lidar_id/lidar_r/lidar_age` 新字段 |
+- 单测：`tests/test_follow_service_toggle.py` **9 例**；合跑 146 例全过；`node --check` OK。
+- 页面已部署 ECS `/opt/jc/web/car.html`（备份 `car.html.bak.20261124182123`），
+  md5 三处一致 `40f33c332f88ac24b192cf4b00b939b9`，`curl 127.0.0.1:8080/car.html` → HTTP 200。
+
+### 未验证
+- 手机端实际观感（需用户**刷新页面**）：提示行是否还跳"没在跑"、雷达接管时的黄色 `📡 雷达跟踪`。
+- 车端 `fwr-media` 启动时会 baseline 停掉 vision/follow（设计如此），
+  所以**重启 fwr-media 后要等页面 prep 心跳或手动 prep** 才会回来——这点已写进 AGENTS.md。

@@ -315,6 +315,23 @@
      沿用上一帧逻辑，别把"丢失"伪装成"看见"。
   单测：`tests/test_person_detector.py` 的 `test_pick_selected_*`（3 例，含"都走了"）。
 - 识别之外还有跟随控制（见下段「跟随控制」）；跟随走手动通道，受底盘双门控。
+- 🔁 **视觉/跟随服务生命周期：`on=0` 不停服务，只有 `leave=1` 才停**（2026-11-24 现场定版）
+  - 用户报「有时候提示人体识别没在跑」。真因是**页面和服务互相拉扯**：
+    旧服务端把 `GET /follow?on=0`（取消跟随 / 切后台停车）当成"停服务" →
+    `systemctl stop fwr-vision fwr-follow`；可页面还在跟随模式，5 s 后 `prep=1` 又拉起来
+    → 每十几秒 stop→start 一轮，vision 在重启窗口里就是"没在跑"。
+  - 现在 `tools/robot_mjpeg_server.py` 的 `follow_service_target(on, prep, leave)`：
+    `on=1`/`prep=1` → 起；**`leave=1` → 停**；`on=0` → **不动**。
+    页面 `stopFollow()`（切走跟随模式）才发 `/follow?leave=1`。
+  - ⚠️ `fwr-media` 启动时会 `_follow_services(False, force=True)`（开机不常驻视觉），
+    所以**重启 `fwr-media` 会把 vision/follow 停掉**；页面在跟随模式下 5 s 内 `prep` 会自动拉回。
+  - 手机提示分三种，别再混着说：`/boxes` 请求失败 → 「连不上机器人」；
+    12 s 内 → 「正在启动人体识别…」；服务端 `stale` → 「人体识别暂时没有数据（可能刚启动或正忙）」。
+- 🛑 **节点的 `main()` 只能关一次 rclpy**（2026-11-24）：SIGTERM 时 rclpy 信号处理器已
+  `rcl_shutdown`，`finally` 再调 `rclpy.shutdown()` 会抛 `RCLError: rcl_shutdown already called`
+  → 退出码 1，严重时 core-dump（fwr-vision 曾每十几秒崩一次）。写法：
+  `except (KeyboardInterrupt, ExternalShutdownException)` + `if rclpy.ok(): rclpy.shutdown()`。
+  `person_detector` / `person_follower` 已改；新节点照此办理。
 - ⚠️ **部署要同时落到 `ros2_ws/build/fwr_bringup/fwr_bringup/`**：实机 `ros2 run` 解析到的是
   **build 副本**（`python -c "import fwr_bringup.person_detector as m; print(m.__file__)"` 实测），
   只改 `src/` 不生效。2026-11-22 就因为只改了 `src/` 又把 import 行改漏（字符串 replace 没匹配上、没 assert），
