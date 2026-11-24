@@ -425,6 +425,7 @@
   /* 2026-11-24 用户要求：绿字行不要圆角边框，直接用白色行那种扁平样式（同一块框里第二行） */
   #navStatus { position: static; margin: 0; font-size: 12px;
                color: #3fb950; background: none; padding: 0 10px 5px;
+               white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
                border-radius: 0; text-align: center; pointer-events: none; }
   #zoomCtl { position: absolute; right: 10px; bottom: 62px; display: flex;
              flex-direction: column; gap: 8px; }
@@ -444,15 +445,19 @@
      竖排整体再往下挪一点（bottom 86 → 62，正好落在底部按钮条上方）。 */
   #navCamBtn.on { background: #103246; color: #7dd3fc !important;
                   border-color: #1f6feb !important; }
-  #navCamPane { position: relative; margin: 4px 10px 0; border-radius: 12px;
+  /* 2026-11-24 用户要求：画面也**不要圆角框**，和上面白/绿两行是同一块直角区域，
+     宽度顶到两边、无边框无阴影。 */
+  #navCamPane { position: relative; margin: 0; border-radius: 0;
                 overflow: hidden; background: #000; border: 0;
-                box-shadow: 0 8px 22px rgba(0,0,0,.5);
+                box-shadow: none;
                 pointer-events: auto; }   /* 父容器是 none，这里必须开回来，否则 ✕ 点不动 */
   #navCamPane.hidden { display: none; }
   #navCamPane img { display: block; width: 100%; height: auto; max-height: 46vh;
                     object-fit: contain; background: #000; }
-  #navCamClose { position: absolute; right: 6px; top: 6px; width: 34px; height: 34px;
-                 border-radius: 9px; border: 1px solid #30363d; padding: 0;
+  /* 关闭按钮同样改成直角小块（和画面一套风格） */
+  #navCamClose { position: absolute; right: 0; top: 0; width: 38px; height: 38px;
+                 border-radius: 0; border: 0; border-left: 1px solid rgba(48,54,61,.9);
+                 border-bottom: 1px solid rgba(48,54,61,.9); padding: 0;
                  background: rgba(22,27,34,.92); color: #e6edf3; font-size: 16px;
                  line-height: 1; display: inline-flex; align-items: center;
                  justify-content: center; }
@@ -466,9 +471,11 @@
                 display: flex; flex-direction: column; gap: 0;
                 background: rgba(13,17,23,.72);
                 pointer-events: none; }
+  /* 2026-11-24 用户要求：这两行**各占一行、不允许换行**（放不下就省略号，宁可截断也不折行） */
   #navInfo { position: static; font-size: 12px;
              color: #d7e3ec; background: none; padding: 5px 10px 1px;
              text-align: center; letter-spacing: .3px;
+             white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
              border-radius: 0; pointer-events: none; }
 </style>
   <link rel="manifest" href="manifest.webmanifest">
@@ -1769,7 +1776,6 @@ setInterval(batteryTick, 500);
 
 function updateNavStatus() {
   const r = robotState;
-  const pose = (typeof r.x === 'number') ? `${r.x.toFixed(2)}, ${r.y.toFixed(2)}` : '无定位';
   const mapTxt = (lastMode === 'map')
     ? ' · 建图探索'
     : (r.map ? ` · 地图 ${r.map}` : '');
@@ -1782,9 +1788,10 @@ function updateNavStatus() {
     ? r.nav : (r.manual ? '手动待命' : '待命');
   // 安全链（collision_monitor）没通时给个明确提示：这时候发目标一定走不动
   const chainTxt = (r.chain === false) ? ' · 安全链等待中' : '';
-  // 2026-11-20 用户要求：状态行不再显示电量（顶部 header 已有），只留位置/状态/地图
+  // 2026-11-20 用户要求：状态行不再显示电量（顶部 header 已有）。
+  // 2026-11-24 用户要求：**连位置坐标也不要显示**（地图上本来就有车标）。
   $('navStatus').textContent =
-    `位置 ${pose} · ${navTxt}${mapTxt}${chainTxt} · ${authTxt}`;
+    `${navTxt}${mapTxt}${chainTxt} · ${authTxt}`;
   updateDbgLine();
   // 手动授权成功后更新建图探索的提示
   if (r.manual && ($('navInfo').textContent || '').indexOf('授权') >= 0) {

@@ -11969,3 +11969,16 @@ inactive 告警 210 次 / 补 configure 196 次 / 二级恢复 64 次 / 三级�
   白字行/绿字行都 `background:none` + `border-radius:0` + 居中，**不要圆角边框**。
 - 模拟图（确认过）：`docs/images/nav_top_mockup.png`（扁平框版本见线上页面）。
 - 部署：云端 md5 `d7f90589…`（与本地一致）；效果待用户确认。
+
+### 2026-11-24 12:20 · 顶部两行：去掉位置坐标 + 强制单行 + 摄像头画面改直角
+- 用户要求逐条落实：
+  1. **绿字行不显示位置坐标**：`updateNavStatus()` 去掉 `位置 x,y ·`（`pose` 变量一并删除），
+     现在只拼 `状态 · 地图 · 授权`；坐标看地图上的车标就行。
+  2. **两行各占一行、不许换行**：`#navInfo` / `#navStatus` 加
+     `white-space:nowrap; overflow:hidden; text-overflow:ellipsis`（放不下截断成省略号）。
+     换行会把整块顶高、地图跟着跳，所以宁可省略。
+  3. **摄像头画面不要圆角框**：`#navCamPane` 改成 `border-radius:0; border:0; box-shadow:none;
+     margin:0`（宽度顶到两边，和上面两行是同一块直角区域）；`#navCamClose` 也改直角小块、
+     贴左上角（38×38，右侧/下侧各一条细分隔线）。
+- 模拟图（先给用户看过）：`docs/images/nav_cam_flat_mockup.png`（左=关闭、右=打开）。
+- 部署：云端 md5 `895f5570…`（与本地一致）；效果待用户确认。
