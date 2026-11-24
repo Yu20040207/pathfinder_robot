@@ -37,10 +37,7 @@ from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import String
 
-from fwr_bringup.follow_core import (DEFAULTS, OscGuard, cam_bearing, decide,
-                                    door_clear, door_metrics, door_swept_radius,
-                                    lidar_follow, limit_pair, passage_metrics,
-                                    pick_lidar_track, scan_metrics)
+from fwr_bringup.follow_core import (DEFAULTS, OscGuard, cam_bearing, decide, door_clear, door_metrics, door_swept_radius, lidar_follow, limit_pair, passage_metrics, pick_lidar_track, reacquire_track, scan_metrics)
 
 
 class PersonFollower(Node):
@@ -113,6 +110,8 @@ class PersonFollower(Node):
         self._lidar_id = -1        # 相机点名过的那条雷达轨迹 id
         self._lidar_at = 0.0       # 上一次"相机与雷达对上"的时刻
         self._lidar_close = False  # 雷达接管时因"太近"停过 → 等退到 resume 距离
+        self._lidar_bearing = None  # 刚才认领/续跟那条轨迹的方位、距离
+        self._lidar_r = None        # （换号时按这对值重新认领）
         self.src = 'none'          # cam / lidar / none（本帧目标来源）
 
         self.cmd = self.create_publisher(Twist, '/cmd_vel_manual', 10)
@@ -314,6 +313,8 @@ class PersonFollower(Node):
             self._size_hold = False
             # 换人 = 换目标，雷达认领必须重来（否则会继续跟上一个被点名的人）
             self._lidar_id = -1
+            self._lidar_bearing = None
+            self._lidar_r = None
             self._lidar_close = False
         person = None
         for item in data.get('persons', []):
@@ -422,12 +423,35 @@ class PersonFollower(Node):
             if picked is not None:
                 self._lidar_id = int(picked['id'])
                 self._lidar_at = now
+                self._lidar_bearing = float(picked['bearing'])
+                self._lidar_r = float(picked['r'])
         elif (sel >= 0 and self._lidar_id >= 0
               and (now - self._lidar_at) <= self.p['lidar_hold_s']):
             tr = self._tracks.get(self._lidar_id)
+            # 同一条被点名的轨迹允许 static：人站着等车时 leg_tracker 会标 static，
+            # 旧写法直接不跟 → 表现为"雷达跟踪突然断开"（2026-11-24 用户报）。
             if (tr is not None and (now - tr['at']) <= self.p['lidar_fresh_s']
-                    and not tr.get('static')):
+                    and (not tr.get('static')
+                         or int(tr['id']) == self._lidar_id)):
                 lidar_target = tr
+            else:
+                # 轨迹换号/断了：按"刚才那个位置"重新认领（相机还看不到，只能靠位置）。
+                # 2026-11-24 用户报"雷达跟着跟着突然断开"——实流里 leg_tracker 的 id
+                # 在腿交叉/两腿合并时会重生，旧写法只认固定 id，一换号就丢。
+                fresh = [t for t in self._tracks.values()
+                         if (now - t['at']) <= self.p['lidar_fresh_s']]
+                re_tr = reacquire_track(fresh, self._lidar_bearing,
+                                        self._lidar_r, self.p, self._lidar_id)
+                if re_tr is not None:
+                    if int(re_tr['id']) != self._lidar_id:
+                        self.get_logger().info(
+                            '雷达轨迹换号 %d → %d（相机看不到，按位置续认）'
+                            % (self._lidar_id, int(re_tr['id'])),
+                            throttle_duration_sec=2.0)
+                    self._lidar_id = int(re_tr['id'])
+                    # ⚠️ 故意**不**刷新 self._lidar_at：续认只解决"换号"，
+                    # 不延长"相机完全看不到"的最长窗口（那是一条安全边界）。
+                    lidar_target = re_tr
 
         v, w, reason, box_h = decide(
             person, lost_s, self.clear_hard, self.clear_slow,
@@ -452,6 +476,8 @@ class PersonFollower(Node):
                     self._lidar_close = False
             elif r_now <= self.p['lidar_stop_m']:
                 self._lidar_close = True
+            self._lidar_bearing = float(lidar_target['bearing'])
+            self._lidar_r = r_now
             v, w, reason = lidar_follow(
                 float(lidar_target['bearing']), r_now,
                 self.clear_hard, self.clear_slow, self.left, self.right,

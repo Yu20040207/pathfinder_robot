@@ -113,7 +113,12 @@ DEFAULTS = {
     # 相机看不到人时（人绕到车侧/车后），靠雷达把"这一个人"续跟一段时间。
     # ⚠️ 安全铁律：**雷达不许自己起跟**。只有刚才被相机点名的人（同一个雷达 id）
     # 还在，才允许接管；从没被相机看到过的轨迹一律不跟（家具/路人）。
-    'lidar_hold_s': 5.0,        # 相机丢掉后，雷达最多续跟这么久
+    'lidar_hold_s': 8.0,        # 相机丢掉后，雷达最多续跟这么久（原 5 s，实测偏短）
+    # 2026-11-24：`leg_tracker` 的 id 在实流里不稳（腿交叉/两腿合并/家具干扰都会重生），
+    # 相机看不到时 id 一换就等于"目标丢了" → 现场就是"雷达跟着跟着突然断开"。
+    # 换号后按"刚才那个位置"重新认领（只用下面这两个门限，别放宽）。
+    'lidar_reacq_deg': 20.0,    # 重新认领：方位差上限（°）
+    'lidar_reacq_dr': 0.90,     # 重新认领：距离差上限（m）
     'lidar_fresh_s': 0.5,       # 雷达轨迹多久没更新就算过期（10 Hz 扫描，0.5 s 够宽）
     'lidar_assoc_deg': 25.0,    # 相机看到人时，用它对准雷达轨迹（方位差上限）
     'cam_hfov_deg': 70.0,       # 相机水平视场（HP60C 实测约 70°），框中心 → 方位角
@@ -334,6 +339,42 @@ def pick_lidar_track(cands, bearing: float, last_id: int = -1,
         if int(c.get('id', -1)) == int(last_id):
             return c
     return min(ok, key=lambda c: abs(float(c.get('bearing', 0.0)) - bearing))
+
+
+def reacquire_track(cands, last_bearing, last_r, p=None, last_id=-1):
+    """雷达轨迹**换号/短暂消失**后，按"刚才那个位置"重新认领同一个人。
+
+    为什么需要：`leg_tracker` 的 id 在实流里不稳（腿交叉、两腿合并/分开、
+    家具干扰都会让 id 重生）。相机已经看不到人时，id 一换就等于"目标丢了"，
+    现场表现就是**雷达跟着跟着突然断开**（2026-11-24 用户报）。
+
+    只接受三个条件都满足的轨迹，避免跟错：
+    1. **非 static**（椅子/桌沿不动，会被 leg_tracker 标 static）；
+    2. 方位差 ≤ `lidar_reacq_deg`（20°）；
+    3. 距离差 ≤ `lidar_reacq_dr`（0.90 m）。
+
+    `last_id` 还在就原样返回（优先黏住）。
+    """
+    p = p or DEFAULTS
+    if last_bearing is None or last_r is None:
+        return None
+    for c in (cands or []):
+        # 同一条（相机点名过的）轨迹：**允许 static** —— 人停下来等车是正常的，
+        # 一旦因为"静止"把它踢掉，现场就是"跟着跟着突然断开"。
+        if int(c.get('id', -1)) == int(last_id):
+            return c
+    best, best_cost = None, 1e9
+    for c in (cands or []):
+        if c.get('static'):
+            continue
+        db = abs(float(c['bearing']) - float(last_bearing))
+        dr = abs(float(c['r']) - float(last_r))
+        if db > math.radians(p['lidar_reacq_deg']) or dr > p['lidar_reacq_dr']:
+            continue
+        cost = dr + 0.3 * db          # 距离更可信：偏差相近时挑近的
+        if cost < best_cost:
+            best, best_cost = c, cost
+    return best
 
 
 def lidar_follow(bearing: float, rng: float, clear_hard: float,

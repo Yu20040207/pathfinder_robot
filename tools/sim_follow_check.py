@@ -130,10 +130,11 @@ def send_lost(points=None, lost_s=1.5, sel=1):
 
 
 def send_lidar(tracks):
-    """tracks = [(id, x, y)]，odom 系（本脚本 odom 位姿恒为原点，等于车体系）。"""
+    """tracks = [(id, x, y)] 或 [(id, x, y, static)]，odom 系（位姿恒为原点）。"""
     payload = {'tracks': [{'id': int(t[0]), 'x': float(t[1]), 'y': float(t[2]),
                            'vx': 0.0, 'vy': 0.0, 'age_s': 1.0, 'misses': 0,
-                           'cam': False, 'static': False}
+                           'cam': False,
+                           'static': bool(t[3]) if len(t) > 3 else False}
                           for t in (tracks or [])]}
     pub_l.publish(String(data=json.dumps(payload)))
 
@@ -332,6 +333,19 @@ spin_p2(1.5, box_x=0.42, box_h=0.55, tracks=[(7, 2.0, 0.0)])
 v, w = spin_p2(1.5, box_x=None, tracks=[(7, 2.0, 0.0)], points=[(0, 0.30)])
 results.append(('P2-E 接管时走廊0.3m→停',
                 abs(v) < 1e-6, f'v={v:.3f} {state["reason"]}'))
+
+# P2-F：雷达轨迹换号（实流里腿交叉会让 id 重生）→ 按位置续认，不许断
+spin_p2(1.5, box_x=0.42, box_h=0.55, tracks=[(7, 2.0, 0.0)])
+v, w = spin_p2(1.5, box_x=None, tracks=[(9, 2.02, 0.05)])   # id 7 → 9，位置几乎没变
+results.append(('P2-F 雷达换号→按位置续认',
+                str(state.get('src')) == 'lidar' and v > 0.05,
+                f'v={v:.3f} {state["reason"]} src={state.get("src")}'))
+
+# P2-G：同样的位置只有一条 static 轨迹（椅子）→ 不许被续认，应该停车
+v, w = spin_p2(1.5, box_x=None, tracks=[(11, 2.0, 0.0, True)])
+results.append(('P2-G 只剩家具(static)→不跟',
+                abs(v) < 1e-6 and str(state.get('src')) != 'lidar',
+                f'v={v:.3f} {state["reason"]} src={state.get("src")}'))
 
 ODOM_V['ok'] = True
 

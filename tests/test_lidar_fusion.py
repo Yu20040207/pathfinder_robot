@@ -141,3 +141,62 @@ def test_lidar_follow_speed_cap_below_chassis_limit():
     for deg in (-25, -10, 0, 10, 25):
         v, w, _r = lidar_follow(math.radians(deg), 2.2, BIG, BIG, BIG, BIG)
         assert abs(v) + abs(w) * p['track_m'] / 2.0 <= 0.30 + 1e-9
+
+
+# ------------------------------------------------- 轨迹换号后按位置续认
+# 2026-11-24 用户报"雷达跟着跟着突然断开"：实流里 leg_tracker 的 id 在
+# 腿交叉 / 两腿合并时会重生，旧写法只认固定 id，一换号就丢目标。
+from fwr_bringup.follow_core import reacquire_track  # noqa: E402
+
+
+def _tr(tid: int, bearing_deg: float, r: float, static: bool = False) -> dict:
+    return {'id': tid, 'bearing': math.radians(bearing_deg), 'r': r,
+            'static': static}
+
+
+def test_reacquire_keeps_same_id_first():
+    cands = [_tr(3, 2.0, 2.0), _tr(9, 1.0, 2.0)]
+    # 原来那条还在 → 直接用它，不去比距离
+    assert reacquire_track(cands, 0.0, 2.0, last_id=3)['id'] == 3
+
+
+def test_reacquire_after_id_changed_takes_nearest():
+    cands = [_tr(9, 3.0, 2.05), _tr(11, 18.0, 2.9)]
+    assert reacquire_track(cands, 0.0, 2.0, last_id=3)['id'] == 9
+
+
+def test_reacquire_rejects_static_furniture():
+    # 椅子不动 → leg_tracker 标 static → 不许被续认
+    cands = [_tr(5, 0.0, 2.0, static=True)]
+    assert reacquire_track(cands, 0.0, 2.0, last_id=3) is None
+
+
+def test_reacquire_rejects_big_bearing_jump():
+    # 方位差 40° > lidar_reacq_deg 20° → 不认（宁可不跟，也不跟错）
+    assert reacquire_track([_tr(9, 40.0, 2.0)], 0.0, 2.0) is None
+
+
+def test_reacquire_rejects_big_range_jump():
+    # 距离差 1.5 m > lidar_reacq_dr 0.90 m → 不认
+    assert reacquire_track([_tr(9, 0.0, 3.5)], 0.0, 2.0) is None
+
+
+def test_reacquire_without_history_is_none():
+    assert reacquire_track([_tr(9, 0.0, 2.0)], None, 2.0) is None
+    assert reacquire_track([_tr(9, 0.0, 2.0)], 0.0, None) is None
+
+
+def test_reacquire_empty_list():
+    assert reacquire_track([], 0.0, 2.0) is None
+
+
+def test_lidar_hold_long_enough_for_occlusion():
+    """续跟窗口至少 8 s：人从柱子/门后走过要能等回来（原 5 s 实测偏短）。"""
+    assert DEFAULTS['lidar_hold_s'] >= 8.0
+
+
+def test_reacquire_keeps_standing_person_same_id():
+    """人停下来等车 → leg_tracker 标 static；同一条被点名的轨迹必须继续跟。"""
+    cands = [_tr(7, 0.0, 1.8, static=True)]
+    got = reacquire_track(cands, 0.0, 1.8, last_id=7)
+    assert got is not None and got['id'] == 7
