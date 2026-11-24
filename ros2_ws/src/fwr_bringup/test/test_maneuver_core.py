@@ -378,3 +378,25 @@ def test_watchdog_never_acts_on_stale_state():
     assert "and self._ever_active.get(name) and fresh" in src
     assert "elif st == 'active':" in src, '已是 active 时要等输出再判'
     assert 'self._state_at.clear()' in src, '杀进程后必须作废旧状态'
+
+
+def test_watchdog_activates_when_state_unknown():
+    """状态查不准时必须先试 activate，不能无脑 configure（2026-11-24 现场）。
+
+    负载高时 `ros2 lifecycle get` 会 10 s 超时 → `_state_of` 返回 'unknown'，
+    旧代码据此无条件 configure；可节点其实在 inactive，
+    inactive→configure 是非法转换 → 连续 193 次补激活全失败、
+    车一直显示「安全链等待中」。手动 `lifecycle set ... activate` 秒回成功。
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[4] / 'tools' / 'chain_watchdog.py').read_text()
+    assert "if st in ('unconfigured', 'finalized', 'unknown'):" in src
+    assert "if not self._cli(name, 'activate'):" in src, \
+        '状态不可信时必须先试探 activate'
+    # 三级杀进程之前必须复核真实状态，避免把刚 respawn 活过来的监控再杀一次
+    assert 'st_now = self._state_of(name)' in src
+    assert '实际已 active 且输出恢复 → 跳过三级' in src
+    # 状态缓存必须周期刷新（原来只在启动时 seed 一次 → 永远拿旧值判断）
+    assert 'if now - self._state_poll_at > 10.0:' in src
+    # 曾经 active 过之后掉线，20 s 就该恢复，不用再等完整启动宽限
+    assert 'grace_fast = 20.0' in src

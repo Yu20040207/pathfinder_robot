@@ -109,6 +109,9 @@ class Watchdog(Node):
                 (lambda msg, name=_m: self._on_transition(name, msg)), 10)
         self._state_seed_at = 0.0
         self._state_inflight = set()
+        # 2026-11-24：周期性重查 + inflight 超时（响应丢了不能永远占着）
+        self._state_poll_at = 0.0
+        self._state_inflight_at = {}
         # 2026-11-23：每次状态结果的时间戳。_health 里原来是"发起异步查询后
         # 立刻读 _cm_state"，读到的是**上一次**的旧值 —— 节点刚 respawn 成
         # active 时旧值还是 inactive → 误判 → 杀进程 → 再误判（死循环）。
@@ -131,7 +134,9 @@ class Watchdog(Node):
         self.create_timer(1.0, self._check)
         self.declare_parameter('out_silent_s', 10.0)
         # 2026-11-22：监控"一直不是 active"也要管。见 _watch_inactive()。
-        self.declare_parameter('inactive_grace_s', 90.0)
+        # 2026-11-24：90 s → 45 s。启动期正常配置约 35~45 s，
+        # 45 s 足够覆盖；再久就是"卡住了"，用户不该干等一两分钟。
+        self.declare_parameter('inactive_grace_s', 45.0)
         self._inactive_since = {}
         self._inactive_retry = {}
         self.create_timer(5.0, self._health)
@@ -183,9 +188,15 @@ class Watchdog(Node):
         client = self._state_clients.get(name)
         if client is None or not client.service_is_ready():
             return False
+        now = time.monotonic()
         if name in self._state_inflight:
-            return True
+            # 响应丢了（服务重启/端点陈旧）时 future 永远不回调 →
+            # 这里给 15 s 兜底，否则这个节点再也不会被重新查询。
+            if now - self._state_inflight_at.get(name, 0.0) < 15.0:
+                return True
+            self._state_inflight.discard(name)
         self._state_inflight.add(name)
+        self._state_inflight_at[name] = now
         try:
             fut = client.call_async(GetState.Request())
             fut.add_done_callback(
@@ -238,7 +249,7 @@ class Watchdog(Node):
         try:
             out = subprocess.run(
                 ['ros2', 'lifecycle', 'get', '/' + name],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True, text=True, timeout=15,
                 env=dict(os.environ)).stdout.strip()
         except Exception:
             return 'unknown'
@@ -295,12 +306,32 @@ class Watchdog(Node):
         第一次查变换就失败（外推错误），所以两步之间要留 3 秒。
         """
         st = self._state_of(name)
-        if st in ('unconfigured', 'unknown', 'finalized'):
-            self._cli(name, 'configure')
-            time.sleep(gap)
-            st = self._state_of(name)
-        if st == 'inactive':
-            self._cli(name, 'activate')
+        # 2026-11-24（现场：连续 193 次补激活全失败、车一直「安全链等待中」）：
+        # 状态查询在负载高的时候会 10 s 超时 → `_state_of` 返回 'unknown'，
+        # 旧代码据此**无条件 configure**，而节点其实处在 **inactive**，
+        # inactive→configure 是非法转换 → 永远失败、永远重试，activate 一次都没试过。
+        # 现场对照：手动 `ros2 lifecycle set /collision_monitor_forward activate`
+        # 秒回 `Transitioning successful`、状态立刻 active。
+        # 现在：状态不可信时**先试探 activate**（inactive 下直接成立），
+        # 只有 activate 被拒（＝真的 unconfigured）才 configure + 再 activate。
+        if st in ('unconfigured', 'finalized', 'unknown'):
+            act_ok = self._cli(name, 'activate')
+            if not act_ok:
+                # 2026-11-24：状态查不准（unknown）时先试探 activate；
+                # 被拒才说明真的 unconfigured，再 configure + activate。
+                self.get_logger().warn(
+                    f'{name} 试探 activate 被拒（可能 unconfigured）→ configure')
+                self._cli(name, 'configure')
+                time.sleep(gap)
+                act_ok = self._cli(name, 'activate')
+            if not act_ok:
+                self.get_logger().error(
+                    f'{name} activate 命令失败（CLI 超时/ROS 环境问题？）')
+            time.sleep(max(gap, 8.0))     # 激活后给监控 8 秒转起来再判定
+        elif st == 'inactive':
+            if not self._cli(name, 'activate'):
+                self.get_logger().error(
+                    f'{name} activate 命令失败（CLI 超时/ROS 环境问题？）')
             time.sleep(max(gap, 8.0))     # 激活后给监控 8 秒转起来再判定
         elif st == 'active':
             # 2026-11-23：**已经是 active 时不能立刻用 2 s 输出窗口判死**。
@@ -308,7 +339,12 @@ class Watchdog(Node):
             # False → 判"二级恢复失败" → 三级再杀一次（死亡螺旋的一环）。
             time.sleep(max(gap, 8.0))
             st = self._state_of(name)
-        return self._out_fresh()
+        fresh = self._out_fresh()
+        if not fresh:
+            self.get_logger().warn(
+                f'{name} 恢复后输出仍静默（最后输出 {time.monotonic() - self._last_out:.1f}s 前，'
+                f'输入 {time.monotonic() - self._last_in:.1f}s 前）')
+        return fresh
 
     def _restart(self, name):
         """不看状态，直接"停->起"，然后用输出是否恢复来判定。
@@ -351,6 +387,9 @@ class Watchdog(Node):
         if self._dry:
             return
         grace = float(self.get_parameter('inactive_grace_s').value)
+        # 本次运行已经见过 active（=栈是活的）：之后再掉线就是故障，
+        # 不用再给完整的启动宽限，20 s 就恢复。
+        grace_fast = 20.0
         for m in MONITORS:
             st = self._cm_state.get(m)
             if st == 'active':
@@ -361,7 +400,8 @@ class Watchdog(Node):
                 # 状态还没查到：交给 _seed_state，这里不猜
                 continue
             since = self._inactive_since.setdefault(m, now)
-            if now - since < grace:
+            g = grace_fast if self._ever_active.get(m) else grace
+            if now - since < g:
                 continue
             if now - self._last_fix.get(m, 0.0) < self._fix_cooldown_s:
                 continue
@@ -370,7 +410,7 @@ class Watchdog(Node):
             self._inactive_since[m] = now
             self._last_fix[m] = now
             self.get_logger().warn(
-                f'{m} 已是 {st or "unknown"} 超过 {grace:.0f}s（第 {n}/3 次）'
+                f'{m} 已是 {st or "unknown"} 超过 {g:.0f}s（第 {n}/3 次）'
                 f' → 补 configure/activate（只补激活，不动车）')
             if self._revive(m, gap=3.0):
                 self.get_logger().info(f'{m} 补激活成功，安全链应已恢复')
@@ -456,8 +496,21 @@ class Watchdog(Node):
         # 所以一级/二级（走服务）必然失败；实测只有"换一个进程"才恢复。
         # launch 里给这两个节点都开了 respawn，杀掉后约 3+2 s 自动拉起，
         # 比整栈重启（40~60 s）快一个数量级，也不会中断导航/定位。
-        self.get_logger().warn(
-            f'{name} 二级恢复失败 → 三级：杀掉监控进程让 launch respawn')
+        # 2026-11-24：二级"失败"可能只是状态查不准（unknown）。
+        # 杀之前先用 CLI 确认一遍：真 active 且输出已恢复就别动它，
+        # 否则会把刚从 respawn 里活过来的监控再杀一次（04:46:30 现场）。
+        st_now = self._state_of(name)
+        if st_now == 'active':
+            time.sleep(6.0)
+            if self._out_fresh():
+                self.get_logger().info(
+                    f'{name} 实际已 active 且输出恢复 → 跳过三级')
+                return
+            self.get_logger().warn(
+                f'{name} 状态 active 但输出仍静默 → 三级：杀掉监控进程')
+        else:
+            self.get_logger().warn(
+                f'{name} 二级恢复失败 → 三级：杀掉监控进程让 launch respawn')
         self._kill_safety_processes()
         time.sleep(10.0)
         if self._revive(name):
@@ -645,6 +698,16 @@ class Watchdog(Node):
         # lifecycle_manager 放弃激活 → 节点永远 inactive。
         # 而下面两个早退分支（"还没见过 active"、"不是 active 时静默正常"）
         # 都会直接 return，谁也不去补 activate → 过滤后速度恒无 → chain=false。
+        # 2026-11-24（真凶）：状态缓存原来**只在启动时 seed 一次**，之后永不刷新。
+        # 现场：09:42 新看门狗 seed 到 'active'，09:43 我手动 deactivate 了监控，
+        # 它一直以为还是 active → `_watch_inactive` 永不触发 → 实际 inactive 十几分钟
+        # 也没人管（手机端一直「安全链等待中」）。反过来也一样：旧缓存说 inactive，
+        # 就算后来补激活成功也看不见，于是 193 次「补激活失败」全在打空气。
+        # 现在每 10 s 用节点内客户端异步重查一次（毫秒级、无子进程）。
+        if now - self._state_poll_at > 10.0:
+            self._state_poll_at = now
+            for m in MONITORS:
+                self._poll_state(m)
         self._watch_inactive(now)
         # 状态未知就每 15 秒补查一次（放到线程里，避免 CLI 卡住定时器）
         if any(v is None for v in self._cm_state.values()) and \

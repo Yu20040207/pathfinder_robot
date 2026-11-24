@@ -11499,3 +11499,58 @@ ros2 service call /localization/reseed std_srvs/srv/Trigger
 
 ### 下一步
 用户刷新看效果；若觉得顶栏徽标太小/太大，只改 `#batteryWarn` 的 `font-size`/`padding` 两行。
+
+## 2026-11-24 09:55 · 安全链「重启导航后要等很久、重试很多次都不行」的真因
+
+### 会话目标
+用户：「每次重启导航模式的安全链都要等待很久，检查了很多次都不行，看一下问题出在哪」。
+
+### 现场数据（今天）
+```
+inactive 告警 210 次 / 补 configure 196 次 / 二级恢复 64 次 / 三级杀进程 32 次
+熔断（5 分钟杀满 4 次）2 次
+「连续 193 次补激活失败 → 请人工检查」   ← 一路空转，车一直显示「安全链等待中」
+```
+
+### 三个叠加的 bug（都在 `tools/chain_watchdog.py`）
+1. **状态缓存永不刷新**（真凶）：`_seed_state()` 只在启动时查一次，
+   之后 `_cm_state` 再也不更新。于是：
+   - 真实状态变了（监控掉线/被手动 deactivate），看门狗仍以为 `active` → **永远不动**；
+   - 或者缓存留在 `inactive`，后来补激活成功了它也看不见 → 一路升级去杀进程。
+   现场可见：09:42 新看门狗 seed 到 `active`，09:43 我把监控 `deactivate`，
+   它十几分钟毫无反应（手机端一直「安全链等待中」）。
+2. **状态不可信时无脑 configure**：负载高时 `ros2 lifecycle get` 10 s 超时 →
+   `_state_of` 返回 `unknown` → 旧代码直接 `configure`；而节点实际在 **inactive**，
+   `inactive→configure` 是**非法转换** → 永远失败，`activate` **一次都没试过**。
+   反证：手动 `ros2 lifecycle set /collision_monitor_forward activate`
+   1.5 s 返回 `Transitioning successful` → `active [3]`、输出立刻 20.4 Hz。
+3. **三级杀进程前不复核状态**：二级"失败"可能只是状态查不准，
+   结果把刚从 respawn 里活过来、本来正常的监控再杀一次
+   （04:45:55「Managed nodes are active」→ 04:46:15 判无效 → 04:46:30 杀掉）。
+
+### 修复
+- **每 10 s 异步重查状态**（节点内 GetState 客户端，毫秒级、无子进程），
+  并给 inflight 加 **15 s 超时**（响应丢了不能永远占着）
+- `_revive()`：状态 `unconfigured/finalized/unknown` 时**先试探 activate**，
+  被拒才 `configure + activate`（inactive 下直接成立）
+- `_fix()` 三级：杀之前用 CLI 复核，**真 active 且输出恢复 → 跳过三级**
+- 宽限 `inactive_grace_s` **90 → 45 s**；本进程见过 active 后再掉线只用 **20 s**
+- 诊断日志：activate 命令失败、恢复后输出仍静默时打印
+  `最后输出 X s 前，输入 Y s 前`
+
+### 已验证（实机，2026-11-24 09:49~09:53）
+```
+09:51:0x  手动 deactivate → inactive [2]
+09:51:53  看门狗：collision_monitor_forward 已是 inactive 超过 45s（第 1/3 次）→ 补激活
+09:53     状态 active，/cmd_vel_auto_forward_filtered = 20.2 Hz
+          MQTT state: chain = True（手机端应显示安全链就绪）
+```
+早前手动激活同样 1.5 s 生效、输出 20.4 Hz。
+`pytest` → **681 passed**（新增 `test_watchdog_activates_when_state_unknown`）。
+
+### 未验证 / 遗留
+- **监控为什么会掉到 inactive** 这个源头还在：导航栈刚起时首次 `activate` 会因
+  TF 未就绪（`laser_front→base_footprint` 外推）失败，`lifecycle_manager` 随即放弃。
+  现在看门狗能在 ~45~65 s 内补回来，但这 45 s 就是用户感觉"要等很久"的部分。
+  后续可选：给 `lifecycle_manager_collision` 加激活重试，或把监控激活延后 5~10 s。
+- 手机端实测未做（链已 `chain=True`，需用户切导航确认）
