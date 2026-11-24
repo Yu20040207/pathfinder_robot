@@ -11937,3 +11937,14 @@ inactive 告警 210 次 / 补 configure 196 次 / 二级恢复 64 次 / 三级�
 - ⚠️ `#navTopWrap` 是 `pointer-events: none`，面板必须自己 `pointer-events: auto`，
   否则右上角 ✕ 点不动（顺手加注释钉住）。
 - 部署：云端 md5 `0fe1bbfc…`（与本地一致；界面效果待用户确认）；纯前端改动，未跑 Python 测试。
+
+### 2026-11-24 11:56 · 导航地图画布从绿色状态行下面开始（用户要求）
+- 现场反馈：导航模式下地图**顶部一段被顶部提示条压住**。现在画布整体下移到绿色状态行下方。
+- 做法（不写死像素）：`#navView` 带 CSS 变量 `--navTopH`，
+  `#mapCanvas` = `margin-top: var(--navTopH)` + `height: calc(100% - var(--navTopH))`；
+  `layoutNavTop()` 量 `#navStatus` 的 `getBoundingClientRect().bottom` 换算成高度（+4 px 缝）。
+- 触发：进入/切换导航视图（`applyMode`，且必须在 `navView` 显示之后调用）、
+  `window resize`、以及每 1.5 s 兜底一次（绿色那行文字长短变化会换行变高）。
+- ⚠️ 两个坑已写进 AGENTS.md：① 不能量 `#navTopWrap` 总高（摄像头画面也在里面，会挤没地图）；
+  ② 隐藏状态下量到 0。
+- 部署：云端 md5 `f49ded05…`（与本地一致）；界面效果待用户确认。

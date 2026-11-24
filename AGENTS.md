@@ -114,6 +114,13 @@
   `#navCamPane`（盖在地图上的悬浮层，`z-index 40`，地图编辑器 60 在它上面）。
   复用同一路 MJPEG `/video`，但**独立一个 `<img>`**（手动模式那块在布局流里，不能共用）。
   切出导航模式会在 `applyMode()` 里自动关掉；断流自愈 / 切后台断流与手动模式同款。
+  画面本体挂在 `#navTopWrap` 里（绿色状态行下面），**不用写死的 top**。
+- 🗺 **导航地图画布从绿色状态行下面开始画**（2026-11-24 用户要求，原来被顶部提示条压住）：
+  `#navView` 用 CSS 变量 `--navTopH`，`#mapCanvas` = `margin-top: var(--navTopH)` +
+  `height: calc(100% - var(--navTopH))`，值由 `layoutNavTop()` **实时量 `#navStatus` 底边**
+  得来（提示文字换行变高时自动跟），切换模式/窗口 resize/每 1.5 s 各校验一次。
+  ⚠️ 只量 `#navStatus` 底边，**别量 `#navTopWrap` 高度** —— 摄像头画面也挂在这个容器里，
+  量整体会把地图挤没；调用 `layoutNavTop()` 必须在 `navView` 显示**之后**（隐藏时量到 0）。
 - 实机 RViz 的“两点导航”面板：**单击一次**表示从当前位置前往点击点（`/explore/start_fixed_goal`）；**连续点击两次**表示先到起点再到终点（`/explore/start_two_point_goal`）。现场人员点击“开始导航”时面板自行开启 `motion_enabled`、等待 `/base/ready`、申请 `/base/arm_auto`，然后发送目标；点击“停止导航”或任务结束/失败时请求停机并关闭运动门。无需另开终端运行授权脚本。该按钮流程已构建和通过单元测试，**尚未由现场人员验证完整实车按钮操作**；最新证据见 `docs/AGENT_LOG.md` 末尾。代理不得代替用户点击按钮或打开运动门，除非本次会话另有明确授权。
 
 

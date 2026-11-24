@@ -351,8 +351,11 @@
   #login .linkBtn { width: 100%; margin-top: 12px; padding: 8px; border: 0;
                     background: none; color: #6f9cbd; font-size: 13px; letter-spacing: 1px; }
   /* 导航视图 */
-  #navView { height: 100%; position: relative; }
-  #mapCanvas { width: 100%; height: 100%; display: block; touch-action: none; background: #0b0f14; }
+  /* 2026-11-24 用户要求：地图画布从绿色状态行**下面**开始，不被顶部提示条压住。
+     提示条是绝对定位浮层、高度随文字换行变化，所以 --navTopH 由 JS 实时量（layoutNavTop）。 */
+  #navView { height: 100%; position: relative; --navTopH: 0px; }
+  #mapCanvas { width: 100%; height: calc(100% - var(--navTopH)); margin-top: var(--navTopH);
+               display: block; touch-action: none; background: #0b0f14; }
   .navBar { position: absolute; left: 10px; right: 10px; bottom: 10px; display: flex;
             gap: 8px; }
   .navBar button { flex: 1; padding: 12px 6px; border-radius: 10px; font-size: 14px;
@@ -2138,6 +2141,8 @@ function applyMode(mode) {
   $('manualView').classList.toggle('hidden', nav || isFollow);
   if (mode !== 'nav' && typeof closeNavCam === 'function') closeNavCam();
   $('navView').classList.toggle('hidden', !nav);
+  // 地图画布要贴着绿色状态行下面（必须在 navView 显示**之后**量，否则量到 0）
+  if (nav && typeof layoutNavTop === 'function') layoutNavTop(true);
   if ($('followView')) $('followView').classList.toggle('hidden', !isFollow);
   if ((nav || isFollow) && typeof closeCam === 'function') closeCam();  // 离开手动模式就断流
   // 跟随模式：进来就拉流 + 开始轮询人体框；离开就彻底停（否则后台还在每 200 ms 请求）
@@ -3132,7 +3137,33 @@ function resizeCanvas() {
   canvas.height = Math.max(1, Math.round(r.height * dpr));
   render();
 }
-window.addEventListener('resize', () => { if (!$('navView').classList.contains('hidden')) resizeCanvas(); });
+window.addEventListener('resize', () => {
+  if (!$('navView').classList.contains('hidden')) { layoutNavTop(true); resizeCanvas(); }
+});
+
+/* 2026-11-24 用户要求：导航模式下**地图从绿色状态行下面开始画**，不让顶部提示条压住地图。
+   提示条（#navInfo + #navStatus）是绝对定位浮层，高度会随文字换行变化，
+   所以这里每次实时量「绿色那行的底边」，换算成画布的上边距（--navTopH）。
+   ⚠️ 只量 #navStatus 的底边，**不要量 #navTopWrap 的高度**：摄像头画面也挂在这个容器里，
+   一开画面就会把地图挤没。 */
+let navTopH = -1;
+function layoutNavTop(force) {
+  const navViewEl = $('navView'), st = $('navStatus'), cv = $('mapCanvas');
+  if (!navViewEl || !st || !cv) return;
+  if (navViewEl.classList.contains('hidden')) return;
+  const r = st.getBoundingClientRect();
+  const base = navViewEl.getBoundingClientRect();
+  const h = Math.max(0, Math.round(r.bottom - base.top + 4));   // +4 留一条缝
+  if (!force && h === navTopH) return;
+  navTopH = h;
+  navViewEl.style.setProperty('--navTopH', h + 'px');
+  resizeCanvas();
+}
+// 绿色状态行文字长度会变（切地图/切模式/安全链），换行就变高 → 定期对一下
+setInterval(() => {
+  const v = $('navView');
+  if (v && !v.classList.contains('hidden')) layoutNavTop();
+}, 1500);
 
 const DEFAULT_VIEW_METERS = 14;   // 切换导航模式时默认显示约 14 米宽
 
