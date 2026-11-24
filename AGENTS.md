@@ -129,8 +129,9 @@
   两条子行都是 **`white-space:nowrap` + `text-overflow:ellipsis`，强制各占一行**（用户明确要求，
   不许换行——换行会把整块顶高、地图跟着跳）。绿字行**不显示位置坐标**（`updateNavStatus()`
   只拼 `状态 · 地图 · 授权`，坐标看地图车标即可）。
-  摄像头画面 `#navCamPane` 同样**直角、无边框无阴影**、宽度顶到两边，关闭按钮 `#navCamClose`
-  也是直角小块（左上角贴边）。
+  摄像头画面 `#navCamPane` 同样**直角、无边框无阴影**、宽度顶到两边。
+  ⚠️ **画面上没有 ✕ 关闭按钮了**（2026-11-24 用户要求删掉）：开关都靠右侧那颗 📷
+  `#navCamBtn`——点一下开、再点一下关（`onclick` 里按 `navCamWanted` 分流）。
   📷 **打开画面时画面移到最上面、两行提示浮在画面上**（用户要求）：`#navCamPane{order:0}`
   排在提示条(1)/画布(2) 前面，同时给 `#navView` 加 `.cam-open`，
   ⚠️ **`#navCamPane` 必须是 `#navView` 的直接子元素**（原来的写法塞在 `#navTopWrap` 里，

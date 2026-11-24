@@ -12017,3 +12017,11 @@ inactive 告警 210 次 / 补 configure 196 次 / 二级恢复 64 次 / 三级�
   geckodriver 同时只允许 **1 个 session**，重跑前先 `pkill -x geckodriver`（别用 `pkill -f`，
   会把执行命令的 shell 自己杀掉）。
 - 部署：云端 md5 `8006a4e8…`（与本地一致）；效果待用户确认。
+
+### 2026-11-24 13:10 · 删掉摄像头画面右上角的 ✕（改用 📷 图标开关）
+- 用户要求：画面右上角的 ✕ 删掉，现在点摄像头图标就能关。
+- 改动（`cloud/web/car.html`）：
+  1. 删除 `<button id="navCamClose">`；连带删掉它的 CSS 块和 `onclick` 绑定；
+  2. `#navCamBtn.onclick` 本来就是按 `navCamWanted` 分流（开/关），不用改，现在成为唯一开关；
+  3. 既然没有 ✕ 了，撤销上一版给两条文字加的 `padding-left/right:46px`（恢复整行宽度居中）。
+- 部署：云端 md5 `1038b73f…`（与本地一致）。
