@@ -114,14 +114,29 @@
 **回放调参**：`ros2 param set /leg_tracker pair_gap_max 0.55` 之类即时生效（节点每帧读 `self.p`），
 找到合适值后再写回 `DEFAULTS` 并补单测。
 
-## 6. P2（下一步，需用户批准后做）
+## 6. P2 相机 + 雷达融合（2026-11-24 已实现，待实机验证）
 
-1. `birth_requires_cam: True`（新目标必须相机背书）；
-2. `person_follower` 增加四状态：`cam / fused / lidar / lost`；
-   - `lidar` 状态：相机丢、雷达在 → 继续转向目标方位（≤5 s）；
-   - 转身前用 360° 判净空（车尾角点扫掠 0.315 m + `door_clear_margin_m 0.10`）；
-3. 黑盒回归：现有 22 场景 + 新增 4 个雷达场景（人绕侧/绕后/门后消失/家具反例）；
-4. 视觉冲突时**信相机**（方位差 > 25° 时用相机）。
+**核心规矩：雷达不许自己起跟。** 只有"刚才被相机点名过"的同一条雷达轨迹，
+在相机丢人之后最多续跟 `lidar_hold_s 5 s`；从没被相机看到的轨迹（家具、路人）一律不跟。
+
+| 改动 | 内容 |
+| --- | --- |
+| `follow_core.cam_bearing()` | 框中心 → 方位角（±35°，左正，与雷达同号） |
+| `follow_core.pick_lidar_track()` | 用相机方位认领雷达轨迹（25° 门限，黏住上次 id） |
+| `follow_core.lidar_follow()` | 只有方位+距离的控制律：1.20 m 停 / 1.55 m 起走 / 3 m 外只转 / **绝不后退** |
+| `person_follower` | 订阅 `/robot/lidar/persons`；`/odom` 存位姿把轨迹换算到车体系；只在 `target_lost/no_target/target_gone` 时接管 |
+| `/follow/state` | 新增 `src`（cam/lidar/none）、`lidar_id`、`lidar_r`、`lidar_age` |
+
+**四个状态**：`cam`（相机看着，走原来的框高逻辑）→ `lidar`（相机丢、雷达同一条在，≤5 s）
+→ `lost`（都丢了，`lost_stop_s 0.8` 停）；`fused` 暂未单独开状态（相机在时仍以框为准，
+雷达只做认领，避免改动已调好的框高手感）。
+
+**安全优先级不变**：门口出门（`gate_exit`）、原地找人（`search`）不被雷达覆盖；
+车头走廊 0.35 m 有障碍照样停；雷达接管时**不后退**。
+
+**验证**：`tests/test_lidar_fusion.py` 18 例；黑盒 `tools/sim_follow_check.py` **27 场景全 PASS**
+（原 22 + P2-A 相机丢人续跟 / P2-B 没被点名不跟 / P2-C 雷达也丢停车 /
+P2-D 人在车后原地转身 / P2-E 接管时走廊 0.3 m 照样停）。
 
 ## 7. 不做 / 做不到
 

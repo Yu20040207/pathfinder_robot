@@ -44,6 +44,7 @@ node = Node('follow_check')
 pub_p = node.create_publisher(String, '/robot/vision/persons', 10)
 pub_s = node.create_publisher(LaserScan, '/scan_merged', qos_profile_sensor_data)
 pub_e = node.create_publisher(String, '/follow/enable', 10)
+pub_l = node.create_publisher(String, '/robot/lidar/persons', 10)   # P2 雷达轨迹
 
 pub_o = node.create_publisher(Odometry, '/odom', 10)
 state = {'v': 0.0, 'w': 0.0, 't': 0.0, 'reason': '', 'nomotion': False}
@@ -68,6 +69,8 @@ def on_follow_state(msg):
     state['reason'] = data.get('reason', state.get('reason', ''))
     state['nomotion'] = bool(data.get('nomotion'))
     state['osc_gain'] = data.get('osc_gain')
+    state['src'] = data.get('src')
+    state['lidar_id'] = data.get('lidar_id')
 
 
 # 必须等 on_follow_state 定义之后再订阅（模块是自上而下执行的）
@@ -124,6 +127,41 @@ def send_lost(points=None, lost_s=1.5, sel=1):
                                           'lost_s': lost_s})))
     pub_s.publish(make_scan(points or []))
     pub_e.publish(String(data=json.dumps({'on': True})))
+
+
+def send_lidar(tracks):
+    """tracks = [(id, x, y)]，odom 系（本脚本 odom 位姿恒为原点，等于车体系）。"""
+    payload = {'tracks': [{'id': int(t[0]), 'x': float(t[1]), 'y': float(t[2]),
+                           'vx': 0.0, 'vy': 0.0, 'age_s': 1.0, 'misses': 0,
+                           'cam': False, 'static': False}
+                          for t in (tracks or [])]}
+    pub_l.publish(String(data=json.dumps(payload)))
+
+
+def spin_p2(sec, box_x=None, box_h=0.55, points=None, sel=1,
+            tracks=None, enable=True):
+    """P2 混合帧：相机框（box_x=None 表示"相机看不到人"）+ 雷达轨迹 + 扫描。"""
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < sec:
+        if box_x is None:
+            pub_p.publish(String(data=json.dumps(
+                {'w': 640, 'h': 480, 'persons': [], 'sel': sel,
+                 'tracking': False, 'lost_s': 1.5})))
+        else:
+            box = {'id': sel, 'x': box_x, 'y': 0.25, 'w': 0.14, 'h': box_h,
+                   's': 0.9}
+            pub_p.publish(String(data=json.dumps(
+                {'w': 640, 'h': 480, 'persons': [box], 'sel': sel,
+                 'tracking': True, 'lost_s': 0.0})))
+        send_lidar(tracks)
+        pub_s.publish(make_scan(points or []))
+        if enable:
+            pub_e.publish(String(data=json.dumps({'on': True})))
+        ODOM_V['v'] = 0.25
+        send_odom()
+        rclpy.spin_once(node, timeout_sec=0.02)
+    rclpy.spin_once(node, timeout_sec=0.05)
+    return state['v'], state['w']
 
 
 def spin_lost(sec, **kw):
@@ -262,6 +300,39 @@ ODOM_V['ok'] = False
 v, w = spin(2.6, box_x=0.42, box_h=0.55)
 results.append(('P 车不动 → 报警', bool(state.get('nomotion')) and v > 0.05,
                 f'v={v:.3f} nomotion={state.get("nomotion")}'))
+# —— P2 相机 + 雷达融合（2026-11-24）——
+# 用户要求「人绕到车侧/车后仍要跟」：相机视场 70° 看不到侧面，靠雷达续跟。
+spin_p2(2.0, box_x=0.42, box_h=0.55, tracks=[(7, 2.0, 0.0)])     # 相机点名 + 雷达同一条
+v, w = spin_p2(1.5, box_x=None, tracks=[(7, 2.0, 0.05)])         # 相机丢了，雷达还在
+results.append(('P2-A 相机丢人→雷达续跟',
+                str(state.get('src')) == 'lidar' and v > 0.05
+                and str(state['reason']).startswith('lidar'),
+                f'v={v:.3f} w={w:.3f} {state["reason"]} src={state.get("src")}'))
+
+# 从没被相机点名过（sel=-1）的轨迹**绝不能**起跟
+v, w = spin_p2(2.0, box_x=None, sel=-1, tracks=[(9, 2.0, 0.0)])
+results.append(('P2-B 没被相机点名→不跟',
+                abs(v) < 1e-6 and state.get('src') != 'lidar',
+                f'v={v:.3f} {state["reason"]} src={state.get("src")}'))
+
+# 相机丢 + 雷达轨迹也没了 → 停车（不留"幽灵目标"）
+v, w = spin_p2(1.5, box_x=None, tracks=[])
+results.append(('P2-C 雷达也丢→停车',
+                abs(v) < 1e-6, f'v={v:.3f} {state["reason"]}'))
+
+# 人绕到车后（雷达 171°）→ 原地转身对准，不前进
+spin_p2(1.5, box_x=0.42, box_h=0.55, tracks=[(7, 2.0, 0.0)])
+v, w = spin_p2(2.0, box_x=None, tracks=[(7, -2.0, 0.30)])
+results.append(('P2-D 人在车后→原地转身',
+                state['reason'] == 'lidar_face' and abs(v) < 1e-6 and w > 0.2,
+                f'v={v:.3f} w={w:.3f} {state["reason"]}'))
+
+# 雷达接管期间，车头走廊 0.30 m 有障碍 → 照样停（安全优先级最高）
+spin_p2(1.5, box_x=0.42, box_h=0.55, tracks=[(7, 2.0, 0.0)])
+v, w = spin_p2(1.5, box_x=None, tracks=[(7, 2.0, 0.0)], points=[(0, 0.30)])
+results.append(('P2-E 接管时走廊0.3m→停',
+                abs(v) < 1e-6, f'v={v:.3f} {state["reason"]}'))
+
 ODOM_V['ok'] = True
 
 t0 = time.monotonic()

@@ -109,6 +109,22 @@ DEFAULTS = {
     'back_slow_m': 0.60,    # 0.60 m 内开始减速后退
     'lost_stop_s': 0.8,
     'lost_abort_s': 3.0,
+    # —— P2 相机 + 雷达融合（2026-11-24）——
+    # 相机看不到人时（人绕到车侧/车后），靠雷达把"这一个人"续跟一段时间。
+    # ⚠️ 安全铁律：**雷达不许自己起跟**。只有刚才被相机点名的人（同一个雷达 id）
+    # 还在，才允许接管；从没被相机看到过的轨迹一律不跟（家具/路人）。
+    'lidar_hold_s': 5.0,        # 相机丢掉后，雷达最多续跟这么久
+    'lidar_fresh_s': 0.5,       # 雷达轨迹多久没更新就算过期（10 Hz 扫描，0.5 s 够宽）
+    'lidar_assoc_deg': 25.0,    # 相机看到人时，用它对准雷达轨迹（方位差上限）
+    'cam_hfov_deg': 70.0,       # 相机水平视场（HP60C 实测约 70°），框中心 → 方位角
+    'lidar_stop_m': 1.20,       # 雷达目标近到这个距离 → 停（相当于"框 85%"）
+    'lidar_resume_m': 1.55,     # 停过之后退到这么远才重新走（迟滞 35 cm）
+    'lidar_far_m': 3.00,        # 超过这个距离只转不追（看不清是腿还是家具）
+    'lidar_face_rad': 0.50,     # 目标偏离车头超过 29° → 原地转向对准，不前进
+    'lidar_bearing_deadband': 0.05,   # ±3° 不转（雷达有抖动）
+    'lidar_kp': 1.8,            # 方位误差 → 角速度
+    'lidar_wmax': 0.42,         # 雷达接管时的转向上限（与跟框 steer_wmax 一致）
+    'lidar_vmax': 0.22,         # 雷达接管时的前进上限（没相机辅助，保守一点）
 }
 
 
@@ -277,6 +293,102 @@ def decide(person, lost_s: float, clear_hard: float, clear_slow: float,
         v = min(v, q['vmax'] * 0.65)     # 原来 0.5 → 0.65，减速差别那么狠
         return v, w, 'obstacle_slow', box_h
     return v, w, 'following', box_h
+
+
+# --------------------------------------------------------------------------
+# P2：相机 ↔ 雷达融合（2026-11-24）
+# --------------------------------------------------------------------------
+
+def cam_bearing(cx: float, p: dict | None = None) -> float:
+    """画面归一化横坐标 ``cx``（0=左、1=右）→ 车头坐标系方位角（rad，左正）。
+
+    符号必须和雷达一致：+ 表示目标在车**左**侧，这样两者能直接比较、也能共用
+    ``steer``/``lidar_follow`` 的转向号。画面 x 增大向右 → 方位角为负。
+    """
+    q = dict(DEFAULTS if p is None else p)
+    half = math.radians(float(q['cam_hfov_deg'])) / 2.0
+    return -(float(cx) - 0.5) * 2.0 * half
+
+
+def pick_lidar_track(cands, bearing: float, last_id: int = -1,
+                     p: dict | None = None):
+    """在雷达轨迹里挑出"相机看到的这个人"。
+
+    ``cands`` 每项需要 ``id`` / ``bearing``（rad，车头系，左正）/ ``r``（m）。
+
+    规则：
+      1. 方位差必须在 ``lidar_assoc_deg`` 内（默认 25°）；
+      2. 距离在 0.4~4.0 m（更近是车身，更远看不清）；
+      3. **上次认领过的 id 优先**（黏住，避免在两腿/家具之间来回跳）；
+      4. 否则取方位差最小的。
+    返回挑中的条目或 ``None``。
+    """
+    q = dict(DEFAULTS if p is None else p)
+    gate = math.radians(float(q['lidar_assoc_deg']))
+    ok = [c for c in (cands or [])
+          if 0.4 <= float(c.get('r', 0.0)) <= 4.0
+          and abs(float(c.get('bearing', 0.0)) - bearing) <= gate]
+    if not ok:
+        return None
+    for c in ok:
+        if int(c.get('id', -1)) == int(last_id):
+            return c
+    return min(ok, key=lambda c: abs(float(c.get('bearing', 0.0)) - bearing))
+
+
+def lidar_follow(bearing: float, rng: float, clear_hard: float,
+                 clear_slow: float, left_m: float, right_m: float,
+                 p: dict | None = None, close_hold: bool = False) -> tuple:
+    """相机丢人后的"雷达续跟"控制律，返回 ``(v, w, reason)``。
+
+    和 ``decide`` 的区别：这里只有**方位 + 距离**，没有框高。
+    距离阈值按"人腿"标定：站 1.2 m 停、退到 1.55 m 再走（对标框高 85%/81%）。
+
+    安全约束（任何一条命中都只减速/停，绝不加大速度）：
+      * 车头走廊 ``front_hard_m`` 内有东西 → 停；
+      * 要转向的那一侧净空不足 → 不转也不走（``side_blocked``）；
+      * **绝不后退**（雷达只看得到腿，分辨不出身后是不是人）。
+    """
+    q = dict(DEFAULTS if p is None else p)
+    b = float(bearing)
+    # 方位误差 → 角速度（左正，和雷达 y 轴一致；不要抄画框那条的负号）
+    if abs(b) < q['lidar_bearing_deadband']:
+        w = 0.0
+    else:
+        w = max(-q['lidar_wmax'], min(q['lidar_wmax'], q['lidar_kp'] * b))
+
+    # 1) 目标在车侧/车后：原地转身对准，不前进（差速车无法侧移）
+    if abs(b) > q['lidar_face_rad']:
+        w = max(-q['wmax'], min(q['wmax'], q['lidar_kp'] * 2.0 * b))
+        return 0.0, w, 'lidar_face'
+
+    # 2) 车头走廊有障碍 → 停（不转也不走，先把障碍弄走）
+    if clear_hard < q['front_hard_m']:
+        return 0.0, 0.0, 'obstacle_stop'
+
+    # 3) 太近 → 停（带迟滞：停过之后退到 lidar_resume_m 才重新走）
+    if rng <= q['lidar_stop_m']:
+        return 0.0, w, 'lidar_close'
+    if close_hold and rng < q['lidar_resume_m']:
+        return 0.0, w, 'lidar_close'
+
+    # 4) 太远 → 只转不追
+    if rng >= q['lidar_far_m']:
+        return 0.0, w, 'lidar_far'
+
+    # 5) 要往哪边转，那边得有空间
+    side = left_m if w > 0 else right_m
+    if abs(w) > 0.05 and side < q['side_clear_m']:
+        return 0.0, 0.0, 'side_blocked'
+
+    # 6) 距离插值给速度（stop~resume 之间线性，resume 以上满速）
+    span = max(1e-6, q['lidar_resume_m'] - q['lidar_stop_m'])
+    ratio = max(0.0, min(1.0, (rng - q['lidar_stop_m']) / span))
+    v = q['lidar_vmax'] * ratio
+    if min(clear_hard, clear_slow) < q['front_slow_m']:
+        v = min(v, q['lidar_vmax'] * 0.65)
+        return v, w, 'lidar_slow'
+    return v, w, 'lidar_follow'
 
 
 def passage_metrics(ranges, angle_min: float, angle_increment: float,

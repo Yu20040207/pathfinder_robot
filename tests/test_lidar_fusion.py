@@ -1,0 +1,143 @@
+"""P2 相机 + 雷达融合的纯逻辑测试（2026-11-24）。
+
+守的是什么
+----------
+用户要求：「人绕到车侧/车后仍要跟」。相机视场只有 ~70°，人走到侧面就看不见了；
+雷达 360° 能看见腿，但**分不清人和家具**。所以规矩是：
+
+1. **雷达不许自己起跟** —— 只有"刚才被相机点名过"的同一条轨迹才能接管；
+2. 接管只发生在**相机已经丢人**的时候，且最多 `lidar_hold_s`（5 s）；
+3. 接管期间**绝不后退**（雷达只看得到腿，不知道身后是人是墙）；
+4. 车头走廊有障碍照样停（安全优先级不变）。
+"""
+
+from __future__ import annotations
+
+import math
+
+import pytest
+
+from fwr_bringup.follow_core import (DEFAULTS, cam_bearing, lidar_follow,
+                                     pick_lidar_track)
+
+
+def tr(tid: int, bearing_deg: float, r: float) -> dict:
+    return {'id': tid, 'bearing': math.radians(bearing_deg), 'r': r}
+
+
+# ---------------------------------------------------------------- 方位换算
+def test_cam_bearing_center_is_zero():
+    assert cam_bearing(0.5) == pytest.approx(0.0, abs=1e-9)
+
+
+def test_cam_bearing_sign_matches_lidar():
+    # 画面左边（cx<0.5）→ 方位角为正（车体左正，REP-103）
+    assert cam_bearing(0.2) > 0.0
+    assert cam_bearing(0.8) < 0.0
+    # 70° 视场：画面边缘 ≈ ±35°
+    assert math.degrees(cam_bearing(0.0)) == pytest.approx(35.0, abs=0.5)
+    assert math.degrees(cam_bearing(1.0)) == pytest.approx(-35.0, abs=0.5)
+
+
+# ---------------------------------------------------------------- 认领
+def test_pick_track_prefers_sticky_id():
+    cands = [tr(1, 8.0, 2.0), tr(2, 4.0, 2.1)]
+    # 上次认领的是 1；1 的方位差更大，但也要黏住它
+    assert pick_lidar_track(cands, math.radians(4.5), last_id=1)['id'] == 1
+
+
+def test_pick_track_without_history_takes_closest():
+    cands = [tr(1, 8.0, 2.0), tr(2, 4.0, 2.1)]
+    assert pick_lidar_track(cands, math.radians(4.5), last_id=-1)['id'] == 2
+
+
+def test_pick_track_rejects_far_bearing():
+    # 方位差 30° > lidar_assoc_deg 25° → 不认领（宁可不跟，也不跟错人）
+    assert pick_lidar_track([tr(1, 30.0, 2.0)], 0.0) is None
+
+
+def test_pick_track_rejects_out_of_range():
+    assert pick_lidar_track([tr(1, 0.0, 0.2)], 0.0) is None
+    assert pick_lidar_track([tr(1, 0.0, 5.0)], 0.0) is None
+
+
+def test_pick_track_empty_is_none():
+    assert pick_lidar_track([], 0.0) is None
+    assert pick_lidar_track(None, 0.0) is None
+
+
+# ---------------------------------------------------------------- 控制律
+BIG = math.inf
+
+
+def test_lidar_follow_straight_ahead_moves():
+    v, w, reason = lidar_follow(0.0, 2.2, BIG, BIG, BIG, BIG)
+    assert reason == 'lidar_follow'
+    assert v > 0.05 and abs(w) < 1e-9
+
+
+def test_lidar_follow_turns_toward_target_left():
+    # 目标在左（bearing>0）→ ω>0（左转）
+    _v, w, _r = lidar_follow(math.radians(15.0), 2.2, BIG, BIG, BIG, BIG)
+    assert w > 0.05
+
+
+def test_lidar_follow_turns_toward_target_right():
+    _v, w, _r = lidar_follow(math.radians(-15.0), 2.2, BIG, BIG, BIG, BIG)
+    assert w < -0.05
+
+
+def test_lidar_follow_faces_target_behind_without_moving():
+    # 人在车后（180°）→ 原地转身，不前进（差速车不能侧移，也不能倒着追）
+    v, w, reason = lidar_follow(math.radians(175.0), 2.0, BIG, BIG, BIG, BIG)
+    assert v == 0.0
+    assert reason == 'lidar_face'
+    assert abs(w) > 0.2
+
+
+def test_lidar_follow_stops_when_close_and_never_reverses():
+    v, _w, reason = lidar_follow(0.0, 1.0, BIG, BIG, BIG, BIG)
+    assert v == 0.0 and reason == 'lidar_close'
+    # 迟滞：停在 1.2 m，但退到 1.55 m 才重新走
+    v2, _w2, reason2 = lidar_follow(0.0, 1.4, BIG, BIG, BIG, BIG, close_hold=True)
+    assert v2 == 0.0 and reason2 == 'lidar_close'
+    v3, _w3, reason3 = lidar_follow(0.0, 1.6, BIG, BIG, BIG, BIG, close_hold=True)
+    assert v3 > 0.0 and reason3 in ('lidar_follow', 'lidar_slow')
+
+
+def test_lidar_follow_never_returns_negative_speed_anywhere():
+    for deg in (-179, -90, -45, -10, 0, 10, 45, 90, 179):
+        for r in (0.5, 1.0, 1.5, 2.0, 3.5, 8.0):
+            v, _w, _reason = lidar_follow(math.radians(deg), r, BIG, BIG, BIG, BIG)
+            assert v >= 0.0, (deg, r, v)
+
+
+def test_lidar_follow_far_target_only_turns():
+    v, _w, reason = lidar_follow(0.0, 4.0, BIG, BIG, BIG, BIG)
+    assert v == 0.0 and reason == 'lidar_far'
+
+
+def test_lidar_follow_obstacle_in_corridor_stops():
+    # 车头走廊 0.20 m 有东西（< front_hard_m 0.35）→ 停，即便人在 2 m
+    v, w, reason = lidar_follow(0.0, 2.0, 0.20, 0.20, BIG, BIG)
+    assert v == 0.0 and w == 0.0 and reason == 'obstacle_stop'
+
+
+def test_lidar_follow_slows_near_obstacle():
+    v, _w, reason = lidar_follow(0.0, 2.6, 0.45, 0.50, BIG, BIG)
+    assert 0.0 < v < DEFAULTS['lidar_vmax']
+    assert reason == 'lidar_slow'
+
+
+def test_lidar_follow_blocked_side_stops_turning():
+    # 要左转但左边 0.10 m 就是墙 → 不转也不走
+    v, w, reason = lidar_follow(math.radians(20.0), 2.2, BIG, BIG, 0.10, BIG)
+    assert v == 0.0 and w == 0.0 and reason == 'side_blocked'
+
+
+def test_lidar_follow_speed_cap_below_chassis_limit():
+    # 单轮包络：|v| + |ω|·track/2 ≤ 0.30（base_bridge 硬限）
+    p = DEFAULTS
+    for deg in (-25, -10, 0, 10, 25):
+        v, w, _r = lidar_follow(math.radians(deg), 2.2, BIG, BIG, BIG, BIG)
+        assert abs(v) + abs(w) * p['track_m'] / 2.0 <= 0.30 + 1e-9
