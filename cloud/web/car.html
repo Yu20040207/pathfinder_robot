@@ -668,7 +668,7 @@
     </div>
     <button id="navCamBtn" title="摄像头画面" aria-label="摄像头">📷</button>
     <div id="navCamPane" class="hidden">
-      <img id="navCamImg" alt="摄像头画面">
+      <img id="navCamImg" class="hidden" alt="摄像头画面">
       <button id="navCamClose" title="关闭画面" aria-label="关闭">✕</button>
       <div id="navCamErr" class="hidden"></div>
     </div>
@@ -3946,7 +3946,7 @@ async function openNavCam() {
   $('navCamPane').classList.remove('hidden');
   $('navCamBtn').classList.add('on');
   $('navCamErr').classList.add('hidden');
-  $('navCamImg').classList.remove('hidden');
+  $('navCamImg').classList.add('hidden');   // 拿到地址再显示，别闪破图标
   try {
     // 每次现问服务端要地址（地址可能过期/换网），和手动模式同一套接口
     const media = await api('/api/devices/' + DEVICE + '/media');
@@ -3959,6 +3959,7 @@ async function openNavCam() {
       return;
     }
     $('navCamImg').src = media.url + '?t=' + Date.now();
+    $('navCamImg').classList.remove('hidden');
   } catch (e) {
     $('navCamImg').classList.add('hidden');
     $('navCamErr').classList.remove('hidden');
