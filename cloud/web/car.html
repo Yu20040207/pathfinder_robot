@@ -420,7 +420,7 @@
   #navStatus { position: static; margin: 0 10px; font-size: 12px;
                color: #3fb950; background: rgba(15,20,25,.75); padding: 4px 10px;
                border-radius: 8px; pointer-events: none; }
-  #zoomCtl { position: absolute; right: 10px; bottom: 86px; display: flex;
+  #zoomCtl { position: absolute; right: 10px; bottom: 62px; display: flex;
              flex-direction: column; gap: 8px; }
   #zoomCtl button { width: 44px; height: 44px; border-radius: 10px; font-size: 20px;
                     border: 1px solid #30363d; background: rgba(22,27,34,.92);
@@ -434,13 +434,10 @@
      谁高谁低由内容决定，不会再重叠。 */
   /* 2026-11-24 用户要求：导航模式也要能看摄像头，做成"悬浮在上面"，
      和手动模式那颗 📷 按钮一致；画面盖在地图上，不挤布局。 */
-  #navCamBtn { position: absolute; right: 10px; top: 62px; z-index: 7;
-               width: 44px; height: 44px; border-radius: 12px; font-size: 20px;
-               line-height: 1; display: inline-flex; align-items: center;
-               justify-content: center; padding: 0;
-               background: rgba(22,27,34,.92); color: #e6edf3;
-               border: 1px solid #30363d; }
-  #navCamBtn.on { background: #103246; color: #7dd3fc; border-color: #1f6feb; }
+  /* 2026-11-24 用户要求：📷 放进右侧竖排按键、排在「重新定位」上面；
+     竖排整体再往下挪一点（bottom 86 → 62，正好落在底部按钮条上方）。 */
+  #navCamBtn.on { background: #103246; color: #7dd3fc !important;
+                  border-color: #1f6feb !important; }
   #navCamPane { position: absolute; left: 8px; right: 8px; top: 114px; z-index: 40;
                 border-radius: 12px; overflow: hidden;
                 background: #000; border: 1px solid #30363d;
@@ -666,13 +663,13 @@
       <div id="navInfo">导航模式：双指缩放/旋转，单指拖动，轻点添加航点</div>
       <div id="navStatus">定位中…</div>
     </div>
-    <button id="navCamBtn" title="摄像头画面" aria-label="摄像头">📷</button>
     <div id="navCamPane" class="hidden">
       <img id="navCamImg" class="hidden" alt="摄像头画面">
       <button id="navCamClose" title="关闭画面" aria-label="关闭">✕</button>
       <div id="navCamErr" class="hidden"></div>
     </div>
     <div id="zoomCtl">
+      <button id="navCamBtn" title="摄像头画面" aria-label="摄像头">📷</button>
       <button id="relocBtn" title="重新定位（一键播种）">📍</button>
       <button id="viewModeBtn" class="hidden" title="切换视角（车头朝上 / 固定地图）">🧭</button>
       <button id="rotBtn" title="顺时针旋转 90°">⟳</button>
