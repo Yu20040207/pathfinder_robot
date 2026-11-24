@@ -456,7 +456,9 @@
   #navView.cam-open #navTopWrap { background: transparent; }
   #navView.cam-open #navInfo,
   #navView.cam-open #navStatus {
-    text-shadow: 0 1px 2px #000, 0 0 4px #000, 1px 0 1px #000, -1px 0 1px #000; }
+    text-shadow: 0 1px 2px #000, 0 0 4px #000, 1px 0 1px #000, -1px 0 1px #000;
+    /* 左右留出 ✕ 的宽度：文字仍然居中，但不会被 ✕ 压住 */
+    padding-left: 46px; padding-right: 46px; }
   #navCamPane { order: 0; position: relative; margin: 0; border-radius: 0;
                 overflow: hidden; background: #000; border: 0;
                 box-shadow: none;
@@ -689,13 +691,15 @@
     <div id="navTopWrap">
       <div id="navInfo">导航模式：双指缩放/旋转，单指拖动，轻点添加航点</div>
       <div id="navStatus">定位中…</div>
-      <!-- 2026-11-24 用户要求：画面紧贴绿色状态行下面、不要边框。
-           放在这个竖排容器里，提示文字换行时也不会被压住（不靠写死的 top 值）。 -->
-      <div id="navCamPane" class="hidden">
-        <img id="navCamImg" class="hidden" alt="摄像头画面">
-        <button id="navCamClose" title="关闭画面" aria-label="关闭">✕</button>
-        <div id="navCamErr" class="hidden"></div>
-      </div>
+    </div>
+    <!-- 2026-11-24 用户要求：打开画面时画面挪到最上面、白/绿两行浮在画面上。
+         ⚠️ 所以画面必须是 #navView 的**直接子元素**（order:0）。塞进 #navTopWrap 里面时
+         order 只作用于提示条内部，画面永远排在文字**下面**（现场截图就是这个症状：
+         文字一条带、视频在它下面）。 -->
+    <div id="navCamPane" class="hidden">
+      <img id="navCamImg" class="hidden" alt="摄像头画面">
+      <button id="navCamClose" title="关闭画面" aria-label="关闭">✕</button>
+      <div id="navCamErr" class="hidden"></div>
     </div>
     <div id="zoomCtl">
       <button id="navCamBtn" title="摄像头画面" aria-label="摄像头">📷</button>
