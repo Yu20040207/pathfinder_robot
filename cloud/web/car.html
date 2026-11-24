@@ -447,7 +447,13 @@
                   border-color: #1f6feb !important; }
   /* 2026-11-24 用户要求：画面也**不要圆角框**，和上面白/绿两行是同一块直角区域，
      宽度顶到两边、无边框无阴影。 */
-  #navCamPane { position: relative; margin: 0; border-radius: 0;
+  /* 2026-11-24 用户要求：打开画面后**画面移到最上面**，白/绿两行浮在画面上（半透明，能透出视频）。
+     做法：#navCamPane 用 order:0 排在提示条(1)/画布(2) 前面；打开时给 #navView 加 .cam-open，
+     让 #navTopWrap 变成绝对定位盖在画面上，不再占布局高度（地图自然从画面下面开始）。 */
+  #navView.cam-open #navTopWrap { position: absolute; left: 0; right: 0; top: 0; }
+  /* 只给外框加半透明底：两条子行保持透明，否则会叠成两层、把视频挡死 */
+  #navView.cam-open #navTopWrap { background: rgba(13,17,23,.55); }
+  #navCamPane { order: 0; position: relative; margin: 0; border-radius: 0;
                 overflow: hidden; background: #000; border: 0;
                 box-shadow: none;
                 pointer-events: auto; }   /* 父容器是 none，这里必须开回来，否则 ✕ 点不动 */
@@ -3965,6 +3971,9 @@ let navCamWanted = false;
 async function openNavCam() {
   navCamWanted = true;
   $('navCamPane').classList.remove('hidden');
+  // 打开时画面移到最上面，两行提示浮在画面上
+  if ($('navView')) $('navView').classList.add('cam-open');
+  if (typeof ensureNavCanvas === 'function') setTimeout(() => ensureNavCanvas(true), 60);
   $('navCamBtn').classList.add('on');
   $('navCamErr').classList.add('hidden');
   $('navCamImg').classList.add('hidden');   // 拿到地址再显示，别闪破图标
@@ -3993,6 +4002,8 @@ function closeNavCam() {
   navCamWanted = false;
   $('navCamImg').removeAttribute('src');
   $('navCamPane').classList.add('hidden');
+  if ($('navView')) $('navView').classList.remove('cam-open');
+  if (typeof ensureNavCanvas === 'function') setTimeout(() => ensureNavCanvas(true), 60);
   $('navCamBtn').classList.remove('on');
 }
 
