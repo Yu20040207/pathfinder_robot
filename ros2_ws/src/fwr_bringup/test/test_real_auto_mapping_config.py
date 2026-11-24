@@ -36,7 +36,9 @@ def test_monitor_is_only_automatic_bridge_input():
     # 2026-11-01：reverse 监控已从链路里移除 —— 它的后方停车区在贴墙时必然触发，
     # 会把"原地旋转"整帧否决（现场表现：规划出转弯但底盘不动）。
     # 倒车安全改由 base_bridge 的车尾超声联锁负责，它只拦后退不拦旋转。
-    assert "'node_names': ['collision_monitor_forward']" in launch
+    # 2026-11-24：激活方式从 lifecycle_manager 改成 TF 网关脚本（见
+    # tools/tf_gate_activate.py），但"只激活 forward、绝不带 reverse"不变。
+    assert "--node-name', 'collision_monitor_forward'" in launch
     assert "executable='collision_monitor'" in launch
     assert 'collision_monitor_reverse' not in launch
     assert "executable='directional_safety_selector'" in launch

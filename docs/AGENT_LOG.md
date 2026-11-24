@@ -11651,3 +11651,57 @@ inactive 告警 210 次 / 补 configure 196 次 / 二级恢复 64 次 / 三级�
   建议加一个 **boot 看门狗**：导航栈起来 120 s 后若 `/amcl`、`/map_server`、
   `/planner_server`、`/controller_server` 有任一不是 active，就自动重启一次 `fwr-nav`
   （带熔断，最多 1 次/10 分钟，并记录日志）。**需要用户批准后再做。**
+
+## 2026-11-24 10:32 · 安全链启动 90 s → 53 s：40 秒定时换成 TF 网关
+
+### 会话目标
+用户问「安全链怎么要 25 s」。查明后要求：**改成 TF 就绪就激活**。
+
+### 25 秒的来历
+`real_navigation.launch.py` 里 `TimerAction(period=40.0, [lifecycle_manager_collision])`
+——碰撞监控的 lifecycle manager **故意延迟 40 秒**。栈从 launch 到 Nav2 active 用掉 ~15 s，
+剩下 25 s 就是这个定时的尾巴。
+
+**为什么要 40 s**（2026-11-19 实测记录）：监控若在 `odom→base_footprint` 的 TF 缓冲
+还没攒够历史时激活，第一次查 `laser_front→base_footprint` 就报
+`Lookup would require extrapolation`（requested 447.30 / buffer 最早 447.49），
+之后**是 active 但不发布** `/cmd_vel_auto_forward_filtered`，车原地停 2 分 8 秒。
+12 s 太早 → 25 s 仍只差 0.4 s → 干脆 40 s。
+
+### 改法
+- 新增 `tools/tf_gate_activate.py`：等 `laser_front→base_footprint` 能在 **now-1.0s**
+  查到、且**连续 2 s** 都能查到（= 缓冲够深，监控查 now-0.5s 不会外推），
+  再 `configure` + `activate` 并用 GetState 校验真的进了 `active`。
+  超时（90 s）只报错退出，**不阻塞 launch**，`chain_watchdog` 仍会兜底补激活。
+- `real_navigation.launch.py`：删掉 `TimerAction(40 s) + lifecycle_manager_collision`，
+  换成 `ExecuteProcess(tf_gate_activate.py --node-name collision_monitor_forward
+  --target-frame base_footprint --source-frame laser_front)`。
+  监控节点本身照旧立刻起来（`unconfigured`，不发任何指令，安全），`respawn=True` 保留。
+- 删掉未用的 `TimerAction` 导入；`test_real_auto_mapping_config.py` 里
+  「只激活 forward」的断言改成校验新的 `--node-name` 写法。
+
+### 已验证（实机，10:25:59 重启 fwr-nav）
+```
+10:25:59  systemctl restart
+10:26:48  硬件节点起来（base_bridge / IMU / 雷达 / EKF）      +49 s
+10:26:50  map_server + amcl active（定位就绪）                +51 s
+10:26:52  tf_gate：TF laser_front→base_footprint 已稳定 → 激活
+10:26:52  collision_monitor_forward 激活完成                  +53 s   ← 旧版 90 s
+10:27:04  planner/controller/BT active（Nav2 就绪）           +65 s
+```
+- `/cmd_vel_auto_forward_filtered` = **20.0 Hz**，`collision_monitor_forward: active [3]`
+- MQTT state：`chain = True`
+- **没有**再出现监控相关的 extrapolation 报错（仅 amcl/planner 启动期两条正常告警）
+- `chain_watchdog` 这轮**一次都没动手**（不再需要它兜底）
+- `pytest` → **692 passed**（新增 `tests/test_tf_gate.py` 4 例）
+
+### 副作用 / 注意
+- launch 里**不再有** `lifecycle_manager_collision`：监控被杀后由 launch respawn
+  + `chain_watchdog._revive()`（今天已修好：unknown 时先试 activate）负责再激活，
+  约 20~25 s 恢复；`_kill_safety_processes` 里 pkill 该 manager 的语句保留（匹配不到也无害）。
+- 启动全程仍要 ~65 s 才有 Nav2（49 s 是硬件/雷达/EKF 起来的时间），
+  要更快只能拆底盘常驻层（用户尚未决定）。
+
+### 遗留
+- 安全链现在**比 Nav2 更早就绪 12 s**，页面不会再出现「等待安全链」。
+- 若 TF 到 90 s 都没稳定，脚本报错退出、看门狗兜底；这条路径**未实测**（今天 TF 2 s 就稳）。

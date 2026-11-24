@@ -5,7 +5,7 @@ from pathlib import Path
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (ExecuteProcess, DeclareLaunchArgument,
-                            IncludeLaunchDescription, TimerAction)
+                            IncludeLaunchDescription)
 from launch.conditions import IfCondition, UnlessCondition
 
 
@@ -23,6 +23,12 @@ def _repo_root():
 def _watchdog():
     from pathlib import Path
     p = _repo_root() / 'tools' / 'chain_watchdog.py'
+    return str(p) if Path(p).is_file() else ''
+
+
+def _tf_gate():
+    from pathlib import Path
+    p = _repo_root() / 'tools' / 'tf_gate_activate.py'
     return str(p) if Path(p).is_file() else ''
 
 
@@ -223,14 +229,24 @@ def generate_launch_description():
         # 缓冲里还没有 1 秒前的数据 → extrapolation → 之后不发布，
         # 车在原地停 2 分钟）。这里恢复成 manager 自动 bringup，
         # 万一仍然静默，看门狗会直接重拉监控进程。
-        TimerAction(period=40.0, actions=[
-            Node(package='nav2_lifecycle_manager', executable='lifecycle_manager',
-                 name='lifecycle_manager_collision', output='screen',
-                 respawn=True, respawn_delay=2.0,
-                 parameters=[{'use_sim_time': use_sim_time,
-                              'autostart': True,
-                              'node_names': ['collision_monitor_forward']}]),
-        ]),
+        # 2026-11-24：**不再用写死的 40 s 延迟**，改成"TF 真就绪了才激活"。
+        # 40 s 是 2026-11-19 为了绕开 extrapolation 定下的（12→25→40 s，
+        # 25 s 时实测仍只差 0.4 s），代价是每次重启导航都白等 25 秒
+        # （Nav2 15 s 就绪、安全链却要 90 s）。
+        # 现在：监控节点照旧立刻起来（unconfigured，不发指令），
+        # `tools/tf_gate_activate.py` 等 `laser_front→base_footprint` 能在
+        # now-1.0s 查到且连续 2 秒稳定（= 缓冲够深），再 configure+activate。
+        # 实测 TF 在 launch 后 10~15 s 就稳 → 安全链可从 90 s 缩到 ~60 s，
+        # 而且"active 但不发布"那种卡死不会再出现。
+        # 注意：不再挂 lifecycle_manager_collision —— 激活由本脚本负责，
+        # 进程挂了由 launch respawn + chain_watchdog 兜底。
+        ExecuteProcess(
+            cmd=[_py(), _tf_gate(),
+                 '--node-name', 'collision_monitor_forward',
+                 '--target-frame', 'base_footprint',
+                 '--source-frame', 'laser_front'],
+            output='screen', respawn=False,
+            additional_env={'PYTHONUNBUFFERED': '1'}),
         # 2026-11-02 回退：不再常驻启动 auto_explore_state。
         # 它无条件每秒发 /explore/state='navigating'，与 explorer 自己的状态机
         # 打架 —— 发出去的目标 0.1 s 就被 "Client requested to cancel the goal"，
