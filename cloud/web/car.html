@@ -175,11 +175,14 @@
   #mapKnob { position: absolute; left: 50%; top: 50%; width: 62px; height: 62px;
              border-radius: 50%; transform: translate(-50%,-50%);
              background: radial-gradient(circle at 35% 30%, #7df0a2, #2ea043); }
-  #batteryWarn { position: fixed; left: 0; right: 0; top: 44px; z-index: 15;
-                 font-size: 14px; font-weight: 600; padding: 8px 12px;
-                 text-align: center; }
-  #batteryWarn.low { background: #5c3d00; color: #f5a623; }
-  #batteryWarn.high { background: #5a1d1d; color: #ff7b72; }
+  /* 2026-11-24 用户要求：电量提示不要挡住上面的按键，充电中也不用提示。
+     原来是一条 top:44px 的整宽浮层，正好压住导航模式顶部那排按钮
+     （定位/视角/地图…）。现在改成顶栏里的一个小徽标：只占 header 里几个字，
+     永远不覆盖任何控件；充电时直接不显示。 */
+  #batteryWarn { font-size: 11px; font-weight: 700; padding: 2px 6px;
+                 border-radius: 6px; flex: none; white-space: nowrap; }
+  #batteryWarn.low { background: #3d2c00; color: #f5a623; }
+  #batteryWarn.high { background: #3d1414; color: #ff7b72; }
   #batteryWarn.critical { background: #8b1a1a; color: #fff;
                           animation: blink 1s infinite; }
   @keyframes blink { 50% { opacity: .55; } }
@@ -496,12 +499,11 @@
   <div class="dot" id="dot"></div>
   <span id="devName" title="点击查看设备信息">car-001</span>
   <span id="hdrPct">--</span>
+  <div id="batteryWarn" class="hidden">电量低</div>
   <div class="grow"></div>
   <button id="gearBtn" title="设备设置">设置</button>
 </header>
 
-
-<div id="batteryWarn" class="hidden">电量低</div>
 
 <div id="switchBar">
   <div class="barText" id="switchText">正在切换…</div>
@@ -1418,7 +1420,7 @@ function updateStatus(s) {
     const pctTxt = Math.round(s.percentage * 100) + '%';
     $('pct').textContent = pctTxt;
     $('hdrPct').textContent = s.charging ? (pctTxt + ' ⚡') : pctTxt;
-    checkBattery(s.percentage, s.voltage);
+    checkBattery(s.percentage, s.voltage, s.charging);
     const voltEl = $('volt');
     if (voltEl && typeof s.voltage === 'number') {
       voltEl.textContent = s.voltage.toFixed(1) + 'V';
@@ -1593,8 +1595,9 @@ function updateNavProgress() {
   lastNavState = nav;
 }
 
-let batteryPct = null, batteryVolt = null, batteryShownAt = 0;
-function checkBattery(pct, volt) {
+let batteryPct = null, batteryVolt = null, batteryCharging = false;
+function checkBattery(pct, volt, charging) {
+  if (typeof charging === 'boolean') batteryCharging = charging;
   if (typeof pct !== 'number' || isNaN(pct)) return;
   batteryPct = pct;
   if (typeof volt === 'number') batteryVolt = volt;
@@ -1603,7 +1606,6 @@ function batteryTick() {
   const warn = $('batteryWarn');
   const card = $('pct').closest('.card');
   if (!warn || batteryPct === null) return;
-  const now = Date.now();
   const pct = batteryPct;
   const pctTxt = Math.round(pct * 100) + '%';
   const voltTxt = (typeof batteryVolt === 'number')
@@ -1612,37 +1614,38 @@ function batteryTick() {
 
   const hdr = $('hdrPct');
   if (hdr) {
-    hdr.style.color = pct < 0.10 ? '#ff7b72'
+    // 2026-11-24：充电中不报警（顶栏已有 ⚡），数字也不再标红
+    hdr.style.color = batteryCharging ? '#3fb950'
       : pct < 0.15 ? '#ff7b72' : pct < 0.20 ? '#f5a623' : '#3fb950';
   }
+  // 充电中：不显示电量警告，卡片也不标红（用户 2026-11-24 要求）
+  if (batteryCharging) {
+    warn.classList.add('hidden');
+    card.classList.remove('low');
+    return;
+  }
+  // 徽标只放最短的文字（顶栏空间紧），完整说明进 title，长按/悬停可看
   if (pct < 0.10) {
-    // 严重不足：一直显示 + 闪烁
-    warn.textContent = `⚠️ 电量严重不足：${pctTxt}${voltTxt}，请立即充电，主控随时会关机`;
+    warn.textContent = '⚠ 极低';
     warn.classList.add('critical');
-    warn.classList.remove('hidden');
-    card.classList.add('low');
-    return;
-  }
-  if (pct < 0.15) {
-    // 不足：红色，每 5 秒提示一次
-    warn.textContent = `⚠️ 电量不足：${pctTxt}${voltTxt}，请立即充电`;
+  } else if (pct < 0.15) {
+    warn.textContent = '⚠ 电量低';
     warn.classList.add('high');
-    card.classList.add('low');
-    if (now - batteryShownAt >= 5000) batteryShownAt = now;
-    warn.classList.toggle('hidden', now - batteryShownAt > 3500);
-    return;
-  }
-  if (pct < 0.20) {
-    // 偏低：橙色，每 10 秒提示一次
-    warn.textContent = `电量低：${pctTxt}${voltTxt}，请尽快充电`;
+  } else if (pct < 0.20) {
+    warn.textContent = '⚠ 偏低';
     warn.classList.add('low');
-    card.classList.add('low');
-    if (now - batteryShownAt >= 10000) batteryShownAt = now;
-    warn.classList.toggle('hidden', now - batteryShownAt > 3500);
+  } else {
+    warn.classList.add('hidden');
+    card.classList.remove('low');
     return;
   }
-  warn.classList.add('hidden');
-  card.classList.remove('low');
+  warn.title = (pct < 0.10
+    ? `电量严重不足：${pctTxt}${voltTxt}，请立即充电，主控随时会关机`
+    : pct < 0.15
+      ? `电量不足：${pctTxt}${voltTxt}，请立即充电`
+      : `电量低：${pctTxt}${voltTxt}，请尽快充电`);
+  warn.classList.remove('hidden');
+  card.classList.add('low');
 }
 setInterval(batteryTick, 500);
 

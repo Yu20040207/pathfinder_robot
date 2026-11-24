@@ -11460,3 +11460,42 @@ ros2 service call /localization/reseed std_srvs/srv/Trigger
 - 根因里的"为什么那几次匹配会失败"没查到底：checkpoint 位姿与现场不符是诱因
   （`checkpoint does not fit`），但全局匹配也失败说明那段扫描质量/场景有变化。
   下次复现请抓 `重新定位失败:` 那条 WARN 的残差/贴墙率数字。
+
+## 2026-11-24 09:30 · 电量警告改成顶栏徽标（不再挡按键）+ 充电中不提示
+
+### 会话目标
+用户：「电量提示不要挡住上面的按键了，而且充电中的时候就不用显示电量警告」。
+
+### 根因
+`#batteryWarn` 是 `position: fixed; top: 44px` 的**整宽浮层**，正好压在
+导航模式顶部那一排按钮（`📍重新定位` / `🧭视角` / 地图按钮）上；
+而且低电量时每 5~10 秒闪一次（`warn.classList.toggle('hidden', ...)`），
+充电中也不消失（页面没把 `charging` 传进判定）。
+
+### 改动 `cloud/web/car.html`（只动前端）
+1. **位置**：从 header 外面的固定浮层挪进 `<header>`，变成 `#hdrPct` 右边的小徽标
+   （`font-size 11px; padding 2px 6px; flex:none`）。不覆盖任何控件——
+   header 本身 `overflow-x:auto`，窄屏也不会把小徽标挤到按钮上。
+2. **去掉闪烁**：删除 `batteryShownAt` 的"每 5/10 秒闪一下"，只在
+   `<10%` 极低时保留缓慢 blink（`animation: blink 1s`）。
+3. **文案压缩**：`⚠ 极低`（<10%）/ `⚠ 电量低`（<15%）/ `⚠ 偏低`（<20%）；
+   完整句子（含百分比和电压）放 `title`，长按徽标可看。
+4. **充电中不提示**：`checkBattery(pct, volt, charging)` 新增第三个参数
+   （来自状态里的 `s.charging`），`batteryCharging` 为真时：
+   - 徽标 `hidden`，卡片不标红；
+   - 顶栏百分比数字显示绿色（配合已有的 `⚡`），不再标红。
+
+### 已验证
+- 本地：`grep -c 'id="batteryWarn"'` = **1**（已在 header 内）；CSS 里不再有
+  `position: fixed` / `top: 44px`；内联 JS 用 `node --check` → **OK**。
+- 部署：ECS 备份 `car.html.bak.20261124092442`（191589 B）→
+  scp 到 `/home/boat_control/car.html` 后复制到 `/opt/jc/web/car.html`，`chmod 644`；
+  `md5sum` 三处一致 = **566b049ce1cb86a52926be06e0ee9adc**；
+  `curl 127.0.0.1:8080/car.html` → **HTTP 200**，新注释字符串命中 1 次。
+
+### 未验证
+- 手机端实际视觉（需要用户刷新页面确认：① 导航顶部按钮不再被挡；
+  ② 充电中无徽标，拔枪后 <20% 会在顶栏出现小徽标；③ <10% 才 blink）。
+
+### 下一步
+用户刷新看效果；若觉得顶栏徽标太小/太大，只改 `#batteryWarn` 的 `font-size`/`padding` 两行。
