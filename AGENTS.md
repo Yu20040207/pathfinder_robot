@@ -133,8 +133,10 @@
   也是直角小块（左上角贴边）。
   📷 **打开画面时画面移到最上面、两行提示浮在画面上**（用户要求）：`#navCamPane{order:0}`
   排在提示条(1)/画布(2) 前面，同时给 `#navView` 加 `.cam-open`，
-  让 `#navTopWrap` 变 `position:absolute; top:0` 盖在画面上、并给**外框**加半透明底
-  （`rgba(13,17,23,.55)`；**子行保持透明**，否则叠两层把视频挡死）。关掉画面要摘掉 `.cam-open`。
+  让 `#navTopWrap` 变 `position:absolute; top:0` 盖在画面上。关掉画面要摘掉 `.cam-open`。
+  ⚠️ 这个状态下提示条**背景必须完全透明**（用户明确要求：只显示文字，背景就是视频），
+  靠 `text-shadow`（4 段深色阴影）模拟描边保证在明亮/杂乱画面上还看得清；
+  **不要**给它加半透明底色。
   提示条是 `pointer-events:none`，所以浮在上面也不会挡住画面的 ✕ 关闭按钮。
   画布尺寸变化由 `ensureNavCanvas()`（尺寸真变了才 `resizeCanvas()`）在
   切模式 / resize / 每 1.5 s 兜底一次。

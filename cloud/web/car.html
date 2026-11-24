@@ -451,8 +451,12 @@
      做法：#navCamPane 用 order:0 排在提示条(1)/画布(2) 前面；打开时给 #navView 加 .cam-open，
      让 #navTopWrap 变成绝对定位盖在画面上，不再占布局高度（地图自然从画面下面开始）。 */
   #navView.cam-open #navTopWrap { position: absolute; left: 0; right: 0; top: 0; }
-  /* 只给外框加半透明底：两条子行保持透明，否则会叠成两层、把视频挡死 */
-  #navView.cam-open #navTopWrap { background: rgba(13,17,23,.55); }
+  /* 2026-11-24 用户要求：打开画面时提示条**完全透明**，只显示文字，背景就是视频画面。
+     透明后文字压在明亮/杂乱画面上会看不清，所以给文字加深色描边（text-shadow 模拟描边）。 */
+  #navView.cam-open #navTopWrap { background: transparent; }
+  #navView.cam-open #navInfo,
+  #navView.cam-open #navStatus {
+    text-shadow: 0 1px 2px #000, 0 0 4px #000, 1px 0 1px #000, -1px 0 1px #000; }
   #navCamPane { order: 0; position: relative; margin: 0; border-radius: 0;
                 overflow: hidden; background: #000; border: 0;
                 box-shadow: none;

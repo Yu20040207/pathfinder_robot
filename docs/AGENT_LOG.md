@@ -11992,3 +11992,11 @@ inactive 告警 210 次 / 补 configure 196 次 / 二级恢复 64 次 / 三级�
   ⚠️ 提示条是 `pointer-events:none`，所以浮在画面上不会挡住 ✕ 关闭按钮。
 - 开/关后各补一次 `ensureNavCanvas(true)`（60 ms 后），让画布按新高度重算。
 - 部署：云端 md5 `fd9e2c5d…`（与本地一致）；效果待用户确认。
+
+### 2026-11-24 12:40 · 打开画面时提示条背景全透明，只留文字
+- 用户要求：背景透明，只显示字体，背景就是摄像头画面。
+- `#navView.cam-open #navTopWrap { background: transparent; }`（原来给的是 `rgba(13,17,23,.55)`）。
+- 透明后文字压在明亮/杂乱画面上会糊，所以给 `#navInfo`/`#navStatus` 加
+  `text-shadow: 0 1px 2px #000, 0 0 4px #000, 1px 0 1px #000, -1px 0 1px #000`（模拟深色描边）。
+- 关闭画面时 `.cam-open` 摘掉，恢复原来的扁平底。
+- 部署：云端 md5 `52225349…`（与本地一致）；效果待用户确认。
