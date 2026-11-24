@@ -417,7 +417,7 @@
   #edWidth { flex: 1 1 auto; accent-color: #3fb950; height: 26px; }
   #edLineBtn { flex: 0 0 72px; }
   #edLineBtn.on { border-color: #58a6ff; color: #58a6ff; }
-  #navStatus { position: absolute; left: 10px; top: 30px; right: 10px; font-size: 12px;
+  #navStatus { position: static; margin: 0 10px; font-size: 12px;
                color: #3fb950; background: rgba(15,20,25,.75); padding: 4px 10px;
                border-radius: 8px; pointer-events: none; }
   #zoomCtl { position: absolute; right: 10px; bottom: 86px; display: flex;
@@ -428,7 +428,14 @@
                     justify-content: center; padding: 0; }
   #rotBtn { font-size: 30px !important; line-height: 1; }
   #relocBtn { font-size: 24px !important; line-height: 1; }
-  #navInfo { position: absolute; left: 0; right: 0; top: 3px; font-size: 12px;
+  /* 2026-11-24：原来 #navInfo（绝对定位 top:3px）和 #navStatus（绝对定位 top:30px）
+     各占各的；提示一换行就压住下面的绿色状态条（用户截图：重启后那句长提示
+     直接盖在「位置 无定位 · stopped · …」上面）。现在两条放进同一个竖排容器，
+     谁高谁低由内容决定，不会再重叠。 */
+  #navTopWrap { position: absolute; left: 0; right: 0; top: 3px; z-index: 6;
+                display: flex; flex-direction: column; gap: 4px;
+                pointer-events: none; }
+  #navInfo { position: static; font-size: 12px;
              color: #d7e3ec; background: rgba(13,17,23,.62); padding: 4px 10px;
              text-align: center; letter-spacing: .3px;
              border-radius: 0; pointer-events: none; }
@@ -631,8 +638,10 @@
   <!-- 导航模式 -->
   <div id="navView" class="hidden">
     <canvas id="mapCanvas"></canvas>
-    <div id="navInfo">导航模式：双指缩放/旋转，单指拖动，轻点添加航点</div>
-    <div id="navStatus">定位中…</div>
+    <div id="navTopWrap">
+      <div id="navInfo">导航模式：双指缩放/旋转，单指拖动，轻点添加航点</div>
+      <div id="navStatus">定位中…</div>
+    </div>
     <div id="zoomCtl">
       <button id="relocBtn" title="重新定位（一键播种）">📍</button>
       <button id="viewModeBtn" class="hidden" title="切换视角（车头朝上 / 固定地图）">🧭</button>
@@ -1247,9 +1256,16 @@ function connect(force) {
           // 8 秒重试于是每轮显示一次"已就绪→还没就绪"，看着像反复横跳。
           // 现在按原因分开说，并且定位失败 3 次就停手，别让用户无限等。
           const why = String(m.reason || '');
-          const stackIssue = /导航栈|未就绪|请稍候|not ready/i.test(why);
+          // 2026-11-24：重启主控后导航栈要 40~90 s 才出地图/雷达数据，
+          // `auto_initial_pose` 这时回的是「还没有地图或激光数据（已重新订阅，
+          // 请 3 秒后再点一次）」。旧正则没覆盖这句 → 被当成**定位失败**，
+          // 8 秒一次的 3 次重试（24 秒）用完就弹「自动定位失败」，
+          // 而栈其实只是还没起来（用户重启后 10:02 现场截图）。
+          const stackIssue = /导航栈|未就绪|请稍候|not ready|还没有地图|激光数据|重新订阅/i
+            .test(why);
           if (stackIssue) {
-            setProgressLabel('导航栈还没就绪，等它就绪后自动重新定位…');
+            relocFails = 0;            // 启动期不算定位失败
+            setProgressLabel('导航栈正在启动，等地图和雷达数据就绪后自动重新定位…');
             return;
           }
           relocFails += 1;

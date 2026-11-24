@@ -11593,3 +11593,61 @@ inactive 告警 210 次 / 补 configure 196 次 / 二级恢复 64 次 / 三级�
 - 手机端要**刷新一次页面**（右上角 ⟳）才会拿到新版本，否则仍是旧 JS。
 - 全屏页只覆盖到「MQTT 已上线」；导航栈就绪还要 ~40~90 s（见上一条安全链修复），
   文案里已提示"导航栈若未启动，切换模式后会自动就绪"。
+
+## 2026-11-24 10:10 · 重启后「还没有地图或激光数据」：amcl 在开机时卡在 unconfigured
+
+### 现场（用户 10:02 截图）
+页面切导航模式后：
+`自动定位失败：还没有地图或激光数据（已重新订阅，请 3 秒后再点一次）`
+`位置 无定位 · stopped · 地图 1A_map_door2 · 待命`
+**并且这句长提示压住了下面的绿色状态条**。
+
+### 真因（车端，不是页面文案问题）
+```
+10:01:55  map_server 读图成功（Read map …），amcl/lifecycle_manager 起来
+10:01:56  lifecycle_manager_localization: Configuring amcl   ← 之后再也没有下一行
+10:05:35  ros2 lifecycle get /amcl        → unconfigured [1]   （3 分半没变）
+          ros2 lifecycle get /map_server  → inactive [2]
+          ros2 topic echo /map            → 无数据（/map 有 1 个发布者但没发）
+          /localization/reseed            → success=False「还没有地图或激光数据」
+          auto_initial_pose 每 8 s 打一次「重建 /map 订阅（还没收到地图）」，180 s 后放弃
+```
+**amcl 的 configure 服务调用发出去了、节点始终没处理**（进程活着、9 线程、0.8% CPU、
+`futex_wait`，`/amcl/change_state` 服务在位），Nav2 的 `changeState()` 没有超时 →
+`lifecycle_manager_localization` 永久卡住 → `map_server` 永远不会 activate →
+没有 `/map` → 定位/重定位全废。
+
+这和 09:55 那条 **collision_monitor 开机卡 inactive** 是同一类问题：
+**开机时 DDS 服务请求丢/不被处理，Nav2 lifecycle manager 没有超时保护**。
+
+### 现场处理
+```
+10:06:00  sudo -n systemctl restart fwr-nav
+10:07:15  amcl: active [3]   map_server: active [3]
+10:07:3x  /localization/reseed → success=True「定位成功: (-0.26, 0.36, 1°) 残差 0.049 m」
+          collision_monitor_forward: active [3]
+```
+即：**重启一次导航栈就好了**，说明是开机那一次的机会性问题，不是配置错。
+
+### 页面改动（`cloud/web/car.html`，已部署）
+1. **启动期原因不算定位失败**：`stackIssue` 正则补 `还没有地图|激光数据|重新订阅`，
+   命中就 `relocFails = 0`、提示「导航栈正在启动，等地图和雷达数据就绪后自动重新定位…」，
+   继续每 8 s 重试（最多 18 次/144 s）。原来 24 秒就把 3 次失败用完直接弹「自动定位失败」。
+2. **顶部两条提示改竖排**：新增 `#navTopWrap`（flex column），`#navInfo` 与 `#navStatus`
+   由「各自绝对定位 top:3px / top:30px」改为普通流式，消除长提示压住绿条。
+   进度条 `#switchBar` 仍按 `#mainHeader` 底部定位，不受影响。
+
+### 已验证
+- `node --check` 通过；`pytest tests/test_page_nav_startup.py tests/test_page_reboot_overlay.py` 7 例；
+  全量 **689 passed**
+- 线上 md5 一致 `5074bd11e518d5ac5b40462446ff20ff`，`curl :8080/car.html` 能搜到 `navTopWrap`(2)、
+  新启动提示(1)；备份 `car.html.bak.20261124100435`
+- 车端：重启导航栈后 amcl/map_server/collision_monitor 全 active，reseed 残差 0.049 m
+
+### 未验证 / 遗留（重要）
+- **开机时 lifecycle 卡死没有自愈机制**：今天两次（collision_monitor、amcl）。
+  `chain_watchdog` 只管 collision_monitor；`amcl`/`map_server` 卡住时页面只会说
+  「导航栈正在启动」，永远不会自己好，必须人工 `systemctl restart fwr-nav`。
+  建议加一个 **boot 看门狗**：导航栈起来 120 s 后若 `/amcl`、`/map_server`、
+  `/planner_server`、`/controller_server` 有任一不是 active，就自动重启一次 `fwr-nav`
+  （带熔断，最多 1 次/10 分钟，并记录日志）。**需要用户批准后再做。**
