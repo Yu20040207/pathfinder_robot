@@ -30,6 +30,7 @@ import time
 
 import rclpy
 from geometry_msgs.msg import Twist
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from nav_msgs.msg import Odometry
@@ -528,14 +529,16 @@ def main(args=None) -> None:
     node = PersonFollower()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         try:
             node.destroy_node()
         except Exception:                        # noqa: BLE001
             pass
-        rclpy.shutdown()
+        # ⚠️ 只能关一次：SIGTERM 时 rclpy 信号处理器已 rcl_shutdown，再关会抛 RCLError
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

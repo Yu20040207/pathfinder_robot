@@ -65,6 +65,27 @@ FOLLOW_LAST_CFG = [None]           # 上一次生效的服务状态（只在变�
 FOLLOW_UNITS = ('fwr-vision', 'fwr-follow')
 
 
+def follow_service_target(on: bool, prep: bool, leave: bool) -> bool | None:
+    """决定"要不要让视觉/跟随服务跑"：True=起、False=停、None=不动。
+
+    2026-11-24 用户报「有时候提示人体识别没在跑」。真因不是识别坏了，而是
+    **页面和服务互相拉扯**：
+
+    * 旧逻辑 ``on=0``（只是"暂停跟随/切后台停车"）也会**停掉 fwr-vision + fwr-follow**；
+    * 可页面还在跟随模式里，5 s 后又发 ``prep=1`` 把它们**拉起来**；
+    * 于是每十几秒 stop → start 一次。vision 每次收到 SIGINT 都在
+      ``main()`` 里二次 ``rclpy.shutdown()`` → ``ExternalShutdownException``
+      → core-dump，重启期间手机端就是"人体识别没在跑"。
+
+    现在只有**真的离开跟随模式**（``leave=1``）才停服务；``on=0`` 一律不动。
+    """
+    if on or prep:
+        return True
+    if leave:
+        return False
+    return None
+
+
 def _follow_services(on: bool, force: bool = False) -> None:
     """按需启动/停止视觉与跟随服务（后台线程，不阻塞 HTTP）。"""
     if FOLLOW_SVC['busy']:
@@ -339,11 +360,18 @@ async def handle_follow(request: web.Request) -> web.Response:
     # 页面一进跟随模式就发 prep（不等用户点「开始跟随」），否则要等用户点按钮才启动，
     # 中间一直是「人体识别没在跑」。
     prep = request.query.get('prep', '0') in ('1', 'true', 'yes')
-    # 2026-11-23：进跟随模式才拉起视觉/跟随服务；退出就停掉。
-    # 请求自带去重，不会每 5 s 刷一次 systemctl。
-    _follow_services(True if (on or prep) else False)
+    # 2026-11-24：只有离开跟随模式（leave=1）才停服务；on=0 只是暂停跟随。
+    # 旧写法 on=0 也停 → 和页面的 prep 心跳互相拉扯 → 服务被反复重启。
+    leave = request.query.get('leave', '0') in ('1', 'true', 'yes')
+    target = follow_service_target(on, prep, leave)
+    if target is not None:
+        _follow_services(target)
     if on or prep:
         FOLLOW_SVC['at'] = time.monotonic()
+    if leave:
+        return web.Response(
+            text=json.dumps({'ok': True, 'leave': True}), content_type='application/json',
+            headers=CORS)
     if prep:
         return web.Response(
             text=json.dumps({'ok': True, 'prep': True,

@@ -4057,6 +4057,7 @@ let followData = { persons: [], sel: -1, tracking: false };
 let followEnteredAt = 0;
 let followSel = -1;
 let followOn = false;            // 是否正在驱动车跟随（控制节点在执行）
+let followBoxesDead = false;     // /boxes 请求本身失败（网络），≠ 识别没在跑
 let followStateData = null;      // /followstate 最新状态
 let followKeepAt = 0;            // 上次心跳时间
 
@@ -4131,8 +4132,17 @@ function drawFollow() {
     if (followVideoDead) {
       hint.innerHTML = '画面断了，正在自动重连…（车照常跟随，不受影响）';
     } else if (doing) {
-      hint.innerHTML = followReasonText(st) + (st.box_h > 0
-        ? ' · 目标框 <b>' + Math.round(st.box_h * 100) + '%</b>' : '')
+      // 2026-11-24：P2 雷达接管 —— 相机看不到人（人绕到车侧/车后）时由雷达续跟，
+      // 界面必须明说到底在用什么跟，否则用户以为相机还在看着自己。
+      const byLidar = (st.src === 'lidar');
+      hint.innerHTML = (byLidar
+        ? '<span style="color:#fbbf24">📡 雷达跟踪</span> · ' + followReasonText(st)
+        : followReasonText(st))
+        + (byLidar
+           ? (st.lidar_r != null
+              ? ' · 距离 <b>' + Math.round(st.lidar_r * 100) + ' cm</b>' : '')
+           : (st.box_h > 0
+              ? ' · 目标框 <b>' + Math.round(st.box_h * 100) + '%</b>' : ''))
         + (st.reason === 'backing' || st.reason === 'rear_blocked'
            ? ' · 车尾 <b>' + Math.round((st.rear_m != null ? st.rear_m : 9.9) * 100) + ' cm</b>' : '')
         + ((st.reason === 'gate_align' || st.reason === 'gate_pass'
@@ -4143,10 +4153,14 @@ function drawFollow() {
            ? ' · <span style="color:#fca5a5">⚠ 指令已发但车没动（查运动门/急停）</span>'
            : '');
     } else if (followData.stale) {
-      if (Date.now() - followEnteredAt < 12000) {
+      if (followBoxesDead) {
+        hint.innerHTML = '<span style="color:#fca5a5">连不上机器人</span>'
+          + '（网络断了？正在自动重试…）';
+      } else if (Date.now() - followEnteredAt < 12000) {
         hint.textContent = '正在启动人体识别…（首次启动需几秒）';
       } else {
-        hint.textContent = '人体识别没在跑（机器人上启动 person_detector）';
+        // 识别服务可能刚被重启/正忙：说清"暂时没数据"，不要断言"没在跑"
+        hint.textContent = '人体识别暂时没有数据（车端识别可能刚启动或正忙，稍等几秒）';
       }
     } else if (followSel >= 0 && followData.tracking) {
       hint.textContent = '已锁定目标 · 点「开始跟随」让车跟过去';
@@ -4198,6 +4212,12 @@ function followReasonText(st) {
   if (r === 'target_gone') return '目标丢失，请重新选人';
   if (r === 'too_far') return '人太远，只转不追';
   if (r === 'no_target') return '没选目标';
+  // P2 雷达接管（2026-11-24）：相机看不到人，靠雷达续跟的那几种状态
+  if (r === 'lidar_follow') return '雷达接管中，正朝你过去';
+  if (r === 'lidar_slow') return '雷达接管中，前方有障碍减速';
+  if (r === 'lidar_close') return '雷达接管中，距离合适停住等你';
+  if (r === 'lidar_face') return '雷达看到你在侧面/身后，正在转身对准';
+  if (r === 'lidar_far') return '雷达看到你但有点远，先转身对准';
   if (r === 'no_node') return '跟随节点没在跑';
   return '未在跟随';
 }
@@ -4280,7 +4300,11 @@ async function followPollOnce() {
         followData.sel >= 0 && followData.sel !== followSel) {
       followSel = followData.sel;
     }
+    followBoxesDead = false;
   } catch (e) {
+    // 网络断了 ≠ 识别没在跑：两者都让 /boxes 拿不到数据，但提示必须分开，
+    // 否则用户被送去重启一个其实好好的服务（2026-11-24 用户报"有时候提示人体识别没在跑"）
+    followBoxesDead = true;
     followData = { persons: [], sel: -1, tracking: false, stale: true };
   }
   drawFollow();
@@ -4372,6 +4396,13 @@ async function startFollow() {
 function stopFollow() {
   followWanted = false;
   if (followOn) followStop(false);      // 切走模式立刻停车（不依赖心跳超时）
+  // 2026-11-24：只有**真的离开跟随模式**才让车端停服务（on=0 只是暂停）。
+  // 旧写法每次切后台/切模式都 stop 服务，页面再 prep 又拉起来 → 识别反复重启，
+  // 手机端就跳到"人体识别没在跑"。
+  try {
+    fetch(followBase() + '/follow?leave=1&t=' + Date.now(),
+          { cache: 'no-store', keepalive: true }).catch(() => {});
+  } catch (e) {}
   try { fResetKnob(); } catch (e) { /* 页面加载早期还没绑定摇杆 */ }
   clearInterval(followPoll);
   followPoll = null;

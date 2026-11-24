@@ -46,6 +46,7 @@ import cv2
 import numpy as np
 import onnxruntime as ort
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CompressedImage
@@ -248,11 +249,17 @@ def main(args=None) -> None:
     node = PersonDetector()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
-        node.destroy_node()
-        rclpy.shutdown()
+        try:
+            node.destroy_node()
+        finally:
+            # ⚠️ 只能关一次：SIGTERM 时 rclpy 的信号处理器已经 rcl_shutdown 过，
+            # 再调一次会抛 RCLError（context 已经被关），systemd 记成 failed，
+            # 严重时 core-dump（2026-11-24 fwr-vision 每十几秒崩一次就是它）。
+            if rclpy.ok():
+                rclpy.shutdown()
 
 
 if __name__ == '__main__':
