@@ -13,6 +13,22 @@
 - 当前分支 `codex/real-nav2-imu-turn`，工作区可能有很多未提交/未跟踪改动。**不要用 `git checkout`、`git reset`、`git clean` 清掉别人的工作。**
 - `README.md` 部分段落早于实机进展（例如“尚未安装 Nav2”）；**以 `docs/AGENT_LOG.md` 最新条目为准**。
 
+## 1.5 📡 实机地址：用 `fwr-n305.local`，不要写死 IP（2026-11-24 更新）
+
+- 实机 DHCP 地址**会变**：2026-11-24 从 `192.168.0.20` 变成 **`192.168.0.24`**，
+  旧的 `.20` 已经没人（ARP `INCOMPLETE`）→ SSH 直接 `No route to host`，
+  但**车其实一直开着**（手机走云端 MQTT 连得上，跟 LAN IP 无关）。
+- **一律用 mDNS 名字**（开发机实测可解析）：
+
+  ```bash
+  ssh -i ~/.ssh/fwr_n305 manbaout@fwr-n305.local
+  ```
+
+  连不上时先 `getent hosts fwr-n305.local` 看解析结果，**不要**去猜 `.20/.24`。
+- 查当前地址：`ip neigh | grep -i 70:9c:d1` 或 `avahi-resolve -n fwr-n305.local`。
+- 云端视频地址**不写死 IP**：`/etc/systemd/system/jc-api.service.d/media.conf` 里
+  `JC_MEDIA_HOSTS='{}'`（自动用状态里的 `lan_ip`）；写死 IP 会在换地址后视频打不开。
+
 ## 2. 开工顺序（每次任务都做）
 
 1. `git status --short` + `git log --oneline -5`：确认现状，不要假设“上次已经提交”。

@@ -12128,3 +12128,32 @@ P1 = 纯逻辑 + 节点 + 单测，**只发布观测**，用来先采集数据�
 - 下一步顺序：① 部署 2 个 py + setup.py 到车上（src 与 build 两处都要）→
   `colcon build --packages-select fwr_bringup --symlink-install`；② 启动 `ros2 run
   fwr_bringup leg_tracker`；③ 按演示协议走一趟 + 录 bag；④ 回放调参。
+
+## 2026-11-24 17:12 · 实机 SSH 连不上：其实是 DHCP 换了地址（.20 → .24）
+
+### 现象
+用户说「手机连得上、车已开机」，但我这边 `ssh manbaout@192.168.0.20` →
+`No route to host`；`ping 192.168.0.20` 100% 丢包、ARP `INCOMPLETE`（空地址）。
+
+### 排查（只读）
+- 开发机 `wlo1 192.168.0.237/23`，网关 `192.168.1.1`（/23 网段，DHCP 动态分配）
+- `ping 192.168.0.24` → **0% 丢包**；`ip neigh` 里 `.24` 有 MAC `70:9c:d1:86:03:2b`
+- `getent hosts fwr-n305.local` → **192.168.0.24**（mDNS 正常）
+- SSH `.24` 成功：`hostname=fwr-n305`，`uptime up 5:56`
+- 服务：`fwr-base active`、`fwr-nav active`、`fwr-vision inactive`、`fwr-follow inactive`
+- `/scan_merged` **10.150 Hz**（min 0.083 / max 0.102，std 0.005）
+- 云端 `jc-api` 的 `media.conf` = `JC_MEDIA_HOSTS='{}'`（用车辆上报的 `lan_ip`，不受换址影响）
+
+### 结论
+**车没毛病，是我用了旧地址**。手机走云端 MQTT（车主动外连）所以与 LAN IP 无关。
+
+### 仓库改动（只改文档）
+- `AGENTS.md` 新增 **§1.5**：实机地址用 `fwr-n305.local`，不要写死 IP；附排查命令
+  （`getent hosts fwr-n305.local` / `avahi-resolve` / `ip neigh | grep 70:9c:d1`）。
+- `docs/hardware/vision.md`：`JC_MEDIA_HOSTS` 示例从写死 `192.168.0.20` 改成 `{}` 并说明原因；
+  返回示例里的 IP 改成 `<车辆上报的 lan_ip>`。
+- `docs/params_snapshot_v1.8.md`：实机地址改成 `fwr-n305.local` 并注明当时是 .20。
+
+### 已验证 / 未验证
+- ✅ 已验证：`.24` 可 SSH、雷达 10.15 Hz、`fwr-base`/`fwr-nav` active、mDNS 可解析。
+- ⚠️ 未验证：P1 的 `leg_tracker`（**还没部署、没启动**，等用户同意）。

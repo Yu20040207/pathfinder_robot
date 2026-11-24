@@ -235,11 +235,11 @@ WantedBy=multi-user.target
 ```ini
 # /etc/systemd/system/jc-api.service.d/media.conf
 [Service]
-Environment=JC_MEDIA_HOSTS='{"car-001":"192.168.0.20"}'
+Environment=JC_MEDIA_HOSTS='{}'   # 留空 = 用状态里车辆上报的 lan_ip（IP 会变，别写死）
 Environment=JC_MEDIA_PORT=8081
 ```
 
-返回 `{"type":"mjpeg","url":"http://192.168.0.20:8081/video","snapshot":…,"page":…,"ttl":60}`。
+返回 `{"type":"mjpeg","url":"http://<车辆上报的 lan_ip>:8081/video","snapshot":…,"page":…,"ttl":60}`。
 以后接 4G 中继**只改这个接口的返回**，页面不用动。
 
 **手机端**（2026-11-21 用户要求，两轮改版后定稿）：手动模式里点**急停右侧的 📷**，
