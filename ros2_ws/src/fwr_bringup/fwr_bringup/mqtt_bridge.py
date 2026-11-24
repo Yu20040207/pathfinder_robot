@@ -1273,6 +1273,16 @@ class MqttBridge(Node):
                 else:
                     self._mapping_mode = False
                     self._mapping_suppress_until = time.monotonic() + 20.0
+                if target == 'nav':
+                    # 2026-11-24：切回导航后，把**状态文件里那张真正被 map_server
+                    # 加载的图**发给云端，保证手机画面 = /map。
+                    # 否则手机上还是上一张图，重新定位用的却是另一张 →
+                    # 现场看着就是"匹配错了地图"（用户 16:39 报的就是这个）。
+                    self._init_active_map()
+                    try:
+                        self._publish_map_file(self._active_map_path)
+                    except Exception as exc:         # noqa: BLE001
+                        self.get_logger().warn(f'切到导航后同步地图图面失败: {exc}')
                 self.get_logger().warn(f'已切到 {target} 模式（其它模式已清理）')
                 self._publish_result('nav', True, f'{target} 模式已就绪',
                                      action='mode')
@@ -1567,9 +1577,28 @@ class MqttBridge(Node):
                 'occupied_thresh: 0.65\n'
                 'free_thresh: 0.196\n',
                 encoding='utf-8')
-            state = Path.home() / '.config/fwr/last_navigation_map'
-            state.parent.mkdir(parents=True, exist_ok=True)
-            state.write_text(str(yaml_path), encoding='utf-8')
+            # 2026-11-24 用户现场：建图模式里保存完地图、切回导航时，
+            # 重新定位"匹配到了新保存的地图"。真因就在这里——保存动作**顺手改写了**
+            # last_navigation_map，于是下一次起 fwr-nav 时 map_server 加载的是新图，
+            # 而手机画面还是上一张导航图（图片只在 set_map 时上传）→ 看着像匹配错图。
+            # 现在：**建图模式下只存文件，不抢占当前导航地图**（要换成新图请在
+            # 地图列表里显式选一次）；只有非建图模式（导航中的地图编辑）才更新指针。
+            if self._mapping_mode or self._current_mode == 'map':
+                try:
+                    current = (Path.home() /
+                               '.config/fwr/last_navigation_map').read_text(
+                                   encoding='utf-8').strip()
+                except OSError:
+                    current = ''
+                self.get_logger().warn(
+                    f'建图模式保存地图 {name}：只写文件，不改当前导航地图'
+                    f'（仍是 {Path(current).stem if current else "<无>"}）')
+                note = '，当前导航地图未变，要切到这张请在地图列表里选一次'
+            else:
+                state = Path.home() / '.config/fwr/last_navigation_map'
+                state.parent.mkdir(parents=True, exist_ok=True)
+                state.write_text(str(yaml_path), encoding='utf-8')
+                note = ''
         except OSError as exc:
             self.get_logger().error(f'保存编辑地图失败: {exc}')
             self._publish_result('nav', False, f'保存失败: {exc}',
@@ -1579,7 +1608,7 @@ class MqttBridge(Node):
             f'编辑地图已保存: {pgm_path.name} {w}x{h} @{res:.3f}m')
         self._map_name = name
         self._map_name_at = 0.0
-        self._publish_result('nav', True, f'{name}（{w}×{h}）',
+        self._publish_result('nav', True, f'{name}（{w}×{h}）{note}',
                              action='map_edit')
         self._publish_map_list()
 

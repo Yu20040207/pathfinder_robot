@@ -12047,3 +12047,41 @@ inactive 告警 210 次 / 补 configure 196 次 / 二级恢复 64 次 / 三级�
   只留 `0 1px 2px rgba(0,0,0,.75)` 一层浅阴影。
 - 离线渲染（无头 Firefox、画布涂白）确认：白底上仍清楚，但不再是"胖字"。
 - 部署：云端 md5 见本条提交；后续再微调只动 `1.1px` 这一个数字。
+
+### 2026-11-24 16:45 · 建图保存的地图不再抢占导航地图；重新定位一定匹配"当前 /map"
+- 用户原话：「建图模式中建图且保存地图之后，再切换回导航模式的时候，发现重新定位匹配错了地图，
+  应该是用在了新保存的地图上面，现在导航模式正常切换回了上一次导航用的地图，但是重新定位的匹配
+  应该是用的保存的地图，修改」。
+- 现场取证（16:36 那次操作，`fwr-n305`）：
+  - `journalctl -u fwr-mqtt-bridge`：`16:36:51 编辑地图已保存: map_11240836.pgm 517x487`
+    → 说明保存走的是 `_on_map_edit`（手机地图编辑器通道）；
+  - `~/.config/fwr/last_navigation_map` 被这条保存**改写成了新图**
+    `maps/phone/map_11240836.yaml`；
+  - 于是 16:36:56 切回导航时 `map_server` 的 `yaml_filename` = **新图**，
+    `/map` 只有 1 个 publisher（map_server），`auto_initial_pose` 匹配的自然是新图；
+  - 但手机上的图面还是上一张导航图（`1A_map_door2`，绿字行报的名字也对得上），
+    因为**地图图片只在 `set_map` 时才上传**，保存后没人重发。
+  - 结论：不是匹配算法用错图，而是"保存把导航地图偷偷换掉了"+"手机图面没跟着换"。
+- 改动：
+  1. `mqtt_bridge._on_map_edit`：**建图模式（`_mapping_mode` 或 `mode=map`）只写文件，
+     不改 `last_navigation_map`**；回报文字带「当前导航地图未变，要切到这张请在地图列表里选一次」。
+     导航模式里的地图编辑仍照旧更新指针（那是用户显式编辑当前图）。
+  2. `mqtt_bridge._switch_mode(model='nav')`：切回导航后 `_init_active_map()` +
+     `_publish_map_file(_active_map_path)`，**手机图面 = map_server 真正加载的那张**。
+     `set_map` 那条路原本就有 `_publish_map()` 兜着，没动。
+  3. `auto_initial_pose._on_map`：**无条件清 `_mask_cache`**（原来只在尺寸变化时清）。
+     现场两张图尺寸不同（928×605 vs 517×487）所以没踩到，但换同尺寸的两张图就会拿旧墙去匹配新图。
+     换图时打一行 `地图 WxH @res m（换图，掩码已清）`。
+  4. `auto_initial_pose._on_reseed` 成功日志追加地图指纹 `地图 WxH @res m`，
+     以后"匹配到哪张图"直接看这一行。
+- 现场处置：把 `last_navigation_map` 改回 `maps/1A_map_door2.yaml` 并 `systemctl restart fwr-nav`；
+  验证 `map_server yaml_filename = 1A_map_door2.yaml`、`auto initial pose: 地图 928x605 @0.050 m`、
+  `match 0.073 m -> base (0.06,-5.20,81°) 贴墙 82%`、`AMCL seeded`；
+  `fwr-mqtt-bridge` 重启后日志 `地图已上传：1A_map_door2.pgm 928x605`（手机图面已同步）。
+  新保存的 `maps/phone/map_11240836.yaml` 保留在地图列表里，**不会**再自动成为导航图。
+- 部署：`mqtt_bridge.py` / `auto_initial_pose.py` 推到实机 `ros2_ws/src`（`build` 那份是同 inode，无需另拷），
+  md5 `d6df607d…` / `b5c73255…`；`fwr-mqtt-bridge`、`fwr-nav` 已重启生效。
+- 新增回归 `tests/test_map_save_scope.py`（4 例：建图保存不动指针、导航编辑动指针、
+  同尺寸换图清掩码、源码结构守门）；连同 `ros2_ws/src/fwr_bringup/test` +
+  `tests/test_mode_split|page_nav_startup|bringup|interface_contract` 共 **474 例通过**。
+- 未验证：用户自己再走一遍「建图 → 保存 → 切导航 → 重新定位」。

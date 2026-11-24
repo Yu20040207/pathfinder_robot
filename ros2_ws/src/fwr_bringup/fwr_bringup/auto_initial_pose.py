@@ -246,24 +246,32 @@ class AutoInitialPose(Node):
         self._seeded = True
         self._gave_up = False
         self._tf_ok_at = time.monotonic()
+        # 现场排查"匹配到了哪张图"要看这一行：尺寸/分辨率就是地图指纹
         self.get_logger().warn(
-            '重新定位成功: (%.2f, %.2f, %.0f deg) 残差 %.3f m 贴墙 %.0f%%' % (
-                base_x, base_y, math.degrees(base_yaw), score, 100 * on_wall))
+            '重新定位成功: (%.2f, %.2f, %.0f deg) 残差 %.3f m 贴墙 %.0f%% '
+            '地图 %dx%d @%.3f m' % (
+                base_x, base_y, math.degrees(base_yaw), score, 100 * on_wall,
+                self._map.info.width, self._map.info.height,
+                self._map.info.resolution))
         response.success = True
         response.message = '定位成功: (%.2f, %.2f, %.0f°) 残差 %.3f m' % (
             base_x, base_y, math.degrees(base_yaw), score)
         return response
 
     def _on_map(self, msg):
-        # 2026-11-19：换地图（尺寸不同）时必须让清除区掩码缓存失效。
-        # 否则 refine_pose 会拿旧地图的掩码去索引新地图 → IndexError
-        # "index 390 is out of bounds for axis 0 with size 235"（16:54 现场）。
+        # 2026-11-19：换地图时必须让清除区掩码缓存失效，否则 refine_pose 会拿
+        # 旧地图的掩码去索引新地图 → IndexError（16:54 现场）。
+        # 2026-11-24：**无条件失效**。原来只在"尺寸变了"时清 —— 换了一张**同尺寸**
+        # 的图（现场：新保存的图和旧图都是 517x487）就会拿旧墙去匹配新图，
+        # 表现为"重新定位匹配到了另一张地图"。
         old = self._map
-        if (old is not None and
-                (old.info.width != msg.info.width or
-                 old.info.height != msg.info.height or
-                 abs(old.info.resolution - msg.info.resolution) > 1e-9)):
-            self._mask_cache = None
+        self._mask_cache = None
+        if (old is None or old.info.width != msg.info.width or
+                old.info.height != msg.info.height or
+                abs(old.info.resolution - msg.info.resolution) > 1e-9):
+            self.get_logger().info(
+                'auto initial pose: 地图 %dx%d @%.3f m（换图，掩码已清）'
+                % (msg.info.width, msg.info.height, msg.info.resolution))
         self._map = msg
 
     def _on_scan(self, msg):

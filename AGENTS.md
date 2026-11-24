@@ -109,6 +109,22 @@
 - 实机验证（2026-11-24）：`mode=map` → nav 停/map 起、**base_bridge 始终 1 个**、
   `/scan_merged` 10 Hz；`mode=nav` → map 停、amcl active、安全链输出 20 Hz；
   `mode=manual` → 导航/建图全停、只剩硬件层、扫描 10 Hz。
+- 🗺 **"保存地图"不许抢占当前导航地图；重新定位只认 `map_server` 加载的那张**（2026-11-24 现场定版）
+  - `mqtt_bridge._on_map_edit`（手机地图编辑器/建图保存走的都是它）：
+    **建图模式（`_mapping_mode` 或 `mode=map`）只写 `maps/phone/<name>.{pgm,yaml}`，
+    不改 `~/.config/fwr/last_navigation_map`**；导航模式里的编辑仍更新指针（那是显式改当前图）。
+  - 症状回顾：保存动作改写了状态文件 → 切回导航时 `map_server` 起的是**新图**，
+    而手机图面还是上一张（地图图片只在 `set_map` 时上传）→ 看起来像"重新定位匹配错了地图"。
+  - 因此 `_switch_mode(target='nav')` 结束时会 `_init_active_map()` +
+    `_publish_map_file(_active_map_path)`，保证**手机图面 = `/map`**；`set_map` 那条路
+    原本就有 `_publish_map()` 兜着，别再重复加。
+  - `auto_initial_pose` 的地图来源就是 `/map`（没有第二条路），所以**要换导航图必须换掉
+    `last_navigation_map` 并重启 `fwr-nav`**；换图时日志会打
+    `地图 WxH @res m（换图，掩码已清）`，重新定位成功日志带同样的地图指纹。
+  - ⚠️ `auto_initial_pose._on_map` **无条件清 `_mask_cache`**：换**同尺寸**的另一张图
+    时如果不先清空，会拿旧地图的墙面掩码去匹配新图（旧写法只在尺寸变化时清）。
+  - 回归：`tests/test_map_save_scope.py`（4 例）。现场核对用
+    `grep -o "yaml_filename[^,]*" /tmp/launch_params_*` 看 `map_server` 到底加载了谁。
 - 📷 **导航模式也有摄像头（2026-11-24 用户要求）**：`#navCamBtn`（右侧竖排按键第一颗，
   排在「重新定位 📍」上面；整列 `#zoomCtl` `bottom` 86→**62 px**）→
   `#navCamPane`（盖在地图上的悬浮层，`z-index 40`，地图编辑器 60 在它上面）。
