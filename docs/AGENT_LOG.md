@@ -11857,3 +11857,35 @@ inactive 告警 210 次 / 补 configure 196 次 / 二级恢复 64 次 / 三级�
   `fwr-nav`/`fwr-map`/`fwr-vision`/`fwr-follow` inactive；`fwr-mqtt-bridge`、
   `fwr-lidar-watchdog`（`--no-spawn`）、`fwr-media`、`fwr-camera` active。
 - 车处于**手动模式**，`motion_enabled=false`、`manual_enabled=false`（未开门）。
+
+## 2026-11-24 11:07 · 重启后点「导航模式」一直等不到栈：云端中转把 mode 字段丢了
+
+### 现象
+用户重启主控后选「导航模式」，页面显示「正在等待导航栈就绪（第 9 次检查，还没开始定位）」，
+超过 1 min 不定位。顶部还写着「手动待命 · 安全链等待中」。
+
+### 定位过程
+1. 车端 `fwr-nav: inactive`，`fwr-base: active`；`base_bridge` 1 个、雷达 2 个。
+2. 桥接日志只有 `收到 nav 动作: mode` → **`已切到手动模式（只保留硬件层）`**，从没出现
+   `切到 nav`。15 s 一条（页面 `modeReconcileTick` 每 15 s 重发、最多 5 次）。
+3. 车端订阅 `robot/car-001/nav` 40 s 没抓到（重发次数已用完），但从 jc-api 源码看到
+   **转发是字段白名单**：`body = {'action': ...} (+ name/map)`，**`mode` 被吞**。
+4. 于是车端收到 `{"action":"mode"}`，`obj.get('mode')` 为空，`_switch_mode(None)`
+   回落成 `manual` → 页面看到的每一次"切导航"实际都在"切手动"。
+
+### 修复
+- `cloud/api/app.py`：白名单补 `mode`（`if raw.get('mode'): body['mode']=str(...)`），
+  重启 `jc-api`（备份 `app.py.bak.<ts>`），云端 md5 = 本地 `31d76e42…`。
+- `mqtt_bridge._switch_mode()`：**未知/缺失模式只打日志并忽略**，不再回落手动。
+- 新增回归：`tests/test_mode_split.py::test_cloud_relay_forwards_mode_field` /
+  `::test_bridge_ignores_unknown_mode_instead_of_falling_back`。
+
+### 已验证
+- 车端补发 `{"action":"mode","mode":"nav"}` → 日志 `已切到 nav 模式（其它模式已清理）`，
+  `fwr-nav active`，`/cmd_vel_auto_forward_filtered` **20.2 Hz**，
+  状态 `mode=nav / nav=stopped / chain=True`（页面 `stackUp` 条件因此满足，会自行继续定位）。
+- 相关测试 **463 passed**（`tests/test_mode_split.py` + 包内 test）。
+
+### 遗留
+- 手机页面若已弃守（`navReadyTries > 18` 会结束进度条），需重新点一次「导航模式」或刷新。
+- 云端 API 无自动化测试，目前只有仓库内静态回归（字段白名单漂移就报错）。

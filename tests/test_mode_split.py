@@ -85,3 +85,24 @@ def test_lidar_watchdog_never_spawns_its_own_node():
     wd = (ROOT / 'tools' / 'lidar_watchdog.py').read_text(encoding='utf-8')
     assert "'--no-spawn'" in wd
     assert '交给 fwr-base 的 launch respawn' in wd
+
+
+def test_cloud_relay_forwards_mode_field():
+    """云端 /ws/control 转发 nav 时是字段白名单，漏一个字段车端就收不到。
+
+    2026-11-24 现场：手机切「导航模式」→ 云端只转发 {'action':'mode'} →
+    车端 `obj.get('mode')` 为空 → 回落成手动 → 页面等 1 min+ 一直
+    「等待导航栈就绪（第 N 次检查）」，导航栈根本没起。
+    """
+    api = (ROOT / 'cloud' / 'api' / 'app.py').read_text(encoding='utf-8')
+    i = api.index("if raw.get('type') == 'nav':")
+    block = api[i:i + 1200]
+    assert "if raw.get('mode'):" in block, '云端转发必须带上 mode'
+    assert "body['mode'] = str(raw['mode'])" in block
+
+
+def test_bridge_ignores_unknown_mode_instead_of_falling_back():
+    """未知/缺失模式必须忽略，不能回落成手动（否则一切切换都变成停车）。"""
+    assert "忽略未知模式" in BRIDGE
+    assert "target = (target or '').strip().lower()" in BRIDGE
+    assert "target = 'manual'\n" not in BRIDGE.split('def _switch_mode')[1][:400]

@@ -91,6 +91,12 @@
 - 导航栈的 `scripts/run_navigation.sh` 在 `FWR_START_BASE=false`（`fwr-nav.service` 里设）
   时**跳过整套"清理旧栈"**：否则它会 pkill 掉 fwr-base 的 `base_bridge`，
   再因为"进程又回来了"误判旧栈仍在 → `exit 1` → 重启循环（2026-11-24 10:48 踩过）。
+- ⚠️ **云端 `cloud/api/app.py` 的 `/ws/control` 是「字段白名单」**：`nav` 类消息只转发
+  `action` / `name` / `map`（2026-11-24 补了 `mode`）。**新增任何 nav 字段都必须同步加到这里**，
+  否则手机发了、车端收不到——现场表现是「点导航模式，等 1 min+ 一直等待导航栈就绪」，
+  车端日志却只有 `已切到手动模式`。诊断方法：在车端订阅 `robot/<id>/nav` 看报文。
+- ⚠️ **车端未知模式一律忽略、不许回落成手动**：`_switch_mode` 收到空/非法 mode 只打
+  `忽略未知模式`，保持现状（旧写法回落 manual，等于把"切导航"执行成"停车"）。
 - 切模式由 `mqtt_bridge` 的 **`mode` 动作**（手机发 `{type:'nav',action:'mode',mode:...}`）：
   1. 确认 `fwr-base` active（不在就拉起来）；
   2. **停掉所有不属于目标模式的栈**，每个都等 systemd 真报 `inactive/failed`；

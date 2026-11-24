@@ -1172,9 +1172,14 @@ class MqttBridge(Node):
 
     def _switch_mode(self, target: str) -> None:
         import threading
-        target = (target or 'manual').strip().lower()
+        target = (target or '').strip().lower()
         if target not in self.MODE_UNITS:
-            target = 'manual'
+            # 2026-11-24：**不能回落成手动了**。云端/页面任一环丢了 mode 字段时，
+            # 旧写法会把"切导航"执行成"切手动"——现场就是反复「已切到手动模式」
+            # 而导航栈永远起不来。未知模式一律忽略，保持现状。
+            self.get_logger().warn(
+                f'忽略未知模式 {target!r}（只认 {sorted(self.MODE_UNITS)}）')
+            return
         self._nav = 'unknown'
         with self._mode_lock:
             if self._mode_running:

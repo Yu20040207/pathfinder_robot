@@ -387,6 +387,11 @@ async def control_ws(ws: WebSocket, device_id: str, token: str = ''):
                     body['name'] = str(raw['name'])
                 if raw.get('map'):
                     body['map'] = str(raw['map'])
+                # 2026-11-24：这里以前是**字段白名单**，手机切模式发的 `mode` 被丢掉，
+                # 车端只收到 {"action":"mode"} → `_switch_mode(None)` 回落成手动。
+                # 现场表现：点「导航模式」等 1 min+ 一直「等待导航栈就绪」，车不动。
+                if raw.get('mode'):
+                    body['mode'] = str(raw['mode'])
                 publish_json(device_id, 'nav', body)
                 continue
             if raw.get('type') == 'stop':
