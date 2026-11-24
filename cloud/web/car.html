@@ -438,10 +438,10 @@
      竖排整体再往下挪一点（bottom 86 → 62，正好落在底部按钮条上方）。 */
   #navCamBtn.on { background: #103246; color: #7dd3fc !important;
                   border-color: #1f6feb !important; }
-  #navCamPane { position: absolute; left: 8px; right: 8px; top: 114px; z-index: 40;
-                border-radius: 12px; overflow: hidden;
-                background: #000; border: 1px solid #30363d;
-                box-shadow: 0 8px 24px rgba(0,0,0,.55); }
+  #navCamPane { position: relative; margin: 4px 10px 0; border-radius: 12px;
+                overflow: hidden; background: #000; border: 0;
+                box-shadow: 0 8px 22px rgba(0,0,0,.5);
+                pointer-events: auto; }   /* 父容器是 none，这里必须开回来，否则 ✕ 点不动 */
   #navCamPane.hidden { display: none; }
   #navCamPane img { display: block; width: 100%; height: auto; max-height: 46vh;
                     object-fit: contain; background: #000; }
@@ -662,11 +662,13 @@
     <div id="navTopWrap">
       <div id="navInfo">导航模式：双指缩放/旋转，单指拖动，轻点添加航点</div>
       <div id="navStatus">定位中…</div>
-    </div>
-    <div id="navCamPane" class="hidden">
-      <img id="navCamImg" class="hidden" alt="摄像头画面">
-      <button id="navCamClose" title="关闭画面" aria-label="关闭">✕</button>
-      <div id="navCamErr" class="hidden"></div>
+      <!-- 2026-11-24 用户要求：画面紧贴绿色状态行下面、不要边框。
+           放在这个竖排容器里，提示文字换行时也不会被压住（不靠写死的 top 值）。 -->
+      <div id="navCamPane" class="hidden">
+        <img id="navCamImg" class="hidden" alt="摄像头画面">
+        <button id="navCamClose" title="关闭画面" aria-label="关闭">✕</button>
+        <div id="navCamErr" class="hidden"></div>
+      </div>
     </div>
     <div id="zoomCtl">
       <button id="navCamBtn" title="摄像头画面" aria-label="摄像头">📷</button>
