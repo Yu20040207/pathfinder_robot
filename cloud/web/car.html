@@ -777,7 +777,7 @@ let offlineOverlaySuppressed = false;
 
 function offlineTick() {
   if (offlineOverlaySuppressed) return;
-  if (!robotOfflineSince || shutdownPending) return;
+  if (!robotOfflineSince || shutdownPending || rebootPending) return;
   // 登录/刷新后的宽限期：车端刚开机时导航栈要 60~90 秒才起来
   // （base_bridge 在导航栈里），这期间没有任何 state 是**正常**的，
   // 判离线只会让用户以为设备坏了（2026-11-20 早现场）。
@@ -869,6 +869,12 @@ function modeReconcileTick() {
 }
 setInterval(modeReconcileTick, 1000);
 let shutdownPending = false;
+// 2026-11-24：用户要求"重启主控要有正在重启的全屏提示"（原来点重启什么都不弹，
+// 页面一直停在正常界面，直到 15 s 后判离线才闪现"设备离线"，很迷惑）。
+let rebootPending = false;       // 正在走"重启"流程
+let rebootSeenOffline = false;   // 已经真的断开过（没断开就不算"重新上线"）
+let rebootAt = 0;                // 点下重启的时刻（用于显示已等待秒数）
+let rebootOnlineSince = 0;       // 断过之后连续在线的起点
 // 2026-11-21：用户点关机后，车端还会在线几秒~几十秒（bridge 要等 systemd 停它）。
 // 以前 updateLinkBadge 只要看到 ok 就当成"重新上线" → 页面先显示已关机、
 // 马上弹"设备已重新上线"、过一会又变离线。现在要求：
@@ -878,6 +884,33 @@ let reonlineSince = 0;
 let robotOfflineSince = 0;
 let lastStateAt = 0;      // 最后一条 state 消息时间（判断真离线才弹页）
 const pageBootAt = Date.now();
+function rebootView(title, hint) {
+  const t = $('offlineTitle'), h = $('offlineHint');
+  if (t) t.textContent = title;
+  if (h) h.textContent = hint;
+  const icon = document.querySelector('#shutdownView .shutdownIcon');
+  if (icon) icon.textContent = '\u27f3';        // ⟳
+  const v = $('shutdownView');
+  if (v) v.classList.remove('hidden');
+  const btn = $('shutdownBack');
+  if (btn) btn.textContent = '返回产品';
+}
+
+// 重启期间每秒刷新一次提示（已等待几秒 + 当前阶段）
+function rebootTick() {
+  if (!rebootPending) return;
+  const sec = Math.max(0, Math.round((Date.now() - rebootAt) / 1000));
+  if (!rebootSeenOffline) {
+    rebootView('正在重启主控…',
+      `已发出重启指令 ${sec} 秒，主控将在几秒内断开；` +
+      '约 40~90 秒后自动上线，请勿断电。');
+  } else {
+    rebootView('正在重启主控…',
+      `主控已断开，正在等待重新上线（已等待 ${sec} 秒，通常 40~90 秒）…`);
+  }
+}
+setInterval(rebootTick, 1000);
+
 function clearStatusValues() {
   ['pct', 'volt', 'pose', 'spd', 'armState', 'hdrPct'].forEach((id) => {
     const el = $(id);
@@ -917,7 +950,38 @@ function updateLinkBadge() {
     robotOfflineSince = Date.now();     // 开始计时，15 秒后才判定为离线
   }
   if (ok) robotOfflineSince = 0;
-  if (ok && !shutdownPending) {
+  // 重启流程：先真的断过一次，再连续在线 15 s 才算"已上线"（防闪断）
+  if (!ok && rebootPending) {
+    if (!rebootSeenOffline) rebootSeenOffline = true;
+    rebootOnlineSince = 0;
+    const t = $('offlineTitle'), h = $('offlineHint');
+    if (t) t.textContent = '正在重启主控…';
+    if (h) h.textContent = '主控已断开，正在等待重新上线…';
+  }
+  if (ok && rebootPending) {
+    if (!rebootSeenOffline) {
+      // 刚发指令、车端还在收尾：这不是"已上线"，保持提示页不动
+      lastOnlineOk = ok;
+      const d0 = $('dot'); if (d0) d0.classList.toggle('on', ok);
+      return;
+    }
+    if (!rebootOnlineSince) rebootOnlineSince = Date.now();
+    if (Date.now() - rebootOnlineSince >= 15000) {
+      rebootPending = false;
+      rebootSeenOffline = false;
+      rebootOnlineSince = 0;
+      const t = $('offlineTitle'), h = $('offlineHint');
+      if (t) t.textContent = '主控已上线';
+      if (h) h.textContent = '主控已上线，正在恢复数据与画面（导航栈若未启动，切换模式后会自动就绪）…';
+      showToast('设备已重新上线', true);
+      setTimeout(() => {
+        if (!rebootPending && $('shutdownView')) {
+          $('shutdownView').classList.add('hidden');
+        }
+      }, 1500);
+    }
+  }
+  if (ok && !shutdownPending && !rebootPending) {
     const t = $('offlineTitle'), h = $('offlineHint');
     if (t) t.textContent = '设备已关机';
     if (h) h.textContent = '主控已关闭，请按电源键开机；开机后会自动恢复连接。';
@@ -2303,6 +2367,9 @@ $('devName').onclick = () => $('devPanel').classList.remove('hidden');
 $('devPanelClose').onclick = () => $('devPanel').classList.add('hidden');
 $('shutdownBack').onclick = () => {
   $('shutdownView').classList.add('hidden');
+  rebootPending = false;             // 用户主动退出重启提示页
+  rebootSeenOffline = false;
+  rebootOnlineSince = 0;
   offlineOverlaySuppressed = true;   // 在产品页期间不要再自动弹离线页
   robotOfflineSince = 0;
   showProductPage();
@@ -3687,8 +3754,19 @@ async function powerAction(action) {
       const t0 = $('offlineTitle'), h0 = $('offlineHint');
       if (t0) t0.textContent = '正在关机…';
       if (h0) h0.textContent = '主控正在关闭，大约 10~30 秒后离线；开机后会自动恢复连接。';
+      const icon0 = document.querySelector('#shutdownView .shutdownIcon');
+      if (icon0) icon0.textContent = '\u23fb';   // ⏻
       $('shutdownView').classList.remove('hidden');
       showToast('已发送关机指令', false);
+    } else {
+      rebootPending = true;
+      rebootSeenOffline = false;
+      rebootOnlineSince = 0;
+      rebootAt = Date.now();
+      robotOfflineSince = 0;
+      rebootView('正在重启主控…',
+        '已发出重启指令，主控将在几秒内断开；约 40~90 秒后自动上线，请勿断电。');
+      showToast('已发送重启指令', false);
     }
   } catch (e) {
     alert('操作失败：' + e.message);
