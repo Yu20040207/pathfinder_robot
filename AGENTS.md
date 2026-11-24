@@ -115,17 +115,21 @@
   复用同一路 MJPEG `/video`，但**独立一个 `<img>`**（手动模式那块在布局流里，不能共用）。
   切出导航模式会在 `applyMode()` 里自动关掉；断流自愈 / 切后台断流与手动模式同款。
   画面本体挂在 `#navTopWrap` 里（绿色状态行下面），**不用写死的 top**。
-- 🗺 **导航地图画布从提示条下面开始画**（2026-11-24 用户要求，原来被顶部提示条压住）：
-  `#navView` 是**竖排 flex**（`display:flex; flex-direction:column`），
-  `#navTopWrap`（白字提示 + 绿字状态 + 摄像头画面）`flex:none` 正常占位，
-  `#mapCanvas` `flex:1 1 auto; min-height:0` 自动吃掉剩余高度。
-  **不要再改回"绝对定位浮层 + JS 量高度补偿"**：那样既会重叠（用户截图：绿字压在白字框里）
-  又会在上方留一条黑缝，而且量高度永远有窗口期（隐藏时量到 0、摄像头打开时挤没地图）。
-  ⚠️ **`#navTopWrap` 带 `order:1`、`#mapCanvas` 带 `order:2`，不能删**：画布在 DOM 里
-  排在提示条前面，不写 order 画布会先吃掉高度，把白/绿两行挤到屏幕**最下面**
-  （2026-11-24 现场就是这个症状，用户报"两行跑到下面来了"）。
-  白字行 + 绿字行是**同一个扁平框**（`#navTopWrap` 出背景，两条子行都是 `background:none`、
-  `border-radius:0`、居中），用户明确不要圆角边框样式。
+- 🗺 **顶部两行是透明浮层，直接压在地图 / 摄像头画面上**（2026-11-24 用户最终定版）：
+  `#navView` 仍是**竖排 flex**，但 `#navTopWrap` 是
+  **`position:absolute; left/right:0; top:0; background:transparent; pointer-events:none`**
+  ——**没有框、没有底色**，只浮两行字（白字行 + 绿字行）。
+  `#mapCanvas` `order:2; flex:1 1 auto; min-height:0` 因此**铺满整个 #navView、从最顶上开始画**；
+  打开摄像头时 `#navCamPane`（`order:0`）先占位，画布自动排在它下面吃掉剩余高度。
+  ⚠️ **文字压在白色地图上必须靠描边**：两条子行都有
+  `-webkit-text-stroke:2.2px rgba(0,0,0,.82)` + `paint-order:stroke fill` + 深色 text-shadow。
+  Safari/WebKit 的 `paint-order` 让描边画在字心下面，字不会变细；改动这两条文字样式时别把描边删了，
+  否则白底上白字直接看不见。
+  ⚠️ **`pointer-events:none` 不能删**：否则浮层会吃掉地图的捏合/拖动/点击。
+  ⚠️ 历史：11-24 早些时候用户要求"地图画布从提示条下面开始画"、提示条带一块扁平深色底；
+  **之后又被用户改成"像摄像头画面那样完全透明"**。以本条为准，不要照旧记录改回去。
+  也不要再改回"绝对定位浮层 + JS 量高度补偿"（`--navTopH` / `layoutNavTop` 已废弃）：
+  量高度永远有窗口期（隐藏时量到 0、画面打开时挤没地图）。
   两条子行都是 **`white-space:nowrap` + `text-overflow:ellipsis`，强制各占一行**（用户明确要求，
   不许换行——换行会把整块顶高、地图跟着跳）。绿字行**不显示位置坐标**（`updateNavStatus()`
   只拼 `状态 · 地图 · 授权`，坐标看地图车标即可）。

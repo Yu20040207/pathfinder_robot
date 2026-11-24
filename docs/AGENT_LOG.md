@@ -12025,3 +12025,18 @@ inactive 告警 210 次 / 补 configure 196 次 / 二级恢复 64 次 / 三级�
   2. `#navCamBtn.onclick` 本来就是按 `navCamWanted` 分流（开/关），不用改，现在成为唯一开关；
   3. 既然没有 ✕ 了，撤销上一版给两条文字加的 `padding-left/right:46px`（恢复整行宽度居中）。
 - 部署：云端 md5 `1038b73f…`（与本地一致）。
+
+### 2026-11-24 13:35 · 顶部两行改成永久透明浮层（地图/画面都压字）
+- 用户要求：地图画布也像摄像头画面那样——两行字透明地浮在上面，不要底色块。
+- 改动（`cloud/web/car.html`）：
+  1. `#navTopWrap` 从"扁平深色底 + 正常占位"改成
+     **`position:absolute; left/right:0; top:0; background:transparent; pointer-events:none`**，
+     永久生效（不再分 `.cam-open` 与非 `.cam-open` 两套）；
+  2. 于是 `#mapCanvas`（`order:2; flex:1 1 auto`）**铺满整个 #navView、从最顶上开始画**；
+     打开摄像头时 `#navCamPane`（`order:0`）先占位，画布自动排在它下面；
+  3. 两行文字加大对比度：`-webkit-text-stroke:2.2px rgba(0,0,0,.82)` + `paint-order:stroke fill`
+     + 深色 text-shadow。**必须有描边**，否则白字压在白色地图上直接看不见。
+- 离线渲染验证（geckodriver + 无头 Firefox，430×900）：把画布强制涂白模拟真实地图，
+  关画面 / 开画面两张图确认——文字浮在地图顶部可读、画面打开时文字浮在视频上、
+  地图铺满到底部按钮条，无底色块。
+- 部署：云端 md5 `b9f35b99…`（与本地一致）；效果待用户确认。

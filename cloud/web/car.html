@@ -426,7 +426,10 @@
   #navStatus { position: static; margin: 0; font-size: 12px;
                color: #3fb950; background: none; padding: 0 10px 5px;
                white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-               border-radius: 0; text-align: center; pointer-events: none; }
+               border-radius: 0; text-align: center; pointer-events: none;
+               -webkit-text-stroke: 2.2px rgba(0,0,0,.82);
+               paint-order: stroke fill;
+               text-shadow: 0 0 4px rgba(0,0,0,.9), 0 1px 2px #000; }
   #zoomCtl { position: absolute; right: 10px; bottom: 62px; display: flex;
              flex-direction: column; gap: 8px; }
   #zoomCtl button { width: 44px; height: 44px; border-radius: 10px; font-size: 20px;
@@ -447,16 +450,10 @@
                   border-color: #1f6feb !important; }
   /* 2026-11-24 用户要求：画面也**不要圆角框**，和上面白/绿两行是同一块直角区域，
      宽度顶到两边、无边框无阴影。 */
-  /* 2026-11-24 用户要求：打开画面后**画面移到最上面**，白/绿两行浮在画面上（半透明，能透出视频）。
-     做法：#navCamPane 用 order:0 排在提示条(1)/画布(2) 前面；打开时给 #navView 加 .cam-open，
-     让 #navTopWrap 变成绝对定位盖在画面上，不再占布局高度（地图自然从画面下面开始）。 */
-  #navView.cam-open #navTopWrap { position: absolute; left: 0; right: 0; top: 0; }
-  /* 2026-11-24 用户要求：打开画面时提示条**完全透明**，只显示文字，背景就是视频画面。
-     透明后文字压在明亮/杂乱画面上会看不清，所以给文字加深色描边（text-shadow 模拟描边）。 */
-  #navView.cam-open #navTopWrap { background: transparent; }
-  #navView.cam-open #navInfo,
-  #navView.cam-open #navStatus {
-    text-shadow: 0 1px 2px #000, 0 0 4px #000, 1px 0 1px #000, -1px 0 1px #000; }
+  /* 2026-11-24 用户要求：**提示条永远透明**——只在画面上/地图上浮两行字，不要色块。
+     所以 #navTopWrap 永久 `position:absolute; top:0; background:transparent`，
+     不再占 flex 高度；地图画布（order:2 / flex:1）自然铺满整个 #navView，从最顶上开始画。
+     ⚠️ 文字压在白色地图上，必须靠深色描边（下面 #navInfo/#navStatus 的 text-shadow）才看得清。 */
   #navCamPane { order: 0; position: relative; margin: 0; border-radius: 0;
                 overflow: hidden; background: #000; border: 0;
                 box-shadow: none;
@@ -468,19 +465,23 @@
   #navCamErr { padding: 14px 12px; color: #ff7b72; font-size: 12px; line-height: 1.6;
                text-align: center; }
   #navCamErr.hidden { display: none; }
-  /* 顶部那一块：白字行 + 绿字行同在一个框里，扁平样式（无圆角、无边框）。
-     ⚠️ order 必须写：画布在 DOM 里排在 #navTopWrap 前面，不写 order 的话
-     画布会先吃掉高度、把这两行挤到屏幕最下面（2026-11-24 就踩了这个）。 */
-  #navTopWrap { position: relative; order: 1; flex: none; z-index: 6;
+  /* 顶部两行：**没有框**，直接浮在地图/画面上（用户 2026-11-24 要求）。
+     绝对定位所以不占高度，地图从最顶上铺满；`pointer-events:none` 让手势穿到画布。
+     ⚠️ 画布 `#mapCanvas` 的 `order:2` / `flex:1` 仍然要留着：打开摄像头时画面 `order:0`
+     先占位，画布排在它下面自动吃掉剩余高度。 */
+  #navTopWrap { position: absolute; left: 0; right: 0; top: 0; z-index: 6;
                 display: flex; flex-direction: column; gap: 0;
-                background: rgba(13,17,23,.72);
-                pointer-events: none; }
+                background: transparent;
+                pointer-events: none; }   /* 穿透，不挡地图的捏合/拖动/点击 */
   /* 2026-11-24 用户要求：这两行**各占一行、不允许换行**（放不下就省略号，宁可截断也不折行） */
   #navInfo { position: static; font-size: 12px;
              color: #d7e3ec; background: none; padding: 5px 10px 1px;
              text-align: center; letter-spacing: .3px;
              white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-             border-radius: 0; pointer-events: none; }
+             border-radius: 0; pointer-events: none;
+             -webkit-text-stroke: 2.2px rgba(0,0,0,.82);   /* Safari/iOS 主用：给字描一圈黑边 */
+             paint-order: stroke fill;                     /* 描边画在填充下面，字心不变细 */
+             text-shadow: 0 0 4px rgba(0,0,0,.9), 0 1px 2px #000; }
 </style>
   <link rel="manifest" href="manifest.webmanifest">
   <meta name="theme-color" content="#0d1117">
