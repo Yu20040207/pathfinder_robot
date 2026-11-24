@@ -37,8 +37,8 @@ from sensor_msgs.msg import LaserScan
 from std_msgs.msg import String
 from visualization_msgs.msg import Marker, MarkerArray
 
-from fwr_bringup.leg_track import (DEFAULTS, LegTracker, cluster_points,
-                                   describe, find_legs, match_pairs,
+from fwr_bringup.leg_track import (DEFAULTS, LegTracker, ang_norm,
+                                   cluster_points, describe, detect_pairs,
                                    scan_to_points, to_world)
 
 
@@ -73,7 +73,7 @@ class LegTrackerNode(Node):
         self.rx = self.ry = self.ryaw = 0.0
         self._odom_at = 0.0
         self._warned_no_odom = 0.0
-        self.cam: dict | None = None
+        self.cam_bearing: float | None = None
         self._cam_at = 0.0
         self._last_clusters = 0
         self._last_pairs = 0
@@ -120,8 +120,8 @@ class LegTrackerNode(Node):
             except (TypeError, ValueError):
                 continue
             break
-        self.cam = {'bearing': bearing, 'range': None} if bearing is not None \
-            else None
+        # 只存**车体系**方位角；换算到 odom 系要等用的时候（车可能在转）
+        self.cam_bearing = bearing
         self._cam_at = time.monotonic()
 
     def on_scan(self, msg: LaserScan) -> None:
@@ -135,9 +135,14 @@ class LegTrackerNode(Node):
                                    msg.angle_increment, self.p)
         pts = to_world(pts_local, self.rx, self.ry, self.ryaw)
         clusters = cluster_points(pts, self.p)
-        legs = find_legs(pts, self.p)
-        pairs = match_pairs(legs, self.p)
-        cam = self.cam if (now - self._cam_at) <= self.cam_stale_s else None
+        pairs, legs = detect_pairs(pts, self.p,
+                                  origin=(self.rx, self.ry))
+        cam = None
+        if (self.cam_bearing is not None
+                and (now - self._cam_at) <= self.cam_stale_s):
+            # 相机方位是车体系 → 加航向角变成 odom 系，才能和腿对方的位角比
+            cam = {'bearing': ang_norm(self.ryaw + self.cam_bearing),
+                   'range': None}
         tracks = self.tracker.step(pairs, now, cam)
 
         self._last_clusters = len(clusters)
@@ -193,6 +198,8 @@ class LegTrackerNode(Node):
             m.scale.x = m.scale.y = m.scale.z = 0.25
             if obj.get('cam'):
                 m.color.r, m.color.g, m.color.b = 0.25, 0.85, 0.35
+            elif obj.get('static'):
+                m.color.r, m.color.g, m.color.b = 0.55, 0.55, 0.55
             else:
                 m.color.r, m.color.g, m.color.b = 0.85, 0.60, 0.20
             m.color.a = 0.85
@@ -212,7 +219,9 @@ class LegTrackerNode(Node):
             t.scale.z = 0.22
             t.color.r = t.color.g = t.color.b = 1.0
             t.color.a = 1.0
-            t.text = '#%d%s' % (int(obj['id']), '' if obj.get('cam') else ' ?')
+            t.text = '%s%d%s' % ('~' if obj.get('static') else '#' if obj.get('cam')
+                                 else '#', int(obj['id']),
+                                 '' if obj.get('cam') else ' ?')
             arr.markers.append(t)
         self.markers.publish(arr)
 

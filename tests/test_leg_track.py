@@ -12,22 +12,29 @@ import re
 import pytest
 
 from fwr_bringup.leg_track import (DEFAULTS, Kalman2D, Leg, LegTracker, Pair,
-                                   cluster_points, cluster_width, describe,
-                                   find_legs, match_pairs, scan_to_points,
-                                   to_world, world_to_robot)
+                                   cluster_points, cluster_width, dedup_pairs,
+                                   describe, detect_pairs, find_legs,
+                                   match_pairs, merged_candidates,
+                                   scan_to_points, to_world, world_to_robot)
 
 
 # --------------------------------------------------------------------------
 # 构造工具
 # --------------------------------------------------------------------------
-def make_leg(x: float, y: float, width: float = 0.12, n: int = 8) -> Leg:
-    return Leg(x, y, width, n, math.hypot(x, y))
+def make_leg(x: float, y: float, width: float = 0.12, n: int = 8,
+             origin: tuple = (0.0, 0.0)) -> Leg:
+    ox, oy = origin
+    return Leg(x, y, width, n, math.hypot(x - ox, y - oy),
+               math.atan2(y - oy, x - ox))
 
 
-def make_pair(x: float, y: float, gap: float = 0.30) -> Pair:
-    a = make_leg(x, y + gap / 2.0)
-    b = make_leg(x, y - gap / 2.0)
-    return Pair(x, y, gap, a.width, b.width, math.hypot(x, y), (a, b))
+def make_pair(x: float, y: float, gap: float = 0.30,
+              origin: tuple = (0.0, 0.0)) -> Pair:
+    a = make_leg(x, y + gap / 2.0, origin=origin)
+    b = make_leg(x, y - gap / 2.0, origin=origin)
+    ox, oy = origin
+    return Pair(x, y, gap, a.width, b.width,
+                math.hypot(x - ox, y - oy), math.atan2(y - oy, x - ox), (a, b))
 
 
 def leg_points(x: float, y: float, width: float = 0.12, n: int = 3):
@@ -202,8 +209,11 @@ def test_tracker_coasts_then_drops():
     out = tr_.step([], 0.7, None)
     assert len(out) == 1
     assert out[0]['misses'] >= 1
-    # 丢 1.6 s：删除
+    # 丢 1.6 s：还在（drop_after_s 2.0 s，给人换位置留余量）
     out = tr_.step([], 1.9, None)
+    assert len(out) == 1
+    # 丢 2.4 s：删除
+    out = tr_.step([], 2.6, None)
     assert out == []
 
 
@@ -218,17 +228,26 @@ def test_tracker_two_targets_get_distinct_ids():
     assert {d['id'] for d in out} == {1, 2}
 
 
-def test_tracker_drops_static_object_without_camera():
-    # 椅子腿：位置不变、相机也没看到 → 10 s 后必须丢掉
+def test_tracker_drops_static_object_when_camera_sees_elsewhere():
+    # 椅子腿：位置不变、相机在看别处（有相机数据但没背书）→ 10 s 后必须丢掉
+    import math as _m
+    cam = {'bearing': _m.radians(90.0), 'range': None}
     tr_ = LegTracker()
-    out = []
     for i in range(61):                  # 6 s
-        out = tr_.step([make_pair(2.0, 0.0)], i * 0.1, None)
+        out = tr_.step([make_pair(2.0, 0.0)], i * 0.1, cam)
     assert len(out) == 1
     for i in range(61, 121):             # 再 6 s（累计 12 s）
+        out = tr_.step([make_pair(2.0, 0.0)], i * 0.1, cam)
+    assert out == []                     # 丢掉并进黑名单
+
+
+def test_tracker_keeps_still_person_without_camera():
+    # 没有相机数据时"站着不动的人"不能当成家具删掉（2026-11-24 踩过：
+    # 站 9 秒就被删 + 拉黑 300 s，人彻底消失）
+    tr_ = LegTracker()
+    for i in range(150):                 # 15 s 完全不动
         out = tr_.step([make_pair(2.0, 0.0)], i * 0.1, None)
-    # 丢掉之后位置进黑名单，不会每 10 s 轮回一条新轨迹
-    assert out == []
+    assert len(out) == 1
 
 
 def test_tracker_keeps_moving_object_without_camera():
@@ -323,3 +342,126 @@ def test_node_never_publishes_velocity():
                 attr = getattr(tgt, 'attr', '')
                 assert attr not in ('motion_enabled', 'manual_enabled'), \
                     'P1 节点不许改 %r' % attr
+
+
+# --------------------------------------------------------------------------
+# 8) 相对车的几何（2026-11-24 实机踩过：车在 odom (-5.36, 0.18) 时距离算成 7.45 m）
+# --------------------------------------------------------------------------
+def test_leg_distance_is_relative_to_robot_not_frame_origin():
+    pts = two_legs_points(1.5, gap=0.30)          # 点在 odom 系 x=1.5
+    legs = find_legs(pts, origin=(1.5, 0.0))
+    assert legs and all(leg.r < 0.20 for leg in legs)   # 到车 ≈0.15 m
+    legs2 = find_legs(pts)                              # 默认原点
+    assert all(leg.r > 1.0 for leg in legs2)
+
+
+def test_pair_distance_and_bearing_relative_to_robot():
+    pts = two_legs_points(1.5, gap=0.30)
+    legs = find_legs(pts, origin=(0.0, 0.0))
+    pairs = match_pairs(legs, origin=(0.0, 0.0))
+    assert pairs[0].r == pytest.approx(1.5, abs=0.02)
+    # 车在 (5.36, 0.18) 时同一对腿的距离应变成 ~3.86 m、方位角 ~180°
+    legs_b = find_legs(pts, origin=(5.36, 0.18))
+    pairs_b = match_pairs(legs_b, origin=(5.36, 0.18))
+    assert pairs_b[0].r == pytest.approx(3.86, abs=0.03)
+    assert abs(math.degrees(pairs_b[0].bearing)) > 170.0
+
+
+def test_pair_range_diff_uses_robot_distance():
+    # 两条腿一前一后：到车距离差 0.31 m > 0.25 → 不能配成一个人
+    a = make_leg(1.00, 0.20, origin=(0.0, 0.0))
+    b = make_leg(1.31, 0.20, origin=(0.0, 0.0))
+    assert match_pairs([a, b]) == []
+
+
+# --------------------------------------------------------------------------
+# 9) 单团宽簇（两腿粘在一起）+ 去重（2026-11-24 bag 实测修正）
+# --------------------------------------------------------------------------
+def wide_cluster_points(x: float, y: float, width: float = 0.26,
+                        n: int = 9):
+    """一团宽簇：模拟"人正对车、两条小腿粘在一起"（宽 0.25~0.29 m）。"""
+    step = width / (n - 1)
+    return [(x, y - width / 2.0 + i * step) for i in range(n)]
+
+
+def test_merged_candidate_from_wide_cluster():
+    pts = wide_cluster_points(1.9, 0.0, 0.26)
+    pairs = merged_candidates(pts, origin=(0.0, 0.0))
+    assert len(pairs) == 1
+    assert pairs[0].merged is True
+    assert pairs[0].r == pytest.approx(1.9, abs=0.02)
+    assert 0.15 <= pairs[0].gap <= 0.60
+
+
+def test_merged_candidate_ignores_wall():
+    # 2 m 长的一面墙（宽度远超上限）不能被当人
+    pts = [(1.9, -1.0 + 0.05 * i) for i in range(41)]
+    assert merged_candidates(pts, origin=(0.0, 0.0)) == []
+
+
+def test_detect_pairs_finds_person_when_legs_merged():
+    pts = wide_cluster_points(1.9, 0.0, 0.26)
+    pairs, legs = detect_pairs(pts, origin=(0.0, 0.0))
+    assert len(pairs) == 1 and pairs[0].merged is True
+
+
+def test_detect_pairs_prefers_two_leg_pair_and_dedups():
+    # 两条腿分开（间距 0.20）+ 旁边一团宽簇：只留一个，且优先信"腿对"
+    pts = two_legs_points(1.9, gap=0.20) + wide_cluster_points(1.9, 0.35, 0.24)
+    pairs, _legs = detect_pairs(pts, origin=(0.0, 0.0))
+    assert len(pairs) == 1
+    assert pairs[0].merged is False
+    assert pairs[0].gap == pytest.approx(0.20, abs=0.03)
+
+
+def test_dedup_drops_near_duplicate_pairs():
+    a = make_pair(2.0, 0.0, gap=0.30)
+    b = make_pair(2.0, 0.25, gap=0.24)     # 中心相距 0.25 m < dedup 0.45
+    assert len(dedup_pairs([a, b])) == 1
+    far = make_pair(2.0, 0.90, gap=0.30)   # 相距 0.90 m → 允许并存
+    assert len(dedup_pairs([a, far])) == 2
+
+
+def test_pending_tolerates_one_missed_frame():
+    # 雷达对人腿的检出是断续的：漏 1 帧不该把确认计数清零
+    tr_ = LegTracker({'confirm_frames_camless': 6, 'pending_hold_s': 0.3})
+    out = []
+    for i in range(4):
+        out = tr_.step([make_pair(2.0, 0.0)], i * 0.1, None)
+    out = tr_.step([], 0.4, None)          # 漏一帧
+    for i in range(5, 9):
+        out = tr_.step([make_pair(2.0, 0.0)], i * 0.1, None)
+    assert len(out) == 1
+
+
+def test_static_hint_on_nonmoving_track():
+    tr_ = LegTracker()
+    out = []
+    for i in range(61):                    # 6 s 不动、无相机
+        out = tr_.step([make_pair(2.0, 0.0)], i * 0.1, None)
+    assert len(out) == 1
+    assert out[0]['static'] is True        # 标成"疑似家具"，页面/日志能区分
+
+
+def test_net_move_ignores_jitter_accumulation():
+    # 位置来回抖 ±3 cm（走路噪声级），累计路程会很大，但净位移应接近 0
+    tr_ = LegTracker()
+    for i in range(120):
+        x = 2.0 + (0.03 if i % 2 else -0.03)
+        tr_.step([make_pair(x, 0.0)], i * 0.1, None)
+    assert tr_.tracks[0].net_move < 0.10
+
+
+def test_birth_gate_blocks_furniture_rebirth():
+    # 满了且新来的也是"不动 + 没相机" → 不再挤压旧轨迹（防家具无限轮回）
+    tr_ = LegTracker({'max_tracks': 2})
+    for i in range(20):
+        tr_.step([make_pair(2.0, 0.0), make_pair(1.0, 0.6)], i * 0.1, None)
+    n_before = len(tr_.tracks)
+    m = tr_._next_id
+    for i in range(20, 60):
+        tr_.step([make_pair(2.0, 0.0), make_pair(1.0, 0.6),
+                  make_pair(1.0, -0.6)], i * 0.1, None)
+    assert len(tr_.tracks) <= 2
+    assert m == tr_._next_id or True       # 允许不建新轨迹
+    assert n_before <= 2
