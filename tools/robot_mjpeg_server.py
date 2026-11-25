@@ -866,7 +866,9 @@ class WideUvcThread(threading.Thread):
             try:
                 print('广角相机取流：%s %s' % (device, self.size), flush=True)
                 proc = subprocess.Popen(self.command(), stdout=subprocess.PIPE,
-                                        stderr=subprocess.DEVNULL, bufsize=0)
+                                        stderr=subprocess.PIPE, bufsize=0)
+                errq: list[bytes] = []
+                threading.Thread(target=lambda: errq.extend(proc.stderr), daemon=True).start()
                 buf = b''
                 while not self._stop.is_set():
                     chunk = proc.stdout.read(65536)
@@ -901,6 +903,10 @@ class WideUvcThread(threading.Thread):
                         proc.wait(timeout=3)
                     except subprocess.TimeoutExpired:
                         proc.kill()
+            if errq:
+                msg = b''.join(errq).decode('utf-8', 'replace').strip()
+                if msg:
+                    print('广角 v4l2-ctl 输出：%s' % msg.splitlines()[-3:], flush=True)
             if not self._stop.is_set():
                 print('广角相机断流，%.0f s 后重试' % self.restart_delay, flush=True)
                 self._stop.wait(self.restart_delay)
