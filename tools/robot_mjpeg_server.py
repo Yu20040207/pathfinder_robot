@@ -170,8 +170,11 @@ class FrameHub:
                 self._fps_window = self._fps_window[-120:]
         self._event.set()
 
-    def publish_jpeg(self, data: bytes) -> None:
+    def publish_jpeg(self, data: bytes, resample: bool = True) -> None:
         """已经是 JPEG 帧：**需要缩小分辨率时才解码重编码**，否则原样透传。
+
+        `resample=False` 用于"没人看"的时候：只留一张原始帧给 `/snapshot.jpg`，
+        不解码不缩放（广角 720p 每帧解码+编码要 ~12 ms，白烧）。
 
         2026-11-21：手机端还嫌延迟，把画面降到 `--width 480`（480x360）。
         640x480 q92 一帧 44 KB，480x360 q70 只有 12~16 KB —— 传输时间与手机解码
@@ -181,7 +184,7 @@ class FrameHub:
         if self.min_period and now - self._last_encode < self.min_period:
             return
         enc_ms = 0.0
-        if self.width:
+        if resample and self.width:
             t0 = time.monotonic()
             img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
             if img is None:
@@ -240,6 +243,11 @@ class FrameHub:
                 'kb': round(len(self._jpeg) / 1024.0, 1) if self._jpeg else 0.0,
                 'source': 'camera' if self._real_frames else 'test',
             }
+
+    def has_clients(self) -> bool:
+        """有没有人在看（广角相机用它做"没人看就省电省 CPU"）。"""
+        with self._lock:
+            return self._clients > 0
 
     def has_real_frames(self) -> bool:
         with self._lock:
@@ -308,6 +316,9 @@ async def handle_health(request: web.Request) -> web.Response:
     if wide is not None:
         body['wide'] = wide.snapshot()
         body['wide']['device'] = request.app.get('wide_device', '')
+        src = request.app.get('wide_src')
+        if src is not None:
+            body['wide']['cap_fps'] = src.capture_fps()
     body['topic'] = request.app['topic']
     body['dds_ms'] = round(hub.dds_age_ms, 1)
     uvc = request.app.get('uvc')
@@ -449,11 +460,13 @@ async def _follow_services_baseline(_app) -> None:
 
 
 def build_app(hub: FrameHub, topic: str, uvc: 'UvcSource' = None,
-              hub_wide: 'FrameHub' = None, wide_device: str = '') -> web.Application:
+              hub_wide: 'FrameHub' = None, wide_device: str = '',
+              wide_src=None) -> web.Application:
     app = web.Application()
     app['hub'] = hub
     app['hub_wide'] = hub_wide
     app['wide_device'] = wide_device
+    app['wide_src'] = wide_src
     app['topic'] = topic
     app['uvc'] = uvc
     app['t0'] = time.monotonic()
@@ -688,13 +701,18 @@ class WideUvcThread(threading.Thread):
     MAX_BUFFER = 8 * 1024 * 1024    # 半帧缓冲上限，防把内存吃光
 
     def __init__(self, hub: 'FrameHub', device: str = '', size: str = '1280x720',
-                 restart_delay: float = 3.0) -> None:
+                 restart_delay: float = 3.0, cam_fps: int = 30) -> None:
         super().__init__(daemon=True)
         self.hub = hub
         self.fixed_device = device
         self.size = size
         self.restart_delay = float(restart_delay)
+        #: 让 `v4l2-ctl` 明确设置相机帧率（不设的话部分 UVC 相机会停在 10 fps）
+        self.cam_fps = int(cam_fps)
         self._stop = threading.Event()
+        self._cap_lock = threading.Lock()
+        self._cap_times: list[float] = []
+        self._last_idle_frame = 0.0
 
     def stop(self) -> None:
         self._stop.set()
@@ -705,10 +723,28 @@ class WideUvcThread(threading.Thread):
         return wide_device_path()
 
     def command(self) -> list:
-        return ['v4l2-ctl', '-d', self.device(),
-                '--set-fmt-video=width=%s,height=%s,pixelformat=MJPG' % tuple(
-                    self.size.lower().split('x')),
-                '--stream-mmap', '--stream-count=0', '--stream-to=-']
+        cmd = ['v4l2-ctl', '-d', self.device(),
+               '--set-fmt-video=width=%s,height=%s,pixelformat=MJPG' % tuple(
+                   self.size.lower().split('x'))]
+        if self.cam_fps > 0:
+            cmd.append('--set-parm=%d' % self.cam_fps)
+        cmd += ['--stream-mmap', '--stream-count=0', '--stream-to=-']
+        return cmd
+
+    def capture_fps(self) -> float:
+        """相机**实际喂过来**的帧率（不受发送限速影响，排查掉帧用）。"""
+        with self._cap_lock:
+            times = self._cap_times
+            if len(times) < 2:
+                return 0.0
+            span = times[-1] - times[0]
+            return round((len(times) - 1) / span, 1) if span > 0.5 else 0.0
+
+    def _note_capture(self, now: float) -> None:
+        with self._cap_lock:
+            self._cap_times.append(now)
+            if len(self._cap_times) > 240:
+                del self._cap_times[:-240]
 
     def run(self) -> None:
         device = ''
@@ -731,7 +767,14 @@ class WideUvcThread(threading.Thread):
                     buf += chunk
                     frames, buf = split_jpeg_frames(buf)
                     for jpeg in frames:
-                        self.hub.publish_jpeg(jpeg)
+                        now = time.monotonic()
+                        self._note_capture(now)
+                        if self.hub.has_clients():
+                            self.hub.publish_jpeg(jpeg)        # 有人看：缩到 480 宽
+                        elif now - self._last_idle_frame > 1.0:
+                            # 没人看：只留一张原始帧给 /snapshot.jpg，不解码不编码
+                            self._last_idle_frame = now
+                            self.hub.publish_jpeg(jpeg, resample=False)
                     if len(buf) > self.MAX_BUFFER:
                         buf = b''
             except (OSError, ValueError) as exc:
@@ -804,8 +847,12 @@ def main() -> int:
     ap.add_argument('--wide-size', default='1280x720', help='广角相机采集尺寸')
     ap.add_argument('--wide-width', type=int, default=480,
                     help='广角画面送到手机前的宽度（0=原样透传 1280 宽，4G 会吃不消）')
-    ap.add_argument('--wide-fps', type=float, default=12.0,
-                    help='广角画面发送上限帧率（4G 只有 ~3.5 Mbps，12 fps 足够看）')
+    ap.add_argument('--wide-fps', type=float, default=20.0,
+                    help='广角画面发送上限帧率（和主摄 ~19 fps 对齐）')
+    ap.add_argument('--wide-quality', type=int, default=65,
+                    help='广角重编码画质（越小越省 4G 流量）')
+    ap.add_argument('--wide-cam-fps', type=int, default=30,
+                    help='让相机按这个帧率出流（0=不设置，用相机默认）')
     args = ap.parse_args()
 
     hub = FrameHub(quality=args.quality, fps=args.fps, width=args.width)
@@ -832,17 +879,19 @@ def main() -> int:
     hub_wide = None
     wide_device = ''
     if not args.no_wide:
-        hub_wide = FrameHub(quality=args.quality, fps=args.wide_fps,
+        hub_wide = FrameHub(quality=args.wide_quality, fps=args.wide_fps,
                             width=args.wide_width)
-        wide = WideUvcThread(hub_wide, args.wide_device, args.wide_size)
+        wide = WideUvcThread(hub_wide, args.wide_device, args.wide_size,
+                             cam_fps=args.wide_cam_fps)
         wide_device = wide.device()
         wide.start()
-        print('广角相机：%s（%s，%g fps，%d 宽）' % (
+        print('广角相机：%s（%s，发送 %g fps / 相机 %d fps，%d 宽 q%d）' % (
             wide_device or '未找到（会持续重试）', args.wide_size,
-            args.wide_fps, args.wide_width), flush=True)
+            args.wide_fps, args.wide_cam_fps, args.wide_width,
+            args.wide_quality), flush=True)
 
     topic = args.v4l2 or ('test-pattern' if args.test_pattern else args.topic)
-    app = build_app(hub, topic, uvc, hub_wide, wide_device)
+    app = build_app(hub, topic, uvc, hub_wide, wide_device, wide if hub_wide else None)
     print(f'MJPEG 服务: http://{args.host}:{args.port}/video  '
           f'(topic={app["topic"]}, {args.fps:g} fps, q={args.quality})', flush=True)
     try:

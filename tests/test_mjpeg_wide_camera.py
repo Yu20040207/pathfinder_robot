@@ -116,3 +116,47 @@ def test_wide_source_is_zero_transcode_and_retries():
     assert 'self.hub.publish_jpeg(jpeg)' in src      # 透传，不重新编码
     assert "'--stream-to=-'" in src or '--stream-to=-' in src
     assert '广角相机没找到' in src                     # 拔掉时要能重试，不是崩溃
+
+
+# ---------------------------------------------------------------- 帧率优化
+
+def test_wide_thread_sets_camera_frame_rate_explicitly():
+    """不显式 `--set-parm` 时相机可能停在 10 fps（实测就是 10.0）。"""
+    src = SERVER.read_text(encoding='utf-8')
+    assert "'--set-parm=%d' % self.cam_fps" in src
+    assert 'def capture_fps' in src          # 暴露相机真实帧率，便于现场调参
+    assert 'cap_fps' in src                  # /healthz 里能看到
+
+
+def test_idle_viewer_skips_transcoding():
+    """没人看的时候不要解码/重编码（720p 每帧 ~12 ms 白烧）。"""
+    src = SERVER.read_text(encoding='utf-8')
+    assert 'self.hub.has_clients()' in src
+    assert 'resample=False' in src
+    assert 'def has_clients' in src
+
+
+def test_deployed_unit_uses_tuned_wide_args():
+    unit = (ROOT / 'deploy/systemd/fwr-media.service').read_text(encoding='utf-8')
+    assert '--wide-fps 20' in unit
+    assert '--wide-width 480' in unit
+    assert '--wide-cam-fps 30' in unit
+
+
+def test_frame_hub_skips_resample_when_asked(tmp_path):
+    """publish_jpeg(resample=False) 必须原样存字节，不经过解码/编码。"""
+    import ast
+    import types
+    import cv2
+    import numpy as np
+    tree = ast.parse(SERVER.read_text(encoding='utf-8'))
+    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'FrameHub')
+    ns = {'cv2': cv2, 'np': np, 'time': __import__('time'),
+          'threading': __import__('threading'), 'Optional': object}
+    exec(compile(ast.Module(body=[cls], type_ignores=[]), '<hub>', 'exec'), ns)
+    hub = ns['FrameHub'](quality=65, fps=0, width=480)
+    raw = b'\xff\xd8raw-bytes-not-a-real-jpeg\xff\xd9'
+    hub.publish_jpeg(raw, resample=False)
+    jpeg, _seq = hub.latest()
+    assert jpeg == raw                     # 一模一样，说明没走 cv2
+    assert hub.has_clients() is False
