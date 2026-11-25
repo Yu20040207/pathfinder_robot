@@ -12308,3 +12308,48 @@ P1 = 纯逻辑 + 节点 + 单测，**只发布观测**，用来先采集数据�
 - 手机端实际观感（需用户**刷新页面**）：提示行是否还跳"没在跑"、雷达接管时的黄色 `📡 雷达跟踪`。
 - 车端 `fwr-media` 启动时会 baseline 停掉 vision/follow（设计如此），
   所以**重启 fwr-media 后要等页面 prep 心跳或手动 prep** 才会回来——这点已写进 AGENTS.md。
+
+## 2026-11-25 08:50 · 冷启动后「导航栈正在启动」永久卡住（错峰 + 12 s 就绪补齐）
+
+### 现场
+- 08:37 冷启动（`up 3 min`），手机切导航模式后一直等。
+- `fwr-nav` 服务是 `active`，但：`map_server inactive [2]`、`amcl inactive [2]`、
+  `controller_server / planner_server / behavior_server unconfigured`，
+  只有 `collision_monitor_forward active`。
+- 日志：`[amcl.rclcpp] failed to send response to /amcl/change_state (timeout)`
+  → `lifecycle_manager_localization` 放弃；之后 `auto_initial_pose` 每 5 s 刷
+  `重建 /map 订阅（还没收到地图）`（map_server 没激活，`/map` 没数据）。
+- **本次开机只发生 1 次该超时**（前 4 次开机 0 次）→ 低概率启动竞态，
+  与 11-24 的 follow/vision 改动无关（那些没碰导航栈）。
+- 关键：`lifecycle_manager` **超时一次就放弃、不重试**，所以 CPU 后来空闲了也不会自愈。
+
+### 实测启动时长（决定宽限该设多少）
+昨天成功那次：`11:10:21` 起 22 个节点 → `11:10:23` localization active（+2 s）
+→ `11:10:26` collision_monitor active（+6 s）。**6 s 就该全好**，90 s 无意义。
+
+### 修法（方案 3：错峰 + 快速补齐）
+1. `real_navigation.launch.py`：新增 `_late(period_s, *actions)`（`TimerAction`），
+   把非安全关键节点延后 **5 s**：`trail_reverser` / `frontier_explorer` /
+   `map_autosave` / `pose_checkpoint` / `room_labels`。
+   安全链、`auto_activate_nav`、`auto_initial_pose`、`directional_safety_selector` 立即起。
+2. `tools/chain_watchdog.py`：新增 `READY_NODES` + `ready_due()` 纯函数 + `_watch_ready()`：
+   首次启动 **12 s**、运行中掉线 **8 s** 仍未 active 就补 `configure/activate`；
+   冷却 20 s、最多 4 次；**只改生命周期状态，不杀进程、不发速度**。
+   ⚠️ 单独一组，**不并进 `MONITORS`**（那套会杀进程）。
+
+### 已验证（实机 11-25 08:47 重启后）
+| 检查 | 结果 |
+| --- | --- |
+| `map_server/amcl/controller_server/planner_server/behavior_server/`<br>`collision_monitor_forward` | **全部 active [3]** |
+| 定位播种 | `match 0.039 m -> base (0.86,-2.96,-105°) 贴墙 88% 未知 0%` |
+| 安全链输出 | `/cmd_vel_auto_forward_filtered` **20.58 Hz** |
+| 延迟的 5 个节点 | `frontier_explorer / pose_checkpoint / room_labels / trail_reverser` 都在（`map_autosave` 按条件不启动，正常） |
+| 误触发 | 30 s 内 `导航栈 … 卡在` **0 次**、看门狗无报错 |
+- 单测：`tests/test_ready_watchdog.py` **14 例**；合跑 **169 例**全过；
+  launch 构造 32 实体 / 5 个 `TimerAction=5 s`；部署 md5 一致（`chain_watchdog d1f6a74b5baf`、
+  `real_navigation.launch.py efb350c0c276`），车上 `py_compile` OK。
+
+### 未验证
+- 真正的"卡住 → 12 s 自愈"还没在实机上故意复现过（要人为 deactivate 一个节点，
+  需要用户同意）；目前只有单测覆盖判定逻辑 + 本次启动未触发（因为这次没卡）。
+- 冷启动竞态是否被错峰彻底消除：需要多观察几次开机。

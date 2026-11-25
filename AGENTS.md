@@ -223,6 +223,24 @@
 - `collision_monitor` 触发一次 `stop` 后会**卡死不再处理指令** →
   `/cmd_vel_auto_safe` 恒为 0、车不动。用 `tools/chain_watchdog.py` 自动重启，
   或手工 `ros2 lifecycle set /collision_monitor_forward deactivate/activate`。
+- 🩺 **冷启动"导航栈正在启动"永久卡住 → 已加错峰 + 12 s 就绪补齐（2026-11-25）**
+  - 现场：开机 08:37，40+ 节点同时向 DDS 注册，`/amcl/change_state` 应答超时 →
+    `lifecycle_manager` **超时一次就放弃且不重试** → `map_server`/`amcl` 永远 `inactive`、
+    Nav2 几个停在 `unconfigured`，手机端「导航栈正在启动」永远不消失。
+  - 实测**正常启动只要 6 s**（11-24 11:10:21 起，11:10:26 `collision_monitor` 已 active），
+    所以"90 s 宽限"没意义。
+  - **修法一（错峰）**：`real_navigation.launch.py` 的 `_late(5.0, Node(...))` 把
+    `trail_reverser` / `frontier_explorer` / `map_autosave` / `pose_checkpoint` /
+    `room_labels` 延后 5 s；**安全链、`auto_activate_nav`、`auto_initial_pose`、安全选择器
+    必须立即起**（有单测钉死，别把它们也套进 `_late`）。
+  - **修法二（补齐）**：`tools/chain_watchdog.py` 的 `READY_NODES`
+    （`map_server/amcl/controller_server/planner_server/behavior_server`）：
+    首次启动 **12 s** 仍非 active 就补 `configure/activate`，运行中掉线 **8 s** 就补，
+    冷却 20 s、最多 4 次（`ready_due()` 纯函数 + 单测）。
+  - ⚠️ **`READY_NODES` 绝不能并进 `MONITORS`**：后者走 `_fix()` 会**杀进程**，
+    而且 `MONITORS` 是"安全链"语义；就绪补齐只改生命周期状态、不杀进程、不发速度。
+  - 实测（11-25 08:47 重启后）：6 个节点全 `active`、安全链 20.6 Hz、
+    播种 `match 0.039 m (0.86,-2.96,-105°) 贴墙 88%`、30 s 内 0 次误触发。
 - ⚠️ **监控"一直是 inactive"也要管（2026-11-22）**：雷达在启动期反复超时重启时，
   `collision_monitor` 首次 activate 会因 TF 未就绪失败 → `lifecycle_manager` 放弃 →
   节点**永远停在 inactive**，`/cmd_vel_auto_forward_filtered` 恒无 → 手机端
