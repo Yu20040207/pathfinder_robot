@@ -368,7 +368,7 @@
   - 车端：`tools/robot_mjpeg_server.py` 的 `WideUvcThread` 用 `v4l2-ctl` 拉裸流、
     按 `FFD8..FFD9` 切帧（`split_jpeg_frames`，70 帧 0 坏帧）、**零转码透传**；
     `GET /video?cam=wide` 取广角（`deploy/systemd/fwr-media.service` 里
-    `--wide-width 480 --wide-fps 25 --wide-quality 60 --wide-cam-fps 30`），
+    `--wide-size 640x480 --wide-width 480 --wide-fps 20 --wide-quality 60 --wide-fps-4g 12`），
     `/video` 仍是 HP60C；`/healthz` 带 `wide` 字段。设备按 by-id 自动找、拔掉每 3 s 重试。
   - ⚠️ **切画面必须换新的 `<img>` 节点**（`camMount()` + `replaceWith`）：WebKit 不认
     `removeAttribute('src')` 断流，旧 MJPEG 长连接不断，切几次就攒满同域 6 条连接 →
