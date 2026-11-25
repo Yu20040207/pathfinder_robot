@@ -46,6 +46,26 @@
   诊断"通没通"看 `ppp0` 的收发计数差（见 `docs/AGENT_LOG.md` 2026-11-25 条）。
 - ⚠️ **APN 不是判据**：`cbnet` / `cbn` / `gdnet` 三个都能拨上、还各拿到不同 IP
   （EC200A 不校验 APN 也照样附着），但**卡没流量时三个都是零回包**。别拿"能拨号"当"能用"。
+- 🔀 **WiFi ↔ 4G 切换实测（2026-11-25 10:26，`nmcli radio wifi off` 强制断）**：
+  - **WiFi 断 → 默认路由到 4G：0.16 s；能上网：0.21 s**（ppp0 默认路由本来就在，切的是优先级）
+  - **WiFi 恢复 → 重新成为默认路由：4.20 s**
+  - **车端 MQTT：断链在 keep-alive 超时后才被发现（约 45 s），发现后重连只用 1.1 s**
+    → 用户感知是"WiFi 断了大约 45 秒后，云端才看到掉线，然后 1 秒恢复"
+  - 延迟：WiFi 平均 15~19 ms（抖动 0.3~9.8 ms）、4G 平均 **47~60 ms**（mdev 6~12 ms，偶发 190~660 ms 尖刺）
+  - 吞吐：4G 下载 **≈434 KB/s（3.5 Mbps）**（清华镜像 3 MB / 6.9 s）；一次早先测得 343 KB/s
+- ⚠️ **4G 模块的 RNDIS 网口会抢默认路由（2026-11-25 实测踩到，必须处理）**：
+  `enx020c29a39b6d`（192.168.43.100，网关 192.168.43.1）**metric 20100，比 ppp0 的 20700 更优**，
+  所以 WiFi 一断、默认路由就落到这个**不通外网**的网口上 → 云端 MQTT keep-alive 超时、车"失联"。
+  现场测法：`ip route get 223.5.5.5` 看 `dev` 是 `ppp0` 还是 `enx020c29a39b6d`。
+  临时处理（运行时，重启/重插会回来）：`sudo ip route del default via 192.168.43.1 dev enx020c29a39b6d` +
+  `sudo ip link set enx020c29a39b6d down`。永久修复待做（systemd oneshot 或 NM unmanaged）。
+- ⚠️ **4G 链路会静默死亡，需要"重新注册 + 重拨"**（2026-11-25 一小时内 3 次）：
+  症状是 `ppp0` 还在、MM 显示 connected，但 `registration: idle`、`packet service: detached`、回包 0。
+  自愈顺序：`sudo mmcli -m <idx> --3gpp-register-home` → `nmcli con down/up 4g`，
+  实测**一次自愈 ~93 s**（含 40 s 轮询）。另外 dmesg 10:56 有
+  `usb 3-1.3.3: device descriptor read/all, error -71` 并伴随重新枚举 →
+  **模块挂在"根 hub → hub1 → hub2"两级级联 hub 上（与相机、双雷达同一总线）**，供电/信号存疑，
+  建议换到主机**直连 USB 口**再评估稳定性。
 - ⚠️ 截至 2026-11-25：`jccontrol.xyz:443` 的 TLS **WiFi 和 4G 都会 reset**（与 4G 无关，是云端 443 自身的问题，
   待单独查）；走 80 端口正常。
 - 云端视频地址**不写死 IP**：`/etc/systemd/system/jc-api.service.d/media.conf` 里

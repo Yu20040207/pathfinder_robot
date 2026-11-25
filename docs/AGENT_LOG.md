@@ -12470,3 +12470,35 @@ sudo nmcli con up 4g
 - `jccontrol.xyz:443` TLS **WiFi 与 4G 都 reset**（`curl: (35) SSL_connect: 连接被对方重置`），
   与 4G 无关，属云端 443 的问题，待单独排查。
 - 若要把 4G 改成主用：`route-metric 50` 后重拨；建议先做一次"拔 WiFi 看是否自动切 4G"的实测。
+
+## 2026-11-25 10:26 · 4G 切换/延迟/吞吐实测 + 三个真问题
+
+### 实测数据（`nmcli radio wifi off` 强制断 WiFi，避免自动重连干扰）
+| 项目 | 数值 |
+| --- | --- |
+| WiFi 断 → 默认路由到 4G | **0.16 s** |
+| WiFi 断 → 默认路由下能上网 | **0.21 s** |
+| WiFi 恢复 → 重新成为默认路由 | **4.20 s** |
+| 车端 MQTT 断线发现 | **约 45 s**（keep-alive 超时） |
+| 车端 MQTT 重连 | **1.1 s**（10:26:15 断开 → 10:26:16 已连接） |
+| WiFi 延迟 | 平均 **15~19 ms**，mdev 0.3~9.8 ms |
+| 4G 延迟 | 平均 **47~60 ms**，mdev 6~12 ms，偶发 190~660 ms 尖刺 |
+| 4G 下载吞吐 | **434 KB/s ≈ 3.5 Mbps**（清华镜像 3 MB / 6.9 s；早先 343 KB/s） |
+| 4G 访问云端 | TCP 1883 握手 **59~71 ms**；HTTP 80 **200 / 0.41 s** |
+
+### 三个真问题
+1. **RNDIS 网口抢默认路由**：`enx020c29a39b6d`(192.168.43.100) metric **20100** 优于 ppp0 的 **20700**。
+   WiFi 一断，默认路由落到这个不通外网的网口 → MQTT 超时、车失联。
+   运行时修复已做：删该默认路由 + `ip link set ... down`，之后 failover 才正常（上面 0.16 s 是修完后的数）。
+   **永久化未做**（需要 systemd oneshot 或 NM unmanaged 配置，待批准）。
+2. **4G 链路静默死亡**（1 小时内 3 次）：`ppp0` 在、MM 显示 connected，但 `registration: idle`、
+   `packet service: detached`、回包 0。自愈需 `mmcli --3gpp-register-home` + `nmcli down/up 4g`，
+   实测一次 **93 s**。
+3. **USB 层不稳定**：dmesg `usb 3-1.3.3: device descriptor read/all, error -71` + 重新枚举
+   （设备号 12→13→15）。该模块挂在 **根 hub → hub1 → hub2** 两级级联 hub 上，
+   与相机(uvc)、双雷达(cp210x)同一 480M 总线。建议改直连主机 USB 口。
+
+### 待办（需用户批准）
+- 把 RNDIS 路由修复做成持久化（systemd oneshot，开机 + 网络变化时执行）。
+- 4G 看门狗：默认路由是 ppp0 但 ping 不通 → 自动 register-home + 重拨（把 93 s 压到 ~20 s）。
+- 评估把 `mqtt_bridge` 的 keep-alive 从 ~45 s 降到 15~20 s（断网感知更快）。
