@@ -138,7 +138,7 @@ def test_idle_viewer_skips_transcoding():
 
 def test_deployed_unit_uses_tuned_wide_args():
     unit = (ROOT / 'deploy/systemd/fwr-media.service').read_text(encoding='utf-8')
-    assert '--wide-fps 25' in unit
+    assert '--wide-fps 20' in unit
     assert '--wide-width 480' in unit
     assert '--wide-cam-fps 30' in unit
 
@@ -246,8 +246,8 @@ def test_link_is_read_from_kernel_route():
 
 def test_unit_has_4g_fallback_arg():
     unit = (ROOT / 'deploy/systemd/fwr-media.service').read_text(encoding='utf-8')
-    assert '--wide-fps-4g 20' in unit
-    assert '--wide-fps 25' in unit
+    assert '--wide-fps-4g 15' in unit
+    assert '--wide-fps 20' in unit
 
 
 def test_dead_client_write_times_out():
@@ -255,3 +255,23 @@ def test_dead_client_write_times_out():
     src = SERVER.read_text(encoding='utf-8')
     assert 'STREAM_WRITE_TIMEOUT_S' in src
     assert 'asyncio.wait_for(resp.write(' in src
+
+
+def test_stream_write_timeout_constant_is_defined():
+    """2026-11-25 事故：用了 STREAM_WRITE_TIMEOUT_S 却没定义 → handle_stream 立刻 NameError，
+    两路画面全黑。这里钉死"引用了的模块级名字必须在源码里定义"。"""
+    src = SERVER.read_text(encoding='utf-8')
+    assert 'STREAM_WRITE_TIMEOUT_S = ' in src
+    assert 'timeout=STREAM_WRITE_TIMEOUT_S' in src
+
+
+def test_no_undefined_module_constants_used_in_handlers():
+    """粗筛：handle_stream 里用到的全大写名字，必须在模块级定义过。"""
+    import re
+    src = SERVER.read_text(encoding='utf-8')
+    handler = src[src.index('async def handle_stream'):src.index('async def handle_snapshot')]
+    code = re.sub(r'#[^\n]*', '', handler)                      # 去注释
+    code = re.sub(r"'[^'\n]*'|\"[^\"\n]*\"", '', code)          # 去字符串字面量
+    used = set(re.findall(r'\b([A-Z][A-Z0-9_]{3,})\b', code))
+    defined = set(re.findall(r'^([A-Z][A-Z0-9_]{3,})\s*=', src, re.M))
+    assert used - defined == set(), used - defined

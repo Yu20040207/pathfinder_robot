@@ -10,12 +10,12 @@ WorkingDirectory=/home/manbaout/Company_Project/Four-wheel-robot
 # 相机由 fwr-camera.service 独占（/dev/video0），这里只订阅 ROS 话题；
 # 相机没起来时先出测试图案，真实帧一到自动切走。
 # 第二路 120° 广角相机（/dev/video/by-id 自动找）：--wide-* 控制它。
-#   --wide-width 480   送到手机前缩到 480 宽（4G 只有 ~3.5 Mbps）
-#   --wide-fps 25      WiFi 下的发送上限（和主摄 ~19 fps 对齐）
-#   --wide-fps-4g 20   默认路由变成 4G 时自动降到 20（4G 上行只有 ~3.5 Mbps）
+#   --wide-size 640x480 --wide-width 480   送到手机前缩到 480 宽（4G 只有 ~3.5 Mbps）
+#   --wide-fps 20      WiFi 下的发送上限（相机实测天花板 19.4 fps，20 等于不限速）
+#   --wide-fps-4g 15   默认路由变成 4G 时自动降到 15（19.4fps×17.9KB=2.8Mbps 太满，15fps≈2.1Mbps）
 #   --wide-quality 60  重编码画质（越小越省流量）
 #   --wide-cam-fps 30  显式让相机按 30 fps 出流（不设时部分 UVC 相机会停在 10 fps）
-ExecStart=/bin/bash -lc "source /opt/ros/humble/setup.bash && source ros2_ws/install/setup.bash && exec ./.venv/bin/python tools/robot_mjpeg_server.py --port 8081 --fps 0 --quality 70 --width 480 --wide-width 480 --wide-fps 25 --wide-quality 60 --wide-fps-4g 20 --wide-cam-fps 30 --fallback-test-pattern"
+ExecStart=/bin/bash -lc "source /opt/ros/humble/setup.bash && source ros2_ws/install/setup.bash && exec ./.venv/bin/python tools/robot_mjpeg_server.py --port 8081 --fps 0 --quality 70 --width 480 --wide-size 640x480 --wide-width 480 --wide-fps 20 --wide-quality 60 --wide-fps-4g 15 --wide-cam-fps 30 --fallback-test-pattern"
 Restart=always
 RestartSec=3
 Nice=5

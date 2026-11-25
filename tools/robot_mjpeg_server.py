@@ -45,6 +45,8 @@ import numpy as np
 from aiohttp import web
 
 BOUNDARY = 'fwrframe'
+#: 单帧写操作的最长等待（秒）；超时说明手机已经不看了，断开这条连接
+STREAM_WRITE_TIMEOUT_S = 6.0
 MAX_WIDTH = 1280
 
 # 人体检测结果桥接（2026-11-21 跟随模式）：person_detector 节点 -> HTTP
