@@ -275,3 +275,39 @@ def test_no_undefined_module_constants_used_in_handlers():
     used = set(re.findall(r'\b([A-Z][A-Z0-9_]{3,})\b', code))
     defined = set(re.findall(r'^([A-Z][A-Z0-9_]{3,})\s*=', src, re.M))
     assert used - defined == set(), used - defined
+
+
+route_from_proc_route = _load_functions('route_from_proc_route')[0]
+
+PROC_ROUTE = """Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT
+wlo1\t00000000\t0101A8C0\t0003\t0\t0\t600\t00000000\t0\t0\t0
+enx020c29a39b6d\t00000000\t012BA8C0\t0003\t0\t0\t20100\t00000000\t0\t0\t0
+ppp0\t00000000\t00000000\t0001\t0\t0\t20700\t00000000\t0\t0\t0
+wlo1\t0001A8C0\t00000000\t0001\t0\t0\t600\t00FFFFFF\t0\t0\t0
+"""
+
+
+def test_route_picks_lowest_metric_default():
+    up = {'wlo1': True, 'enx020c29a39b6d': True, 'ppp0': True}
+    assert route_from_proc_route(PROC_ROUTE, up) == 'wlo1'
+
+
+def test_route_skips_down_interface():
+    """WiFi 断了就走 ppp0；RNDIS（enx*）metric 更小但**不通外网**，必须跳过。"""
+    up = {'wlo1': False, 'enx020c29a39b6d': True, 'ppp0': True}
+    assert route_from_proc_route(PROC_ROUTE, up) == 'ppp0'
+    up2 = {'wlo1': True, 'enx020c29a39b6d': True, 'ppp0': True}
+    assert route_from_proc_route(PROC_ROUTE, up2) == 'wlo1'
+
+
+def test_route_ignores_non_default_rows():
+    up = {'wlo1': True}
+    assert route_from_proc_route(PROC_ROUTE.splitlines()[0] + '\n', up) == ''
+
+
+def test_link_check_does_not_spawn_subprocess():
+    """取流线程里跑 `ip route get` 会把广角从 20 fps 拖到 13（2026-11-25 实测）。"""
+    src = SERVER.read_text(encoding='utf-8')
+    body = src[src.index('def default_route_iface'):src.index('def decimate_step')]
+    assert '/proc/net/route' in body
+    assert 'subprocess.run' not in body.split('def _route_iface_by_ip')[0]

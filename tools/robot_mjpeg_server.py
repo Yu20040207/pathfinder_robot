@@ -708,8 +708,67 @@ def target_fps_for(iface: str, lan_fps: float, cell_fps: float) -> float:
     return float(lan_fps)
 
 
+def route_from_proc_route(text: str, link_up: dict) -> str:
+    """从 `/proc/net/route` 找默认路由里 metric 最小的那张网卡（纯函数，好测）。
+
+    ⚠️ **不能用 `subprocess` 每几秒去跑一次 `ip route get`**：实测那一下要几十到上百
+    毫秒，跑在取流线程里会把广角帧率从 20 拉到 13（2026-11-25 实测）。
+    `link_up` 传 {网卡名: True/False}（来自 /sys/class/net/<dev>/operstate）。
+    """
+    best = ''
+    best_metric = None
+    for line in text.splitlines()[1:]:
+        parts = line.split()
+        if len(parts) < 8:
+            continue
+        iface, dest, _gw, flags, _ref, _use, metric = parts[0], parts[1], parts[2], parts[3], parts[4], parts[5], parts[6]
+        if dest != '00000000':
+            continue
+        try:
+            if not (int(flags, 16) & 0x1):        # RTF_UP
+                continue
+            m = int(metric)
+        except ValueError:
+            continue
+        if link_up and link_up.get(iface) is False:
+            continue
+        # `enx*` = USB 网卡，本车上就是 4G 模块的 RNDIS 口（192.168.43.1，不通外网）。
+        # 它 metric 比 ppp0 还小，一旦抢到默认路由就会把"4G 链路"误判成 WiFi。
+        if iface.startswith('enx'):
+            continue
+        if best_metric is None or m < best_metric:
+            best, best_metric = iface, m
+    return best
+
+
+def link_state(iface: str) -> bool:
+    try:
+        with open('/sys/class/net/%s/operstate' % iface) as fh:
+            return fh.read().strip() in ('up', 'unknown', 'dormant')
+    except OSError:
+        return False
+
+
 def default_route_iface() -> str:
-    """问内核"去公网走哪张网卡"（这个才是真正在用的链路，别读 metric 猜）。"""
+    """先读 /proc/net/route（零开销）；实在没有默认路由才退回 `ip route get`。"""
+    try:
+        with open('/proc/net/route') as fh:
+            text = fh.read()
+        ifaces = set()
+        for line in text.splitlines()[1:]:
+            parts = line.split()
+            if len(parts) >= 8 and parts[1] == '00000000':
+                ifaces.add(parts[0])
+        up = {name: link_state(name) for name in ifaces}
+        picked = route_from_proc_route(text, up)
+        if picked:
+            return picked
+    except OSError:
+        pass
+    return _route_iface_by_ip()
+
+
+def _route_iface_by_ip() -> str:
     for target in ('223.5.5.5', '1.1.1.1'):
         try:
             out = subprocess.run(['ip', 'route', 'get', target],
