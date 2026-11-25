@@ -90,6 +90,27 @@
   待单独查）；走 80 端口正常。
 - 云端视频地址**不写死 IP**：`/etc/systemd/system/jc-api.service.d/media.conf` 里
   `JC_MEDIA_HOSTS='{}'`（自动用状态里的 `lan_ip`）；写死 IP 会在换地址后视频打不开。
+- 🌍 **异地看画面 = 车端主动中继（2026-11-25 上线）**
+  - 局域网直连仍走 `/media` 的 `url`（机器人 `lan_ip:8081`，**最快**，24~54 ms）；
+    异地（4G / 别的 WiFi）走 `remote`：同源 `/api/devices/<id>/stream`，
+    由车端 `fwr-media-relay` 主动拨出到 `/ws/media/<id>`，云端 jc-api 逐帧转发。
+  - **`.local` 那一套只适合开发机**；手机在任何网络都能控制（控制走云 MQTT），
+    只有画面曾经是"同 WiFi 限定"，现在两种情况都能看。
+  - ⚠️ **域名 `jccontrol.xyz` 在大陆不可用**：80 端口被 nginx **301 跳 https**、
+    443 **TLS reset**、WS/API 还会被阿里云「未备案」拦截页挡（`Server: Beaver`，403）。
+    同一台机器用**公网 IP** `http://8.163.69.109/...` 正常。所以车端单元里
+    `MEDIA_RELAY_CLOUD=ws://8.163.69.109/ws/media`，页面也用 IP。
+  - 中继一律低码率档 `?profile=low`（**320 宽 / 12 fps ≈ 1.0 Mbps**，云端出网按客户数算钱）；
+    同 WiFi 直连仍是 480 宽 20 fps。`--low-width/--low-fps/--low-quality` 可调，
+    且**有人看才转码**（`FrameHub.attach_low`）。
+  - 并发上限 `JC_MEDIA_MAX_CLIENTS=6`；观看令牌是**独立短时令牌**（180 s，
+    `kind=stream` + 绑定 device），**登录令牌不能当观看令牌用**。
+  - 自检：`GET /api/media/health`（在线设备、观看路数、累计帧/字节）；
+    本机端到端 `tools/check_media_relay_e2e.py`（需 fastapi/httpx venv）。
+  - ⚠️ 三层里任何一层缓冲都会把 150 ms 变几秒：云端显式 `X-Accel-Buffering: no`、
+    每通道只留最新 1 帧、`asyncio.Queue(maxsize=2)`。别改成"攒一批再发"。
+  - 回归：`tests/test_media_relay.py`（20）、`tests/test_cloud_media_relay.py`（11）、
+    `tests/test_page_remote_media.py`（6）。
 
 ## 2. 开工顺序（每次任务都做）
 
