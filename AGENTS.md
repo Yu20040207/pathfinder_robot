@@ -26,6 +26,28 @@
 
   连不上时先 `getent hosts fwr-n305.local` 看解析结果，**不要**去猜 `.20/.24`。
 - 查当前地址：`ip neigh | grep -i 70:9c:d1` 或 `avahi-resolve -n fwr-n305.local`。
+### 📶 4G 无线网卡（Quectel EC200A-CN + 中国广电卡，2026-11-25 实机验证）
+
+- 硬件：USB 4G 模块 **Quectel EC200A-CN**（USB ID `2c7c:6005`），插上后：
+  - **真正的数据通道是 `ppp0`**（NetworkManager 用 pppd 拨号），地址是运营商 CGNAT `10.x.x.x`；
+  - 模块另外还暴露一个 **RNDIS 网口 `enx020c29a39b6d`**（`192.168.43.100/24`，网关 `192.168.43.1`）——
+    **它不通外网，别当成 4G 数据口去测**（ping 公网 100% 丢包是正常的）。
+- 连接配置（`nmcli con show 4g`）：类型 `gsm`、设备 `ttyUSB5`、**APN `cbnet`**、
+  `ipv4.route-metric 700`、`ipv6.method ignore`、`autoconnect 是`。
+  - **metric 700 > WiFi 的 600** → 正常是 **WiFi 优先、4G 备用**；WiFi 断了 4G 自动接管（默认路由本来就有）。
+  - 切"4G 主用"只需把 metric 改到 50（`sudo nmcli con mod 4g ipv4.route-metric 50` + 重拨）。
+- 实测（2026-11-25 10:05，充值后）：
+  - 公网出口 IP **223.160.231.129**（移动落地）；`ping 223.5.5.5` **10/10 收到**、**平均 53 ms**（38~65 ms）；
+  - 下载 **343 KB/s ≈ 2.7 Mbps**（`speed.cloudflare.com` 1 MB）→ 够 MQTT + 480p MJPEG(2.1 Mbps)，但没余量；
+  - 云端端口走 4G：**MQTT 1883 握手 61 ms**、**80 端口 HTTP 200**、8081 握手 54 ms；
+    8444 不通是**正常的**（云端只在本机反代，不对外）。
+- ⚠️ **充值/开通后必须重拨 + 等策略同步**：本次充值后第一次重拨仍**零回包**（发送 420 B、回包 0），
+  等约 **60 s** 再 `nmcli con down 4g && nmcli con up 4g` 后才通。
+  诊断"通没通"看 `ppp0` 的收发计数差（见 `docs/AGENT_LOG.md` 2026-11-25 条）。
+- ⚠️ **APN 不是判据**：`cbnet` / `cbn` / `gdnet` 三个都能拨上、还各拿到不同 IP
+  （EC200A 不校验 APN 也照样附着），但**卡没流量时三个都是零回包**。别拿"能拨号"当"能用"。
+- ⚠️ 截至 2026-11-25：`jccontrol.xyz:443` 的 TLS **WiFi 和 4G 都会 reset**（与 4G 无关，是云端 443 自身的问题，
+  待单独查）；走 80 端口正常。
 - 云端视频地址**不写死 IP**：`/etc/systemd/system/jc-api.service.d/media.conf` 里
   `JC_MEDIA_HOSTS='{}'`（自动用状态里的 `lan_ip`）；写死 IP 会在换地址后视频打不开。
 
