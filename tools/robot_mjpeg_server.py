@@ -170,11 +170,16 @@ class FrameHub:
                 self._fps_window = self._fps_window[-120:]
         self._event.set()
 
-    def publish_jpeg(self, data: bytes, resample: bool = True) -> None:
+    def publish_jpeg(self, data: bytes, resample: bool = True,
+                     reduce: int = 1) -> None:
         """已经是 JPEG 帧：**需要缩小分辨率时才解码重编码**，否则原样透传。
 
         `resample=False` 用于"没人看"的时候：只留一张原始帧给 `/snapshot.jpg`，
         不解码不缩放（广角 720p 每帧解码+编码要 ~12 ms，白烧）。
+
+        `reduce=2` 用 `IMREAD_REDUCED_COLOR_2` 按 1/2 尺寸解码（720p → 640x360）：
+        实测"解码+缩放+编码" **3.60 → 1.43 ms**（2026-11-25，i5-13500H 本地）。
+        目标宽度只有源一半以下时用它，画质无可见差别。
 
         2026-11-21：手机端还嫌延迟，把画面降到 `--width 480`（480x360）。
         640x480 q92 一帧 44 KB，480x360 q70 只有 12~16 KB —— 传输时间与手机解码
@@ -186,7 +191,9 @@ class FrameHub:
         enc_ms = 0.0
         if resample and self.width:
             t0 = time.monotonic()
-            img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+            flag = (cv2.IMREAD_REDUCED_COLOR_2 if reduce >= 2
+                    else cv2.IMREAD_COLOR)
+            img = cv2.imdecode(np.frombuffer(data, np.uint8), flag)
             if img is None:
                 return
             if img.shape[1] > self.width:
@@ -716,6 +723,16 @@ class WideUvcThread(threading.Thread):
 
     MAX_BUFFER = 8 * 1024 * 1024    # 半帧缓冲上限，防把内存吃光
 
+    def decode_reduce(self) -> int:
+        """源宽度的 1/2 仍 ≥ 目标宽度时，用半尺寸解码省一半 CPU。"""
+        try:
+            src_w = int(str(self.size).lower().split('x')[0])
+        except (ValueError, IndexError):
+            return 1
+        if self.hub.width and self.hub.width * 2 <= src_w:
+            return 2
+        return 1
+
     def __init__(self, hub: 'FrameHub', device: str = '', size: str = '1280x720',
                  restart_delay: float = 3.0, cam_fps: int = 30,
                  target_fps: float = 0.0) -> None:
@@ -793,7 +810,9 @@ class WideUvcThread(threading.Thread):
                             send, self._send_acc = decimate_step(
                                 self._send_acc, self.target_fps, self.cam_fps)
                             if send:
-                                self.hub.publish_jpeg(jpeg)    # 有人看：缩到 480 宽
+                                # 有人看：缩到 480 宽（720p 源用半尺寸解码）
+                                self.hub.publish_jpeg(
+                                    jpeg, reduce=self.decode_reduce())
                         elif now - self._last_idle_frame > 1.0:
                             # 没人看：只留一张原始帧给 /snapshot.jpg，不解码不编码
                             self._last_idle_frame = now
@@ -872,7 +891,7 @@ def main() -> int:
                     help='广角画面送到手机前的宽度（0=原样透传 1280 宽，4G 会吃不消）')
     ap.add_argument('--wide-fps', type=float, default=20.0,
                     help='广角画面发送上限帧率（和主摄 ~19 fps 对齐）')
-    ap.add_argument('--wide-quality', type=int, default=65,
+    ap.add_argument('--wide-quality', type=int, default=60,
                     help='广角重编码画质（越小越省 4G 流量）')
     ap.add_argument('--wide-cam-fps', type=int, default=30,
                     help='让相机按这个帧率出流（0=不设置，用相机默认）')

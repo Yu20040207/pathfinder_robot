@@ -113,7 +113,7 @@ def test_video_route_switches_hub_by_cam_param():
 
 def test_wide_source_is_zero_transcode_and_retries():
     src = SERVER.read_text(encoding='utf-8')
-    assert 'self.hub.publish_jpeg(jpeg)' in src      # 透传，不重新编码
+    assert 'self.hub.publish_jpeg(' in src           # 送 hub（需要缩小时才重编码）
     assert "'--stream-to=-'" in src or '--stream-to=-' in src
     assert '广角相机没找到' in src                     # 拔掉时要能重试，不是崩溃
 
@@ -200,3 +200,17 @@ def test_wide_hub_does_not_time_gate_again():
     src = SERVER.read_text(encoding='utf-8')
     assert 'FrameHub(quality=args.wide_quality, fps=0,' in src
     assert 'target_fps=args.wide_fps' in src
+
+
+def test_wide_uses_half_size_decode_when_downscaling():
+    """720p 源缩到 480 宽时用 IMREAD_REDUCED_COLOR_2（实测 3.60 → 1.43 ms）。"""
+    src = SERVER.read_text(encoding='utf-8')
+    assert 'cv2.IMREAD_REDUCED_COLOR_2' in src
+    assert 'def decode_reduce' in src
+    assert 'reduce=self.decode_reduce()' in src
+
+
+def test_decode_reduce_threshold():
+    """目标宽 ≤ 源宽一半才砍半；否则（如源 640、目标 480）保持全尺寸。"""
+    src = SERVER.read_text(encoding='utf-8')
+    assert 'self.hub.width * 2 <= src_w' in src
