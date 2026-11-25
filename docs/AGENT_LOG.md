@@ -12392,3 +12392,27 @@ P1 = 纯逻辑 + 节点 + 单测，**只发布观测**，用来先采集数据�
 ### 顺带发现
 - 测试前 `motion_enabled=True`、`manual_enabled=True`（用户之前点过"开始导航"），
   但 `/cmd_vel_auto_safe` 为 0、`/explore/state=stopped` → 测试期间车没有动。
+
+## 2026-11-25 09:05 · 建图模式布局：右侧竖排按键挪左、摇杆靠右
+
+### 用户要求
+「建图模式的界面要调一下，把现在右边竖着排列的按键全部放到左边，并且摇杆靠右」
+—— 原来右手要同时够「居中偏下的摇杆」和「右侧竖排按键（📷 🧭 ＋ －）」，建图时互相挡。
+
+### 改动（只动建图模式，导航/手动不动）
+- `cloud/web/car.html`：
+  - `applyMode()` 增加 `document.body.classList.toggle('map-mode', isMap)`（紧跟 `#mapJoyWrap` 显隐）。
+  - CSS 两条：
+    - `body.map-mode #zoomCtl { left: 10px; right: auto; }`
+    - `body.map-mode #mapJoyWrap { justify-content: flex-end; padding-right: 12px; }`
+- 建图模式实际显示的按钮是 📷 / 🧭 / ＋ / －；📍 在建图里本来就是 hidden。
+
+### 验证
+| 检查 | 结果 |
+| --- | --- |
+| `tests/test_map_mode_layout.py` | **4 例全过**（按钮列靠左、摇杆靠右、导航模式仍在右侧、`applyMode` 确实切 class） |
+| 内联 script 语法 | `node --check` **通过**（1 个 script 块） |
+| 重叠检查（按 CSS 数值推算） | 摇杆占底部 64~212 px、`#mapCtl` 按钮条占 10~54 px → 不重叠；按钮列已到左侧，与摇杆不同侧 |
+
+### 未验证
+- **手机实机视觉效果未看**（本轮没有可用的无头浏览器截图），需要部署后由用户看一眼。

@@ -181,6 +181,16 @@
   提示条是 `pointer-events:none`，所以浮在上面也不会挡住画面的 ✕ 关闭按钮。
   画布尺寸变化由 `ensureNavCanvas()`（尺寸真变了才 `resizeCanvas()`）在
   切模式 / resize / 每 1.5 s 兜底一次。
+- 🧭 **建图模式：右侧竖排按键挪到左边、摇杆靠右（2026-11-25 用户要求）**
+  - 原因：原来右手同时要够「居中偏下的摇杆」和「右侧竖排 📷 🧭 ＋ －」，
+    建图时一手挡一手。现在**建图模式**下按钮列到左边、摇杆贴右边：右手握摇杆、左手点按钮。
+  - 实现：`applyMode()` 里 `document.body.classList.toggle('map-mode', isMap)`，
+    CSS 只有两条：`body.map-mode #zoomCtl { left:10px; right:auto }`、
+    `body.map-mode #mapJoyWrap { justify-content:flex-end; padding-right:12px }`。
+  - ⚠️ **只作用于建图模式**：导航模式 `#zoomCtl` 仍在右侧（用户没要求动它，有单测钉死）。
+    改这几个位置别顺手把导航一起挪了。
+  - 建图模式实际显示的是 📷 / 🧭 / ＋ / －（📍 在建图里是 hidden，`#relocBtn` 被 `isMap` 关掉）。
+  - 回归：`tests/test_map_mode_layout.py`（4 例）+ 内联 script `node --check` 通过。
 - 🗑 **左下角「1 m」比例尺图例已删**（2026-11-24 用户要求）；要恢复就在
   `render()` 里重新加回绘制段（原实现：`nice` 取 0.5/1/2/5/10/20 里 ≤130 px 的最大值）。
 - 实机 RViz 的“两点导航”面板：**单击一次**表示从当前位置前往点击点（`/explore/start_fixed_goal`）；**连续点击两次**表示先到起点再到终点（`/explore/start_two_point_goal`）。现场人员点击“开始导航”时面板自行开启 `motion_enabled`、等待 `/base/ready`、申请 `/base/arm_auto`，然后发送目标；点击“停止导航”或任务结束/失败时请求停机并关闭运动门。无需另开终端运行授权脚本。该按钮流程已构建和通过单元测试，**尚未由现场人员验证完整实车按钮操作**；最新证据见 `docs/AGENT_LOG.md` 末尾。代理不得代替用户点击按钮或打开运动门，除非本次会话另有明确授权。

@@ -168,6 +168,11 @@
                    color: #3fb950; }
   #mapJoyWrap { position: absolute; left: 0; right: 0; bottom: 64px; display: flex;
                 justify-content: center; pointer-events: none; z-index: 12; }
+  /* 2026-11-25 用户要求：**建图模式**下把右侧竖排按键（📷 🧭 ＋ －）整体挪到左边，
+     摇杆从居中挪到右边——右手握摇杆、左手点按钮，互不遮挡。
+     只作用于建图模式（body.map-mode），导航/手动模式的按钮位置保持原样。 */
+  body.map-mode #zoomCtl { left: 10px; right: auto; }
+  body.map-mode #mapJoyWrap { justify-content: flex-end; padding-right: 12px; }
   #mapJoy { width: 148px; height: 148px; border-radius: 50%; pointer-events: auto;
             background: radial-gradient(circle at 50% 50%, #1f6f3a 0%, #0d3b22 70%);
             border: 2px solid #2ea043; box-shadow: 0 0 18px rgba(46,160,67,.35);
@@ -2174,6 +2179,8 @@ function applyMode(mode) {
   $('navBar').classList.toggle('hidden', isMap);
   $('mapCtl').classList.toggle('hidden', !isMap);
   $('mapJoyWrap').classList.toggle('hidden', !isMap);
+  // 2026-11-25：建图模式把右侧按键挪左、摇杆靠右（纯布局，见 #zoomCtl/#mapJoyWrap 的 CSS）
+  document.body.classList.toggle('map-mode', isMap);
   const reloc = $('relocBtn'), vmode = $('viewModeBtn');
   if (reloc) reloc.classList.toggle('hidden', isMap);
   if (vmode) vmode.classList.toggle('hidden', !(isMap || mode === 'nav'));
