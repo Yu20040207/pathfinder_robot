@@ -47,6 +47,9 @@ from aiohttp import web
 BOUNDARY = 'fwrframe'
 #: 单帧写操作的最长等待（秒）；超时说明手机已经不看了，断开这条连接
 STREAM_WRITE_TIMEOUT_S = 6.0
+#: 同时最多几条 MJPEG 长连接。超了就**踢掉最旧的**——浏览器对同一域名只有 6 条并发连接，
+#: 只要攒下几条"以为断了其实没断"的僵尸连接，新画面就永远开不出来（2026-11-25 切几次就黑屏）
+MAX_STREAM_CLIENTS = 2
 MAX_WIDTH = 1280
 
 # 人体检测结果桥接（2026-11-21 跟随模式）：person_detector 节点 -> HTTP
@@ -291,12 +294,25 @@ async def handle_stream(request: web.Request) -> web.StreamResponse:
         'Access-Control-Allow-Origin': '*',
     })
     await resp.prepare(request)
+    # 连接名额：新连接进来时把最旧的挤掉。旧连接可能是浏览器"以为断了其实没断"
+    # 的僵尸连接（iOS 尤其如此），不清掉就会一直占着同域的 6 条并发连接名额。
+    mine = asyncio.Event()
+    streams = request.app['streams']
+    streams.append(mine)
+    while len(streams) > MAX_STREAM_CLIENTS:
+        old = streams.pop(0)
+        old.set()
+        print('MJPEG 连接数超 %d，踢掉最旧的一条（%s）'
+              % (MAX_STREAM_CLIENTS, _cam), flush=True)
     hub.add_client(1)
-    if hub.clients() > 2:
+    if hub.clients() > 1:
         print('MJPEG 同时在看的连接数：%d（主摄/广角）' % hub.clients(), flush=True)
     last_seq = -1
     try:
         while True:
+            if mine.is_set():
+                print('MJPEG 连接被新连接取代（%s）' % _cam, flush=True)
+                break
             jpeg, seq = hub.latest()
             if jpeg is None or seq == last_seq:
                 if request.transport is None:            # 客户端已断开
@@ -319,6 +335,10 @@ async def handle_stream(request: web.Request) -> web.StreamResponse:
         pass
     finally:
         hub.add_client(-1)
+        try:
+            streams.remove(mine)
+        except ValueError:
+            pass
     return resp
 
 
@@ -489,6 +509,7 @@ def build_app(hub: FrameHub, topic: str, uvc: 'UvcSource' = None,
               wide_src=None) -> web.Application:
     app = web.Application()
     app['hub'] = hub
+    app['streams'] = []          # 活着的 MJPEG 长连接（超出上限踢最旧的）
     app['hub_wide'] = hub_wide
     app['wide_device'] = wide_device
     app['wide_src'] = wide_src
@@ -870,7 +891,7 @@ class WideUvcThread(threading.Thread):
     def __init__(self, hub: 'FrameHub', device: str = '', size: str = '1280x720',
                  restart_delay: float = 3.0, cam_fps: int = 30,
                  target_fps: float = 0.0, cell_fps: float = 20.0,
-                 link_check_s: float = 5.0) -> None:
+                 link_check_s: float = 5.0, idle_pause_s: float = 5.0) -> None:
         super().__init__(daemon=True)
         self.hub = hub
         self.fixed_device = device
@@ -886,6 +907,10 @@ class WideUvcThread(threading.Thread):
         self.link_check_s = float(link_check_s)
         self.link = 'wifi'
         self._last_link_check = 0.0
+        #: 没人看多久之后停流（0=不停，一直占着相机）
+        self.idle_pause_s = float(idle_pause_s)
+        self._last_seen_client = time.monotonic()
+        self._paused = False
         self._send_acc = 0.0
         self._stop = threading.Event()
         self._cap_lock = threading.Lock()
@@ -950,6 +975,14 @@ class WideUvcThread(threading.Thread):
     def run(self) -> None:
         device = ''
         while not self._stop.is_set():
+            if self._paused:
+                self._paused = False
+                self._last_seen_client = time.monotonic()
+                while (not self._stop.is_set() and not self.hub.has_clients()):
+                    self._stop.wait(0.3)
+                if self._stop.is_set():
+                    return
+                self._last_seen_client = time.monotonic()
             device = self.device()
             if not device:
                 print('广角相机没找到（等插上/重枚举）…', flush=True)
@@ -965,11 +998,21 @@ class WideUvcThread(threading.Thread):
                 threading.Thread(target=lambda: errq.extend(proc.stderr), daemon=True).start()
                 buf = b''
                 while not self._stop.is_set():
+                    # 没人看（已经切回主摄）+ 超过 linger → 主动停流，把 USB 让出来。
+                    # 用户 2026-11-25 要求：切换之后另一路应该停掉，别一直占带宽/CPU。
+                    if (self.idle_pause_s > 0 and not self.hub.has_clients()
+                            and time.monotonic() - self._last_seen_client > self.idle_pause_s):
+                        print('广角没人看 %.0f s，停流释放设备（下次看再开）'
+                              % self.idle_pause_s, flush=True)
+                        self._paused = True
+                        break
                     chunk = proc.stdout.read(65536)
                     if not chunk:
                         break
                     buf += chunk
                     frames, buf = split_jpeg_frames(buf)
+                    if self.hub.has_clients():
+                        self._last_seen_client = time.monotonic()
                     if time.monotonic() - self._last_link_check >= self.link_check_s:
                         self.refresh_link()
                     for jpeg in frames:
@@ -1002,7 +1045,7 @@ class WideUvcThread(threading.Thread):
                 msg = b''.join(errq).decode('utf-8', 'replace').strip()
                 if msg:
                     print('广角 v4l2-ctl 输出：%s' % msg.splitlines()[-3:], flush=True)
-            if not self._stop.is_set():
+            if not self._stop.is_set() and not self._paused:
                 print('广角相机断流，%.0f s 后重试' % self.restart_delay, flush=True)
                 self._stop.wait(self.restart_delay)
 
@@ -1069,6 +1112,8 @@ def main() -> int:
                     help='广角重编码画质（越小越省 4G 流量）')
     ap.add_argument('--wide-fps-4g', type=float, default=20.0,
                     help='默认路由变成 4G 时自动降到这个帧率（4G 上行 ~3.5 Mbps）')
+    ap.add_argument('--wide-idle-pause', type=float, default=5.0,
+                    help='广角没人看这么多秒就停流释放相机（0=一直占着）')
     ap.add_argument('--wide-cam-fps', type=int, default=30,
                     help='让相机按这个帧率出流（0=不设置，用相机默认）')
     args = ap.parse_args()
@@ -1102,7 +1147,8 @@ def main() -> int:
         wide = WideUvcThread(hub_wide, args.wide_device, args.wide_size,
                              cam_fps=args.wide_cam_fps,
                              target_fps=args.wide_fps,
-                             cell_fps=args.wide_fps_4g)
+                             cell_fps=args.wide_fps_4g,
+                             idle_pause_s=args.wide_idle_pause)
         wide_device = wide.device()
         wide.start()
         print('广角相机：%s（%s，发送 %g fps / 4G 时 %g fps / 相机 %d fps，%d 宽 q%d）' % (

@@ -324,3 +324,21 @@ def test_decimation_uses_measured_source_rate():
         send, acc = decimate_step(acc, 20.0, 20.0)
         sent += 1 if send else 0
     assert sent == 20
+
+
+def test_stream_cap_evicts_oldest_connection():
+    """浏览器同域只有 6 条并发连接，僵尸连接必须被服务端挤掉，否则新画面永远黑。"""
+    src = SERVER.read_text(encoding='utf-8')
+    assert 'MAX_STREAM_CLIENTS = 2' in src
+    body = src[src.index('async def handle_stream'):src.index('async def handle_snapshot')]
+    assert "app['streams']" in body
+    assert 'while len(streams) > MAX_STREAM_CLIENTS' in body
+    assert 'old.set()' in body and 'mine.is_set()' in body
+
+
+def test_wide_camera_stops_when_nobody_watches():
+    """用户要求：切到主摄之后广角要停流，别一直占着 USB/CPU。"""
+    src = SERVER.read_text(encoding='utf-8')
+    assert '--wide-idle-pause' in src
+    assert 'idle_pause_s' in src
+    assert '停流释放设备' in src

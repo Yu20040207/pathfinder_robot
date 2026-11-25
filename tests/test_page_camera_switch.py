@@ -116,3 +116,11 @@ def test_nav_swap_uses_reload_helper():
     assert 'function navCamReload' in src
     swap = src.split("$('navCamSwap').onclick", 1)[1][:400]
     assert 'navCamReload()' in swap
+
+
+def test_switch_label_shows_current_camera():
+    """2026-11-25 用户要求：右上角显示**当前**摄像头名字，不是"点了会切到哪颗"。"""
+    src = PAGE.read_text(encoding='utf-8')
+    body = src.split('function camSwapLabel', 1)[1].split('\nfunction ', 1)[0]
+    assert "camWide ? '广角' : '主摄'" in body
+    assert "' ⇄'" in body

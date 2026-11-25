@@ -3928,8 +3928,9 @@ function camSrcURL() {
 function navCamURL() { return camSrcURL(); }
 
 function camSwapLabel() {
+  // 2026-11-25 用户要求：右上角显示**当前**这颗摄像头的名字（不是"点了会切到哪颗"）
   // 两个画面（手动 / 导航）共用同一个选择，标签永远一致
-  const text = camWide ? '主摄' : '广角';
+  const text = (camWide ? '广角' : '主摄') + ' ⇄';
   ['camSwap', 'navCamSwap'].forEach((id) => {
     const btn = $(id);
     if (btn) btn.textContent = text;
