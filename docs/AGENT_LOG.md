@@ -12544,3 +12544,30 @@ sudo nmcli con up 4g
   1 小时内多次需要重拨才恢复。怀疑：模块挂在**两级级联 hub** 上（与相机、双雷达同总线）供电不足 /
   天线位置差 / SIM 套餐策略。**建议把模块换到主机直连 USB 口再测**。
 - MM 在 PPP 会话期间的状态字段不可信（实测 idle/detached/0% 时 ppp0 仍能 ping 通）→ 判据只用 ppp0 回包。
+
+## 2026-11-25 11:20 · 120° 广角相机接入 + 手机端右上角切换键
+
+### 现场发现
+- 用户新插的摄像头被识别为 **Xitech 5MP USB Camera**（`0abd:8050`）→ `/dev/video2/3`，
+  挂在 **hub1 → hub2**（二级级联）上，和 4G 模块同一个 hub、同一 480 Mbps 控制器。
+- 实测 1280×720 MJPG **55 KB/帧**（20 帧 1.06 MB），连抓 70 帧 0 坏帧。
+
+### 改动
+| 文件 | 内容 |
+| --- | --- |
+| `tools/robot_mjpeg_server.py` | 新增 `WideUvcThread` / `split_jpeg_frames` / `wide_device_path`；`/video?cam=wide`、`/snapshot.jpg?cam=wide`；`/healthz` 加 `wide`；`--wide-*` 五个参数 |
+| `cloud/web/car.html` | `#camStage` 右上角 `#camSwap`（只在画面打开时显示）；`camSrcURL()` 统一带 `cam=`；三处断流自愈都走它；导航模式那块共用同一选择 |
+| `tests/test_mjpeg_wide_camera.py` | 8 例：切帧、半帧保留、垃圾前缀、by-id 查找、路由/零转码静态断言 |
+| `tests/test_page_camera_switch.py` | 8 例：右上角定位、默认隐藏、按钮在 camStage 内、URL 带 cam、切换清 src、重连不跳回主摄 |
+| `docs/hardware/vision.md` §3.9 | 识别结果、零转码取流、USB 口分配（电流账 + 推荐表）|
+| `AGENTS.md` | 同上精简版 + 回归位置 |
+
+### 验证（本地，已验证）
+- `pytest`：新增 16 例全过；页面内联 JS `node --check` OK。
+- 起本地服务 `--test-pattern --port 8099`：`/healthz` 返回 `wide` 子对象、主摄出帧 540 KB、
+  `/video?cam=wide` 在无设备时挂起无数据（符合预期），日志 `广角相机：未找到（会持续重试）`。
+- **车端与云端尚未部署**（等用户同意），所以实机/手机端效果**未验证**。
+
+### 待办
+- 部署 `robot_mjpeg_server.py` 到车（重启 `fwr-media`）+ `car.html` 到 ECS，实机验证切摄像头。
+- 按 `vision.md` §3.9.3 调整 USB 口（相机/4G 直连），再复测 4G 稳定性。

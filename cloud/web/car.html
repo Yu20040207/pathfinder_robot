@@ -246,6 +246,19 @@
   }
   #camRefresh.show { display: flex; }
   #camRefresh:active { color: #38bdf8; transform: rotate(180deg); }
+  /* 2026-11-25 用户要求：画面**右上角**切摄像头（主摄 HP60C ↔ 120° 广角），
+     只有摄像头画面打开时才显示；按钮上是"点了会切到哪一路"的名字。 */
+  #camSwap {
+    position: absolute; right: 8px; top: 8px; z-index: 3;
+    height: 30px; padding: 0 12px; border-radius: 15px;
+    border: 1px solid rgba(255, 255, 255, .55); background: rgba(0, 0, 0, .38);
+    color: #f0f6fc; font-size: 13px; font-weight: 600;
+    display: none; align-items: center; justify-content: center;
+    text-shadow: 0 0 3px rgba(0, 0, 0, .95), 0 0 1px rgba(0, 0, 0, 1);
+    touch-action: manipulation; -webkit-tap-highlight-color: transparent;
+  }
+  #camSwap.show { display: flex; }
+  #camSwap:active { background: rgba(56, 189, 248, .40); }
   /* ---------- 跟随模式（人体识别 + 点框选人） ---------- */
   #followView { position: absolute; inset: 0; display: flex; flex-direction: column;
     background: #000; }
@@ -654,6 +667,7 @@
     <div id="camPane" class="hidden">
       <div id="camStage">
         <img id="camImg" class="hidden" alt="摄像头画面">
+        <button id="camSwap" title="切换摄像头" aria-label="切换摄像头">广角</button>
         <button id="camRefresh" title="刷新画面" aria-label="刷新画面">⟳</button>
         <div id="camErr" class="hidden"></div>
       </div>
@@ -3883,12 +3897,43 @@ $('stop').onclick = () => { resetKnob(); if (wsReady) ws.send(JSON.stringify({ty
 let camMedia = null;        // {url, snapshot}
 let camWanted = false;      // 用户是否打开了画面
 
+/* 2026-11-25 用户要求：画面右上角加"切摄像头"，主摄（HP60C）↔ 120° 广角。
+   两路都走同一个 MJPEG 服务，`?cam=wide` 取第二路（服务端零转码透传 JPEG）。
+   开关**只在画面打开时**出现（camStop 里摘掉 .show）。 */
+let camWide = false;
+
+function camSrcURL() {
+  if (!camMedia) return '';
+  const base = String(camMedia.url);
+  const sep = base.indexOf('?') >= 0 ? '&' : '?';
+  return base + sep + 'cam=' + (camWide ? 'wide' : 'main') + '&t=' + Date.now();
+}
+
+// 导航模式那块画面用同一个摄像头选择（按钮只在手动模式画面里，但选择是全局的）
+function navCamURL() { return camSrcURL(); }
+
+function camSwapLabel() {
+  const btn = $('camSwap');
+  if (btn) btn.textContent = camWide ? '主摄' : '广角';
+}
+
+function camReload() {
+  // 必须清 src 再重设，否则 <img> 不会真正断掉旧的那条 MJPEG 长连接
+  const img = $('camImg');
+  img.removeAttribute('src');
+  if (!camWanted || !camMedia) return;
+  img.classList.remove('hidden');
+  img.src = camSrcURL();
+}
+
 function camStop() {
   const img = $('camImg');
   img.classList.add('hidden');
   img.removeAttribute('src');          // 断流：清 src 才会真正断开 MJPEG 连接
   const btn = $('camRefresh');
   if (btn) btn.classList.remove('show');
+  const swap = $('camSwap');
+  if (swap) swap.classList.remove('show');
 }
 
 function camStart() {
@@ -3896,9 +3941,29 @@ function camStart() {
   const img = $('camImg');
   $('camErr').classList.add('hidden');
   img.classList.remove('hidden');
-  img.src = camMedia.url + '?t=' + Date.now();
+  img.src = camSrcURL();
   const btn = $('camRefresh');
   if (btn) btn.classList.add('show');
+  const swap = $('camSwap');
+  if (swap) { camSwapLabel(); swap.classList.add('show'); }
+}
+
+if ($('camSwap')) {
+  $('camSwap').onclick = (e) => {
+    e.stopPropagation();
+    if (!camWanted || !camMedia) return;
+    camWide = !camWide;
+    camSwapLabel();
+    camReload();
+    if (camWide) {
+      setTimeout(() => {
+        const i = $('camImg');
+        if (camWanted && camWide && i && i.complete && i.naturalWidth === 0) {
+          showToast('广角相机还没出画面（检查 USB 是否插好）', false);
+        }
+      }, 2500);
+    }
+  };
 }
 
 // 刷新：只重连这一路 MJPEG（清 src 再带时间戳重设），不重新问地址
@@ -3908,9 +3973,7 @@ if ($('camImg')) {
     if (!camWanted || !camMedia) return;
     setTimeout(() => {
       if (!camWanted || !camMedia) return;
-      const i = $('camImg');
-      i.removeAttribute('src');
-      i.src = camMedia.url + '?t=' + Date.now();
+      camReload();
     }, 600);
   };
 }
@@ -3919,8 +3982,7 @@ setInterval(() => {
   const i = $('camImg');
   if (!i || !i.getAttribute('src')) return;
   if (i.complete && i.naturalWidth === 0) {
-    i.removeAttribute('src');
-    i.src = camMedia.url + '?t=' + Date.now();
+    camReload();
   }
 }, 3000);
 
@@ -4027,7 +4089,7 @@ if ($('navCamImg')) {
       if (!navCamWanted || !camMedia) return;
       const i = $('navCamImg');
       i.removeAttribute('src');
-      i.src = camMedia.url + '?t=' + Date.now();
+      i.src = navCamURL();
     }, 600);
   };
 }
@@ -4037,7 +4099,7 @@ setInterval(() => {
   if (!i || !i.getAttribute('src')) return;
   if (i.complete && i.naturalWidth === 0) {
     i.removeAttribute('src');
-    i.src = camMedia.url + '?t=' + Date.now();
+    i.src = navCamURL();
   }
 }, 3000);
 // 切后台就断流（省电省带宽），回来再自动接上
@@ -4046,7 +4108,7 @@ document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
     $('navCamImg').removeAttribute('src');
   } else if (camMedia) {
-    $('navCamImg').src = camMedia.url + '?t=' + Date.now();
+    $('navCamImg').src = navCamURL();
   }
 });
 

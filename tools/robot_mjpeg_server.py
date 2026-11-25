@@ -252,8 +252,16 @@ class FrameHub:
 
 # ---------------------------------------------------------------- HTTP
 
+def hub_for(request: web.Request) -> tuple['FrameHub', str]:
+    """`?cam=wide` → 广角相机；其余一律主摄（HP60C）。"""
+    wide = request.app.get('hub_wide')
+    if request.query.get('cam') == 'wide' and wide is not None:
+        return wide, 'wide'
+    return request.app['hub'], 'main'
+
+
 async def handle_stream(request: web.Request) -> web.StreamResponse:
-    hub: FrameHub = request.app['hub']
+    hub, _cam = hub_for(request)
     resp = web.StreamResponse(status=200, headers={
         'Content-Type': f'multipart/x-mixed-replace; boundary={BOUNDARY}',
         'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
@@ -284,7 +292,7 @@ async def handle_stream(request: web.Request) -> web.StreamResponse:
 
 
 async def handle_snapshot(request: web.Request) -> web.Response:
-    hub: FrameHub = request.app['hub']
+    hub, _cam = hub_for(request)
     jpeg, _ = hub.latest()
     if jpeg is None:
         return web.Response(status=503, text='no frame yet')
@@ -294,8 +302,12 @@ async def handle_snapshot(request: web.Request) -> web.Response:
 
 
 async def handle_health(request: web.Request) -> web.Response:
-    hub: FrameHub = request.app['hub']
+    hub, _cam = hub_for(request)
     body = hub.snapshot()
+    wide = request.app.get('hub_wide')
+    if wide is not None:
+        body['wide'] = wide.snapshot()
+        body['wide']['device'] = request.app.get('wide_device', '')
     body['topic'] = request.app['topic']
     body['dds_ms'] = round(hub.dds_age_ms, 1)
     uvc = request.app.get('uvc')
@@ -310,7 +322,7 @@ INDEX_HTML = """<!doctype html><meta charset="utf-8">
 <title>相机自检</title>
 <style>body{margin:0;background:#000;color:#9fb3c8;font:13px/1.5 system-ui}
 img{width:100%;display:block}#h{padding:6px 10px}</style>
-<div id="h">相机自检 · /healthz</div>
+<div id="h">相机自检 · /healthz · <a href="?cam=wide" style="color:#38bdf8">广角</a></div>
 <img src="/video" alt="相机画面">
 <script>fetch('/healthz').then(r=>r.json()).then(d=>{
   document.getElementById('h').textContent =
@@ -436,9 +448,12 @@ async def _follow_services_baseline(_app) -> None:
     _follow_services(False, force=True)
 
 
-def build_app(hub: FrameHub, topic: str, uvc: 'UvcSource' = None) -> web.Application:
+def build_app(hub: FrameHub, topic: str, uvc: 'UvcSource' = None,
+              hub_wide: 'FrameHub' = None, wide_device: str = '') -> web.Application:
     app = web.Application()
     app['hub'] = hub
+    app['hub_wide'] = hub_wide
+    app['wide_device'] = wide_device
     app['topic'] = topic
     app['uvc'] = uvc
     app['t0'] = time.monotonic()
@@ -616,6 +631,123 @@ class UvcSource(threading.Thread):
                 self.hub.publish(img, real=True)
 
 
+WIDE_BY_ID_DIR = '/dev/v4l/by-id'
+WIDE_ID_HINT = '5MP_USB_Camera'
+
+
+def wide_device_path(by_id_dir: str = WIDE_BY_ID_DIR,
+                     hint: str = WIDE_ID_HINT) -> str:
+    """找 120° 广角相机的稳定路径（`/dev/v4l/by-id/...5MP_USB_Camera...index0`）。
+
+    ⚠️ **不要写死 `/dev/video2`**：插拔/重枚举会让编号变（2026-11-25 实测
+    深度相机占 video0/1，广角相机是从 video2 开始的，但顺序不保证）。
+    找不到就返回空串，采集线程会一直重试。
+    """
+    try:
+        names = sorted(os.listdir(by_id_dir))
+    except OSError:
+        return ''
+    for name in names:
+        if hint in name and name.endswith('-video-index0'):
+            return os.path.join(by_id_dir, name)
+    return ''
+
+
+def split_jpeg_frames(buf: bytes) -> tuple[list[bytes], bytes]:
+    """从 MJPEG 裸流里切出完整 JPEG（FFD8..FFD9），返回 (帧列表, 剩余半帧)。
+
+    `v4l2-ctl --stream-to=-` 只吐负载、不给帧长，所以只能按标记切。
+    实测 1280x720 连抓 70 帧 0 坏帧（2026-11-25）。调用方负责把剩余半帧
+    拼到下一块数据前面。
+    """
+    frames: list[bytes] = []
+    i = 0
+    while True:
+        start = buf.find(b'\xff\xd8', i)
+        if start < 0:
+            break
+        end = buf.find(b'\xff\xd9', start + 2)
+        if end < 0:
+            return frames, buf[start:]      # 半帧：留着，下一块拼上继续切
+        frames.append(buf[start:end + 2])
+        i = end + 2
+    rest = buf[i:]
+    if not rest:
+        return frames, b''
+    # 尾部残留：只留最后 1 字节，防止 FFD8 被切在两块数据中间
+    return frames, rest[-1:]
+
+
+class WideUvcThread(threading.Thread):
+    """120° 广角相机（UVC MJPG）取流，**零转码**：直接透传 JPEG 给 hub。
+
+    `v4l2-ctl` 拉裸流 → 按 JPEG 边界切帧 → `hub.publish_jpeg()`（宽高需要缩小时
+    才解码重编码）。断流/拔线自动重试，且每次重试都重新按 by-id 找设备。
+    """
+
+    MAX_BUFFER = 8 * 1024 * 1024    # 半帧缓冲上限，防把内存吃光
+
+    def __init__(self, hub: 'FrameHub', device: str = '', size: str = '1280x720',
+                 restart_delay: float = 3.0) -> None:
+        super().__init__(daemon=True)
+        self.hub = hub
+        self.fixed_device = device
+        self.size = size
+        self.restart_delay = float(restart_delay)
+        self._stop = threading.Event()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def device(self) -> str:
+        if self.fixed_device and os.path.exists(self.fixed_device):
+            return self.fixed_device
+        return wide_device_path()
+
+    def command(self) -> list:
+        return ['v4l2-ctl', '-d', self.device(),
+                '--set-fmt-video=width=%s,height=%s,pixelformat=MJPG' % tuple(
+                    self.size.lower().split('x')),
+                '--stream-mmap', '--stream-count=0', '--stream-to=-']
+
+    def run(self) -> None:
+        device = ''
+        while not self._stop.is_set():
+            device = self.device()
+            if not device:
+                print('广角相机没找到（等插上/重枚举）…', flush=True)
+                self._stop.wait(3.0)
+                continue
+            proc = None
+            try:
+                print('广角相机取流：%s %s' % (device, self.size), flush=True)
+                proc = subprocess.Popen(self.command(), stdout=subprocess.PIPE,
+                                        stderr=subprocess.DEVNULL, bufsize=0)
+                buf = b''
+                while not self._stop.is_set():
+                    chunk = proc.stdout.read(65536)
+                    if not chunk:
+                        break
+                    buf += chunk
+                    frames, buf = split_jpeg_frames(buf)
+                    for jpeg in frames:
+                        self.hub.publish_jpeg(jpeg)
+                    if len(buf) > self.MAX_BUFFER:
+                        buf = b''
+            except (OSError, ValueError) as exc:
+                print('广角相机异常：%s' % exc, flush=True)
+            finally:
+                if proc is not None and proc.poll() is None:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+            if not self._stop.is_set():
+                print('广角相机断流，%.0f s 后重试' % self.restart_delay, flush=True)
+                self._stop.wait(self.restart_delay)
+
+
 def run_test_pattern(hub: FrameHub, stop_when_real: bool = False) -> None:
     """无相机时的自检画面：移动渐变 + 帧号 + 时间。
 
@@ -666,6 +798,14 @@ def main() -> int:
     ap.add_argument('--fallback-test-pattern', action='store_true',
                     help='先出测试图案兜底，真实相机一出帧就切走')
     ap.add_argument('--node-name', default='fwr_media')
+    ap.add_argument('--wide-device', default='',
+                    help='120° 广角相机设备；空=按 /dev/v4l/by-id 里的 5MP_USB_Camera 自动找')
+    ap.add_argument('--no-wide', action='store_true', help='完全不启用广角相机这一路')
+    ap.add_argument('--wide-size', default='1280x720', help='广角相机采集尺寸')
+    ap.add_argument('--wide-width', type=int, default=480,
+                    help='广角画面送到手机前的宽度（0=原样透传 1280 宽，4G 会吃不消）')
+    ap.add_argument('--wide-fps', type=float, default=12.0,
+                    help='广角画面发送上限帧率（4G 只有 ~3.5 Mbps，12 fps 足够看）')
     args = ap.parse_args()
 
     hub = FrameHub(quality=args.quality, fps=args.fps, width=args.width)
@@ -688,8 +828,21 @@ def main() -> int:
             threading.Thread(target=run_test_pattern, args=(hub, True),
                              daemon=True).start()
 
+    # 第二路：120° 广角相机（UVC MJPG，零转码）。默认自动找 by-id，找不到也不影响主画面
+    hub_wide = None
+    wide_device = ''
+    if not args.no_wide:
+        hub_wide = FrameHub(quality=args.quality, fps=args.wide_fps,
+                            width=args.wide_width)
+        wide = WideUvcThread(hub_wide, args.wide_device, args.wide_size)
+        wide_device = wide.device()
+        wide.start()
+        print('广角相机：%s（%s，%g fps，%d 宽）' % (
+            wide_device or '未找到（会持续重试）', args.wide_size,
+            args.wide_fps, args.wide_width), flush=True)
+
     topic = args.v4l2 or ('test-pattern' if args.test_pattern else args.topic)
-    app = build_app(hub, topic, uvc)
+    app = build_app(hub, topic, uvc, hub_wide, wide_device)
     print(f'MJPEG 服务: http://{args.host}:{args.port}/video  '
           f'(topic={app["topic"]}, {args.fps:g} fps, q={args.quality})', flush=True)
     try:

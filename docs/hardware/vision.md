@@ -502,3 +502,72 @@ person_detector ──/robot/vision/persons──▶ person_follower ──/cmd_
 
 手机端画面下方有 **104 px 小摇杆**，碰一下立即退出自动跟随交给人开。
 参数全部是跟随节点私有（ROS 参数可覆盖），**不涉及导航的冻结参数**。
+
+### 3.9 第二路相机：120° 广角 5MP（2026-11-25 实测接入）
+
+用户新插了一个广角摄像头，要求手机端在 HP60C 画面**右上角**加切换键。这里记录
+硬件识别、USB 分配结论和取流方式。
+
+#### 3.9.1 识别结果（实机）
+
+| 项 | 值 |
+| --- | --- |
+| 型号 | **Xitech 5MP USB Camera**（USB `0abd:8050`）|
+| 节点 | `/dev/video2`（采集）+ `/dev/video3` |
+| **稳定路径** | `/dev/v4l/by-id/usb-Xitech_5MP_USB_Camera_20250923107-video-index0` |
+| 格式 | **MJPG** 最高 2592×1944@30；**YUYV** 最高 640×480@30 |
+| 实测码率 | 1280×720 MJPG = **55 KB/帧**（20 帧 1.06 MB），30 fps ≈ 1.65 MB/s ≈ 13 Mbps |
+| 挂载位置 | 总线 3 → 根口 1 → hub1 → hub2（**和 4G 模块同一个二级 hub**）|
+
+⚠️ **别用 YUYV**（2592×1944 下只出几帧且吃满总线）；服务端默认按 MJPG 1280×720 采集。
+
+#### 3.9.2 车端取流：零转码
+
+`tools/robot_mjpeg_server.py` 新增 `WideUvcThread`：
+
+* `v4l2-ctl -d <by-id> --set-fmt-video=width=1280,height=720,pixelformat=MJPG
+  --stream-mmap --stream-count=0 --stream-to=-` 拉裸流；
+* 裸流只吐负载、不给帧长 → 按 JPEG 标记 `FFD8..FFD9` 切帧
+  （`split_jpeg_frames`，实测 70 帧 **0 坏帧**）；
+* `hub.publish_jpeg()` **原样透传**，只在 `--wide-width`（默认 480）要求缩小时才解码重编码；
+* 默认 `--wide-fps 12`：4G 只有 ~3.5 Mbps，12 fps × 480 宽（约 12 KB/帧）足够看且不挤占。
+* 设备按 `*5MP_USB_Camera*-video-index0` 自动找，**不写死 `/dev/video2`**；拔掉会每 3 s 重试。
+
+HTTP：`GET /video?cam=wide` 取广角，`/video`（或不带参数）仍是 HP60C 主摄；
+`/healthz` 多一个 `wide` 字段；`/snapshot.jpg?cam=wide` 抓广角单帧。
+
+手机页：手动模式摄像头画面**右上角** `#camSwap`（按钮文字 = 点了会切到哪一路：
+主摄显示「广角」、广角显示「主摄」），**只在画面打开时出现**；切换会清 `src` 重连，
+断流自愈/3 s 兜底重连都带当前选择（不会悄悄跳回主摄）。
+
+#### 3.9.3 USB 口分配（2026-11-25 现场清点 + 建议）
+
+主控只有 **4 个 USB-A + 1 个 USB-C**，现有 8 个 USB 设备：
+
+```
+根口1(USB-C) ─ hub1(总线供电)
+              ├─ 深度相机 NOVATEK（video0/1）
+              ├─ CH340 串口
+              ├─ hub2(VIA Labs, 总线供电) ─┬─ 5MP 广角相机
+              │                            └─ 4G 模块 EC200A
+              └─ RTL8152 网口（DOWN，未使用）
+根口2 ─ 雷达1  |  根口4 ─ 雷达2  |  根口7 ─ ESP32  |  根口9 ─ IMU
+```
+
+**电流账**（往坏处估）：4G 发射瞬时 ~2 A、深度相机 300~500 mA、广角 200~400 mA、
+雷达各 ~150 mA、ESP32/IMU/CH340 各 30~50 mA、hub 自身 ~200 mA。
+→ 现在 hub1 后面峰值接近 **3 A**，远超凡口 0.9~1.5 A 的供给能力，
+这正是 4G 模块反复 `device descriptor read/all, error -71` 重枚举的最可能原因。
+**带宽不是瓶颈**（深度 ~5-7 MB/s + 广角 1.65 MB/s，480 Mbps 总线实际可跑 ~35 MB/s）。
+
+推荐分配：
+
+| 位置 | 挂什么 | 理由 |
+| --- | --- | --- |
+| USB-C + hub1 | 2× 雷达、ESP32、IMU、CH340（合计 ~450 mA）| 全是 12M 低速串口，hub 扛得住 |
+| A1 | 深度相机 HP60C | UVC 电流/带宽大户，独享 900 mA |
+| A2 | 5MP 广角相机 | 同上 |
+| A3 | 4G 模块 | 峰值电流最大，不能串两级 hub |
+| A4 | 备用 | 调试键盘/U 盘/ESP32 烧录 |
+
+若换直连后 4G 仍掉线 → 上有源 hub（5V 2A）把两个相机 + 4G 都挂上；再不行查 SIM 套餐/运营商。

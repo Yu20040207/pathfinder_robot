@@ -359,6 +359,20 @@
   默认 `true`**，会把**彩色 JPEG（重编码）与深度图一起翻正**，两者保持对齐；
   代价是相机节点 CPU 从 ~9% 涨到 **~21%**、单帧 34 KB → **44 KB**（q92）。
   换相机/换固件后要重新确认这一项（对着带文字的东西看字是否正常，或把手放镜头左侧看画面左右）。
+- 📷 **第二路相机：120° 广角 5MP（2026-11-25 接入）**
+  - 硬件：**Xitech 5MP USB Camera**（`0abd:8050`）→ `/dev/video2/3`，
+    稳定路径 `/dev/v4l/by-id/usb-Xitech_5MP_USB_Camera_20250923107-video-index0`；
+    MJPG 最高 2592×1944@30，实测 1280×720 = **55 KB/帧**。⚠️ 别用 YUYV。
+  - 车端：`tools/robot_mjpeg_server.py` 的 `WideUvcThread` 用 `v4l2-ctl` 拉裸流、
+    按 `FFD8..FFD9` 切帧（`split_jpeg_frames`，70 帧 0 坏帧）、**零转码透传**；
+    `GET /video?cam=wide` 取广角（默认 `--wide-width 480 --wide-fps 12`，4G 才吃得消），
+    `/video` 仍是 HP60C；`/healthz` 带 `wide` 字段。设备按 by-id 自动找、拔掉每 3 s 重试。
+  - 手机页：手动模式画面**右上角** `#camSwap`（主摄时写「广角」、广角时写「主摄」），
+    **只在画面打开时出现**；断流自愈/兜底重连都带当前选择。导航模式那块共用同一选择。
+  - 回归：`tests/test_mjpeg_wide_camera.py`（8 例）+ `tests/test_page_camera_switch.py`（8 例）。
+  - ⚠️ **USB 供电是现场最大隐患**：8 个设备挤在 4A+1C 上，4G 模块和两路相机都在
+    「USB-C → hub1 → hub2」两级级联 hub 后面，峰值接近 3 A。建议分配见
+    `docs/hardware/vision.md` §3.9.3（相机/4G 直连、串口设备留 hub）。
   ⚠️ **MJPEG 服务只订 `compressed`，别无条件订原始图**（2026-11-21）：相机节点一旦看到
   原始图有订阅者，就要每帧解码 34 KB JPEG → 921 KB `bgr8` 再经 DDS 发出去
   （15 fps ≈ **13.8 MB/s**），实测把 `hp60c_uvc_node` 从 ~9% 顶到 **~90% CPU**、
