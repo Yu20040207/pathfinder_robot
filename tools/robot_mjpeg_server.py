@@ -251,6 +251,10 @@ class FrameHub:
                 'source': 'camera' if self._real_frames else 'test',
             }
 
+    def clients(self) -> int:
+        with self._lock:
+            return self._clients
+
     def has_clients(self) -> bool:
         """有没有人在看（广角相机用它做"没人看就省电省 CPU"）。"""
         with self._lock:
@@ -286,6 +290,8 @@ async def handle_stream(request: web.Request) -> web.StreamResponse:
     })
     await resp.prepare(request)
     hub.add_client(1)
+    if hub.clients() > 2:
+        print('MJPEG 同时在看的连接数：%d（主摄/广角）' % hub.clients(), flush=True)
     last_seq = -1
     try:
         while True:
@@ -298,7 +304,15 @@ async def handle_stream(request: web.Request) -> web.StreamResponse:
             last_seq = seq
             head = (f'--{BOUNDARY}\r\nContent-Type: image/jpeg\r\n'
                     f'Content-Length: {len(jpeg)}\r\n\r\n').encode()
-            await resp.write(head + jpeg + b'\r\n')
+            # 2026-11-25：手机切走/切后台后 TCP 不一定立刻 RST，写会一直挂着 →
+            # 服务端以为"还有人看"，既白烧 CPU 又占浏览器连接名额。超时就当断开。
+            try:
+                await asyncio.wait_for(resp.write(head + jpeg + b'\r\n'),
+                                       timeout=STREAM_WRITE_TIMEOUT_S)
+            except asyncio.TimeoutError:
+                print('MJPEG 客户端写超时（%.0fs），断开这条连接（可能已切走）'
+                      % STREAM_WRITE_TIMEOUT_S, flush=True)
+                break
     except (asyncio.CancelledError, ConnectionResetError, RuntimeError):
         pass
     finally:
@@ -326,6 +340,8 @@ async def handle_health(request: web.Request) -> web.Response:
         src = request.app.get('wide_src')
         if src is not None:
             body['wide']['cap_fps'] = src.capture_fps()
+            body['wide']['link'] = getattr(src, 'link', '')
+            body['wide']['target_fps'] = getattr(src, 'target_fps', 0)
     body['topic'] = request.app['topic']
     body['dds_ms'] = round(hub.dds_age_ms, 1)
     uvc = request.app.get('uvc')
@@ -673,6 +689,41 @@ def wide_device_path(by_id_dir: str = WIDE_BY_ID_DIR,
     return ''
 
 
+CELLULAR_IFACE_PREFIXES = ('ppp', 'wwan', 'rmnet', 'usb')
+
+
+def target_fps_for(iface: str, lan_fps: float, cell_fps: float) -> float:
+    """默认路由是 4G（ppp0 等）就降到 `cell_fps`，WiFi/有线用 `lan_fps`。
+
+    4G 上行实测 ~3.5 Mbps（2026-11-25），25 fps 的广角要 3.67 Mbps，跑在 4G 上会把
+    链路吃满 → 主摄、MQTT、页面请求一起卡。所以链路一变就自动降档。
+    """
+    name = (iface or '').strip()
+    if not name:
+        return float(lan_fps)          # 查不出来就当 WiFi，别无谓降画质
+    if name.startswith(CELLULAR_IFACE_PREFIXES):
+        return float(cell_fps)
+    return float(lan_fps)
+
+
+def default_route_iface() -> str:
+    """问内核"去公网走哪张网卡"（这个才是真正在用的链路，别读 metric 猜）。"""
+    for target in ('223.5.5.5', '1.1.1.1'):
+        try:
+            out = subprocess.run(['ip', 'route', 'get', target],
+                                 capture_output=True, text=True, timeout=2,
+                                 env={'LC_ALL': 'C', 'LANG': 'C',
+                                      'PATH': '/usr/sbin:/usr/bin:/sbin:/bin'})
+        except (OSError, subprocess.SubprocessError):
+            continue
+        parts = out.stdout.split()
+        if 'dev' in parts:
+            idx = parts.index('dev')
+            if idx + 1 < len(parts):
+                return parts[idx + 1]
+    return ''
+
+
 def decimate_step(acc: float, target: float, source: float) -> tuple[bool, float]:
     """按"每 N 帧取一帧"的累加器抽帧，返回 (这一帧要不要发, 新累加值)。
 
@@ -735,7 +786,8 @@ class WideUvcThread(threading.Thread):
 
     def __init__(self, hub: 'FrameHub', device: str = '', size: str = '1280x720',
                  restart_delay: float = 3.0, cam_fps: int = 30,
-                 target_fps: float = 0.0) -> None:
+                 target_fps: float = 0.0, cell_fps: float = 20.0,
+                 link_check_s: float = 5.0) -> None:
         super().__init__(daemon=True)
         self.hub = hub
         self.fixed_device = device
@@ -745,6 +797,12 @@ class WideUvcThread(threading.Thread):
         self.cam_fps = int(cam_fps)
         #: 发送上限（0=不限，抽帧交给 FrameHub）；用累加器而不是时间阈值
         self.target_fps = float(target_fps)
+        self.lan_fps = float(target_fps)
+        #: 默认路由落到 4G 时自动降到这个帧率（上行只有 ~3.5 Mbps）
+        self.cell_fps = float(cell_fps)
+        self.link_check_s = float(link_check_s)
+        self.link = 'wifi'
+        self._last_link_check = 0.0
         self._send_acc = 0.0
         self._stop = threading.Event()
         self._cap_lock = threading.Lock()
@@ -767,6 +825,19 @@ class WideUvcThread(threading.Thread):
             cmd.append('--set-parm=%d' % self.cam_fps)
         cmd += ['--stream-mmap', '--stream-count=0', '--stream-to=-']
         return cmd
+
+    def refresh_link(self) -> None:
+        """每隔几秒看一次"现在走的是 WiFi 还是 4G"，自动在两档帧率之间切。"""
+        self._last_link_check = time.monotonic()
+        iface = default_route_iface()
+        fps = target_fps_for(iface, self.lan_fps, self.cell_fps)
+        link = '4g' if iface and iface.startswith(CELLULAR_IFACE_PREFIXES) else 'wifi'
+        if link != self.link:
+            self.link = link
+            print('广角链路切换：%s（默认路由 %s）→ 发送上限 %g fps' % (
+                '4G' if link == '4g' else 'WiFi/有线', iface or '未知', fps),
+                flush=True)
+        self.target_fps = fps
 
     def capture_fps(self) -> float:
         """相机**实际喂过来**的帧率（不受发送限速影响，排查掉帧用）。"""
@@ -803,6 +874,8 @@ class WideUvcThread(threading.Thread):
                         break
                     buf += chunk
                     frames, buf = split_jpeg_frames(buf)
+                    if time.monotonic() - self._last_link_check >= self.link_check_s:
+                        self.refresh_link()
                     for jpeg in frames:
                         now = time.monotonic()
                         self._note_capture(now)
@@ -893,6 +966,8 @@ def main() -> int:
                     help='广角画面发送上限帧率（和主摄 ~19 fps 对齐）')
     ap.add_argument('--wide-quality', type=int, default=60,
                     help='广角重编码画质（越小越省 4G 流量）')
+    ap.add_argument('--wide-fps-4g', type=float, default=20.0,
+                    help='默认路由变成 4G 时自动降到这个帧率（4G 上行 ~3.5 Mbps）')
     ap.add_argument('--wide-cam-fps', type=int, default=30,
                     help='让相机按这个帧率出流（0=不设置，用相机默认）')
     args = ap.parse_args()
@@ -925,13 +1000,14 @@ def main() -> int:
                             width=args.wide_width)
         wide = WideUvcThread(hub_wide, args.wide_device, args.wide_size,
                              cam_fps=args.wide_cam_fps,
-                             target_fps=args.wide_fps)
+                             target_fps=args.wide_fps,
+                             cell_fps=args.wide_fps_4g)
         wide_device = wide.device()
         wide.start()
-        print('广角相机：%s（%s，发送 %g fps / 相机 %d fps，%d 宽 q%d）' % (
+        print('广角相机：%s（%s，发送 %g fps / 4G 时 %g fps / 相机 %d fps，%d 宽 q%d）' % (
             wide_device or '未找到（会持续重试）', args.wide_size,
-            args.wide_fps, args.wide_cam_fps, args.wide_width,
-            args.wide_quality), flush=True)
+            args.wide_fps, args.wide_fps_4g, args.wide_cam_fps,
+            args.wide_width, args.wide_quality), flush=True)
 
     topic = args.v4l2 or ('test-pattern' if args.test_pattern else args.topic)
     app = build_app(hub, topic, uvc, hub_wide, wide_device, wide if hub_wide else None)

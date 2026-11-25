@@ -3936,19 +3936,59 @@ function camSwapLabel() {
   });
 }
 
-function camReload() {
-  // 必须清 src 再重设，否则 <img> 不会真正断掉旧的那条 MJPEG 长连接
-  const img = $('camImg');
-  img.removeAttribute('src');
+/* 2026-11-25 黑屏事故（用户报"切换摄像头之后都黑屏了"）：
+   iOS/WebKit **不认 `removeAttribute('src')` 断流**——旧的多分片长连接还挂着不关，
+   每切一次/每次重连就漏一条，攒满浏览器对同域的 6 条并发连接后，
+   **两路画面全都开不出来（黑屏）**。
+   所以现在每次（重）连都**换一个全新的 <img> 节点**：旧节点从 DOM 摘掉，
+   浏览器立刻回收它那条连接。别再改回"复用同一个 img 改 src"。 */
+let camFails = 0;
+
+function camMount(id, url, visible, onerr) {
+  const old = $(id);
+  if (!old) return null;
+  const fresh = document.createElement('img');
+  fresh.id = id;
+  fresh.alt = old.getAttribute('alt') || '摄像头画面';
+  fresh.className = old.className;
+  if (visible) fresh.classList.remove('hidden');
+  else fresh.classList.add('hidden');
+  if (url) fresh.src = url;
+  if (onerr === undefined) {
+    fresh.onload = old.onload;               // 跟随画面等沿用原来的处理器
+    fresh.onerror = old.onerror;
+  } else {
+    fresh.onload = () => {
+      camFails = 0;
+      if (id === 'camImg' && $('camErr')) $('camErr').classList.add('hidden');
+    };
+    fresh.onerror = onerr ? () => onerr() : null;
+  }
+  old.removeAttribute('src');
+  old.replaceWith(fresh);
+  return fresh;
+}
+
+function camImgErr() {
   if (!camWanted || !camMedia) return;
-  img.classList.remove('hidden');
-  img.src = camSrcURL();
+  camFails += 1;
+  if (camFails >= 3) {                      // 连不上就明说，别一直黑屏重试
+    camStop();
+    $('camErr').classList.remove('hidden');
+    $('camErr').innerHTML = '摄像头连不上<br><span style="color:#6b7f93">' +
+      '手机需与机器人同一 WiFi；机器人上要跑 MJPEG 服务</span>';
+    return;
+  }
+  setTimeout(() => { if (camWanted && camMedia) camReload(); }, 600);
+}
+
+function camReload() {
+  if (!camWanted || !camMedia) { camStop(); return; }
+  camMount('camImg', camSrcURL(), true, camImgErr);
 }
 
 function camStop() {
-  const img = $('camImg');
-  img.classList.add('hidden');
-  img.removeAttribute('src');          // 断流：清 src 才会真正断开 MJPEG 连接
+  camMount('camImg', '', false, null);   // 换新节点才真正断开 MJPEG 长连接
   const btn = $('camRefresh');
   if (btn) btn.classList.remove('show');
   const swap = $('camSwap');
@@ -3957,10 +3997,9 @@ function camStop() {
 
 function camStart() {
   if (!camMedia) return;
-  const img = $('camImg');
+  camFails = 0;
   $('camErr').classList.add('hidden');
-  img.classList.remove('hidden');
-  img.src = camSrcURL();
+  camMount('camImg', camSrcURL(), true, camImgErr);
   const btn = $('camRefresh');
   if (btn) btn.classList.add('show');
   const swap = $('camSwap');
@@ -3985,17 +4024,8 @@ if ($('camSwap')) {
   };
 }
 
-// 刷新：只重连这一路 MJPEG（清 src 再带时间戳重设），不重新问地址
-// 摄像头画面同样会断（iPhone 切后台/媒体服务重启）→ 自动重连
-if ($('camImg')) {
-  $('camImg').onerror = () => {
-    if (!camWanted || !camMedia) return;
-    setTimeout(() => {
-      if (!camWanted || !camMedia) return;
-      camReload();
-    }, 600);
-  };
-}
+// 刷新：只重连这一路 MJPEG（换新 img + 时间戳），不重新问地址
+// 断流自愈由 camImgErr() 负责（见上面的 camMount）
 setInterval(() => {
   if (!camWanted || document.hidden || !camMedia) return;
   const i = $('camImg');
@@ -4077,8 +4107,7 @@ async function openNavCam() {
         '<span style="color:#9fb3c8">用 http:// 打开本页即可内嵌显示</span>';
       return;
     }
-    $('navCamImg').src = navCamURL();
-    $('navCamImg').classList.remove('hidden');
+    camMount('navCamImg', navCamURL(), true, navCamImgErr);
   } catch (e) {
     $('navCamImg').classList.add('hidden');
     $('navCamErr').classList.remove('hidden');
@@ -4087,9 +4116,19 @@ async function openNavCam() {
   }
 }
 
+function navCamImgErr() {
+  if (!navCamWanted) return;
+  setTimeout(() => { if (navCamWanted && camMedia) navCamReload(); }, 600);
+}
+
+function navCamReload() {
+  if (!navCamWanted || !camMedia) return;
+  camMount('navCamImg', navCamURL(), true, navCamImgErr);
+}
+
 function closeNavCam() {
   navCamWanted = false;
-  $('navCamImg').removeAttribute('src');
+  camMount('navCamImg', '', false, null);
   $('navCamPane').classList.add('hidden');
   if ($('navView')) $('navView').classList.remove('cam-open');
   if (typeof ensureNavCanvas === 'function') setTimeout(() => ensureNavCanvas(true), 60);
@@ -4108,46 +4147,31 @@ if ($('navCamSwap')) {
     if (!navCamWanted || !camMedia) return;
     camWide = !camWide;
     camSwapLabel();
-    const i = $('navCamImg');       // 只重连导航这一路（手动那块这会儿是隐藏的）
-    i.removeAttribute('src');
-    i.src = navCamURL();
+    navCamReload();                 // 只重连导航这一路（换新节点，见 camMount）
     if (camWide) {
       setTimeout(() => {
-        if (navCamWanted && camWide && i.complete && i.naturalWidth === 0) {
+        const i = $('navCamImg');
+        if (navCamWanted && camWide && i && i.complete && i.naturalWidth === 0) {
           showToast('广角相机还没出画面（检查 USB 是否插好）', false);
         }
       }, 2500);
     }
   };
 }
-// 断流自愈：和手动模式一致（iPhone 切后台/媒体服务重启会静默掐断长连接）
-if ($('navCamImg')) {
-  $('navCamImg').onerror = () => {
-    if (!navCamWanted || !camMedia) return;
-    setTimeout(() => {
-      if (!navCamWanted || !camMedia) return;
-      const i = $('navCamImg');
-      i.removeAttribute('src');
-      i.src = navCamURL();
-    }, 600);
-  };
-}
+// 断流自愈：和手动模式一致（换新 <img> 节点，见 camMount 里的黑屏事故说明）
 setInterval(() => {
   if (!navCamWanted || document.hidden || !camMedia) return;
   const i = $('navCamImg');
   if (!i || !i.getAttribute('src')) return;
-  if (i.complete && i.naturalWidth === 0) {
-    i.removeAttribute('src');
-    i.src = navCamURL();
-  }
+  if (i.complete && i.naturalWidth === 0) navCamReload();
 }, 3000);
 // 切后台就断流（省电省带宽），回来再自动接上
 document.addEventListener('visibilitychange', () => {
   if (!navCamWanted) return;
   if (document.hidden) {
-    $('navCamImg').removeAttribute('src');
+    camMount('navCamImg', '', false, null);
   } else if (camMedia) {
-    $('navCamImg').src = navCamURL();
+    navCamReload();
   }
 });
 
@@ -4438,11 +4462,11 @@ function followVideoRestart(reason) {
   followVideoTryAt = Date.now();
   followVideoFails += 1;
   followVideoDead = true;
-  img.removeAttribute('src');          // 清 src 才会真正断掉旧连接
   followVideoAt = Date.now();
   setTimeout(() => {
     if (!followWanted || !followMedia) return;
-    img.src = followMedia.url + '?t=' + Date.now();
+    // ⚠️ 不能只清 src：WebKit 不会断掉旧的 MJPEG 长连接，攒满 6 条就黑屏
+    camMount('followImg', followMedia.url + '?t=' + Date.now(), true);
   }, 60);
   if (followVideoFails >= 3) {
     followVideoFails = 0;
@@ -4516,8 +4540,7 @@ function stopFollow() {
   followPoll = null;
   followData = { persons: [], sel: -1, tracking: false };
   followSel = -1;
-  const img = $('followImg');
-  if (img) img.removeAttribute('src');       // 清 src 才真正断开 MJPEG
+  camMount('followImg', '', false);          // 换新节点才真正断开 MJPEG
   followVideoDead = false;
   followVideoFails = 0;
   const btn = $('followRefresh');
@@ -4607,24 +4630,18 @@ window.addEventListener('pagehide', () => {
 $('followRefresh').onclick = (e) => {
   e.stopPropagation();
   if (!followWanted || !followMedia) return;
-  const img = $('followImg');
-  img.removeAttribute('src');
-  setTimeout(() => { img.src = followMedia.url + '?t=' + Date.now(); }, 80);
+  camMount('followImg', '', false);
+  setTimeout(() => {
+    if (followWanted && followMedia) {
+      camMount('followImg', followMedia.url + '?t=' + Date.now(), true);
+    }
+  }, 80);
 };
 
 $('camBtn').onclick = () => {
   if ($('camPane').classList.contains('hidden')) openCam(); else closeCam();
 };
-$('camImg').onload = () => {
-  $('camErr').classList.add('hidden');
-};
-$('camImg').onerror = () => {
-  if (!camWanted) return;
-  camStop();
-  $('camErr').classList.remove('hidden');
-  $('camErr').innerHTML = '摄像头连不上<br><span style="color:#6b7f93">' +
-    '手机需与机器人同一 WiFi；机器人上要跑 MJPEG 服务</span>';
-};
+// 画面事件统一在 camMount() 里挂（换节点后旧的事件处理器会跟着旧节点一起丢掉）
 
 // 切到后台就断流，省电省带宽；回来再自动接上
 document.addEventListener('visibilitychange', () => {

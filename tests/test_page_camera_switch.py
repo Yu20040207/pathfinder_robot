@@ -90,3 +90,29 @@ def test_both_switches_share_one_choice():
     m = re.search(r'function camSwapLabel\(\)\s*\{(.*?)\n\}', src, re.S)
     assert m and "'navCamSwap'" in m.group(1)
     assert src.count("camWide = !camWide") >= 2      # 手动 + 导航各一个入口
+
+
+def test_switch_replaces_img_node():
+    """黑屏事故根因：WebKit 不认 removeAttribute('src')，旧 MJPEG 长连接不断，
+    攒满同域 6 条连接后两路全黑。必须换新的 <img> 节点。"""
+    src = PAGE.read_text(encoding='utf-8')
+    assert 'function camMount' in src
+    assert 'old.replaceWith(fresh)' in src
+    # 去掉注释后，除 camMount 内部那一处，页面里不许再有"只清 src 断流"的写法
+    code = re.sub(r'/\*.*?\*/', '', src, flags=re.S)
+    code = re.sub(r'//[^\n]*', '', code)
+    assert code.count("removeAttribute('src')") == 1
+
+
+def test_all_three_panes_remount():
+    src = PAGE.read_text(encoding='utf-8')
+    assert "camMount('camImg'" in src
+    assert "camMount('navCamImg'" in src
+    assert "camMount('followImg'" in src
+
+
+def test_nav_swap_uses_reload_helper():
+    src = PAGE.read_text(encoding='utf-8')
+    assert 'function navCamReload' in src
+    swap = src.split("$('navCamSwap').onclick", 1)[1][:400]
+    assert 'navCamReload()' in swap

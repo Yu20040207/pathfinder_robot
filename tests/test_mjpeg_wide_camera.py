@@ -214,3 +214,44 @@ def test_decode_reduce_threshold():
     """目标宽 ≤ 源宽一半才砍半；否则（如源 640、目标 480）保持全尺寸。"""
     src = SERVER.read_text(encoding='utf-8')
     assert 'self.hub.width * 2 <= src_w' in src
+
+
+# ---------------------------------------------------------------- 4G 自动降帧
+
+target_fps_for = _load_functions('target_fps_for')[0]
+
+
+def test_4g_falls_back_to_lower_fps():
+    """默认路由走 ppp0（4G）时降到 20：4G 上行 ~3.5 Mbps，25 fps 要 3.67 Mbps。"""
+    assert target_fps_for('ppp0', 25, 20) == 20
+    assert target_fps_for('wwan0', 25, 20) == 20
+    assert target_fps_for('usb0', 25, 20) == 20
+
+
+def test_wifi_keeps_high_fps():
+    assert target_fps_for('wlo1', 25, 20) == 25
+    assert target_fps_for('eth0', 25, 20) == 25
+    assert target_fps_for('', 25, 20) == 25          # 查不出来当 WiFi，别无谓降档
+
+
+def test_link_is_read_from_kernel_route():
+    """判据必须是"去公网实际走哪张卡"，不是读 metric 猜。"""
+    src = SERVER.read_text(encoding='utf-8')
+    assert "'ip', 'route', 'get'" in src
+    assert 'def default_route_iface' in src
+    assert 'def refresh_link' in src
+    assert "'--wide-fps-4g'" in src
+    assert "'link'" in src and "'target_fps'" in src
+
+
+def test_unit_has_4g_fallback_arg():
+    unit = (ROOT / 'deploy/systemd/fwr-media.service').read_text(encoding='utf-8')
+    assert '--wide-fps-4g 20' in unit
+    assert '--wide-fps 25' in unit
+
+
+def test_dead_client_write_times_out():
+    """手机切走后写会一直挂 → 必须超时断开，否则服务端以为还有人看。"""
+    src = SERVER.read_text(encoding='utf-8')
+    assert 'STREAM_WRITE_TIMEOUT_S' in src
+    assert 'asyncio.wait_for(resp.write(' in src
