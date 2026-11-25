@@ -362,12 +362,18 @@
 - 📷 **第二路相机：120° 广角 5MP（2026-11-25 接入）**
   - 硬件：**Xitech 5MP USB Camera**（`0abd:8050`）→ `/dev/video2/3`，
     稳定路径 `/dev/v4l/by-id/usb-Xitech_5MP_USB_Camera_20250923107-video-index0`；
-    MJPG 最高 2592×1944@30，实测 1280×720 = **55 KB/帧**。⚠️ 别用 YUYV。
+    MJPG 最高 2592×1944@30，**实际只能出 19.4 fps**（150 帧/7.75 s，换 720p/480p/240p 都一样，
+    `--set-parm=30` 报成功但没用）。⚠️ 别用 YUYV。采集用 **640x480**（4:3 全视场、解码更便宜，
+    输出 480x360 与主摄同比例）。
   - 车端：`tools/robot_mjpeg_server.py` 的 `WideUvcThread` 用 `v4l2-ctl` 拉裸流、
     按 `FFD8..FFD9` 切帧（`split_jpeg_frames`，70 帧 0 坏帧）、**零转码透传**；
     `GET /video?cam=wide` 取广角（`deploy/systemd/fwr-media.service` 里
     `--wide-width 480 --wide-fps 25 --wide-quality 60 --wide-cam-fps 30`），
     `/video` 仍是 HP60C；`/healthz` 带 `wide` 字段。设备按 by-id 自动找、拔掉每 3 s 重试。
+  - ⚠️ **切画面必须换新的 `<img>` 节点**（`camMount()` + `replaceWith`）：WebKit 不认
+    `removeAttribute('src')` 断流，旧 MJPEG 长连接不断，切几次就攒满同域 6 条连接 →
+    **两路全黑**（2026-11-25 现场）。手动/导航/跟随三块都是这套。服务端再加一道
+    单帧写 6 s 超时，清掉已经切走的死连接。
   - 手机页：手动模式画面**右上角** `#camSwap`（主摄时写「广角」、广角时写「主摄」），
     **只在画面打开时出现**；断流自愈/兜底重连都带当前选择。导航模式那块共用同一选择。
   - ⚡ **帧率三个坑（2026-11-25 优化，10 → 20 fps）**：① `v4l2-ctl` 不设 `--set-parm`
@@ -375,9 +381,12 @@
     会和 30 fps 源**混叠**（目标 20 实际只有 15），必须用 `decimate_step()` 累加器抽帧，
     且广角 hub 要 `fps=0` 别再二次限速；③ 720p 全尺寸解码 3.60 ms/帧，
     目标宽 ≤ 源宽一半时用 `IMREAD_REDUCED_COLOR_2` 降到 1.43 ms。
-    实测（25 fps 档）：**25.1 fps / 17.9 KB/帧 / 3.67 Mbps**，观看时 CPU **42.8%**、
-    空闲 **16.8%**；⚠️ 3.67 Mbps 已超 4G 上行上限（≈3.5），要经 4G 看视频得回退
-    `--wide-fps 20`（2.96 Mbps）。
+    实测：**20.1 fps / 22.9 KB/帧 / 3.76 Mbps**，观看时 CPU 36.6%、空闲 17%。
+    ⚠️ **4G 自动降帧**：每 5 s 读 `/proc/net/route` 挑默认路由（跳过 `enx*` 的 RNDIS），
+    落到 `ppp0` 就自动降到 `--wide-fps-4g 12`（≈2.2 Mbps），回 WiFi 自动回 20。
+    ⚠️ **抽帧的分母必须是实测帧率**（`effective_source()`）：相机宣称 30 实际 20，
+    拿 30 当分母会把 20 抽成 13.3（2026-11-25 现场"配 20 出 13.4"就是它）。
+    ⚠️ **链路探测不许 spawn `ip route get`**：每 5 s 一次会把广角从 20 拖到 13.4。
     **没人看就不转码**（只留 1 帧/秒原图给 `/snapshot.jpg`）。
   - 回归：`tests/test_mjpeg_wide_camera.py`（21 例）+ `tests/test_page_camera_switch.py`（8 例）。
   - ⚠️ **USB 供电是现场最大隐患**：8 个设备挤在 4A+1C 上，4G 模块和两路相机都在

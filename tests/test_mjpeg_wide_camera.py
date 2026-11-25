@@ -246,7 +246,7 @@ def test_link_is_read_from_kernel_route():
 
 def test_unit_has_4g_fallback_arg():
     unit = (ROOT / 'deploy/systemd/fwr-media.service').read_text(encoding='utf-8')
-    assert '--wide-fps-4g 15' in unit
+    assert '--wide-fps-4g 12' in unit
     assert '--wide-fps 20' in unit
 
 
