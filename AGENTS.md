@@ -313,6 +313,14 @@
   `Transitioning successful` / `active [3]`），恢复后 `/cmd_vel_auto_forward_filtered` 20 Hz 正常。
   页面手动模式**急停右侧 📷** 打开；地址由 `GET /api/devices/{id}/media` 下发（云端
   `JC_MEDIA_HOSTS`）。⚠️ **8080 不要用**（页面会重定向到 `/car/`）；**HTTPS 页面会拦 HTTP 视频**。
+  ⚠️ **验证页面部署要看 80 端口的 `/car/`，不要看 `127.0.0.1:8080/car.html`**（2026-11-25 实测）：
+  8080 上是另一套 `python3 -m http.server`（boat 项目，pid 689 常驻），它返回的是**旧副本**
+  （实测 `Last-Modified` 停在 11-24 10:21、203392 B），跟 `/opt/jc/web/car.html` 无关。
+  正确核对：`curl -s -o /dev/null -w '%{http_code} %{size_download}\n' http://127.0.0.1/car/`
+  → 应为 **200 且字节数与本地一致**；再
+  `curl -s http://127.0.0.1/car/ | md5sum` 和本地 `md5sum cloud/web/car.html` 对齐。
+  nginx `location /car/ { alias /opt/jc/web/; index car.html; }`（HTTP 与 HTTPS 两个 server 块都是），
+  带 `Cache-Control: no-store`（HTTP 那块有），所以手机普通刷新就能拿到新版。
 - 🌡 **主控温度怎么读（2026-11-24 查清）**：`/sys/class/thermal/thermal_zone*` 在本机是
   **zone0=acpitz（恒定 27.8 °C，不是 CPU）**、zone1=iwlwifi_1（无线网卡，常比 CPU 热）、
   **zone2=x86_pkg_temp（真正的 CPU 封装温度）**。`mqtt_bridge.py` 顶部还留着一张旧的
