@@ -483,6 +483,20 @@
   #navCamErr { padding: 14px 12px; color: #ff7b72; font-size: 12px; line-height: 1.6;
                text-align: center; }
   #navCamErr.hidden { display: none; }
+  /* 2026-11-25 用户要求：导航模式画面右上角同样能切主摄/广角。
+     z-index 7 > `#navTopWrap` 的 6（那层是 pointer-events:none 的透明浮层），
+     否则按钮会被两行提示挡住点不到。 */
+  #navCamSwap {
+    position: absolute; right: 8px; top: 8px; z-index: 7;
+    height: 30px; padding: 0 12px; border-radius: 15px;
+    border: 1px solid rgba(255, 255, 255, .55); background: rgba(0, 0, 0, .38);
+    color: #f0f6fc; font-size: 13px; font-weight: 600;
+    display: none; align-items: center; justify-content: center;
+    text-shadow: 0 0 3px rgba(0, 0, 0, .95), 0 0 1px rgba(0, 0, 0, 1);
+    touch-action: manipulation; -webkit-tap-highlight-color: transparent;
+  }
+  #navCamSwap.show { display: flex; }
+  #navCamSwap:active { background: rgba(56, 189, 248, .40); }
   /* 顶部两行：**没有框**，直接浮在地图/画面上（用户 2026-11-24 要求）。
      绝对定位所以不占高度，地图从最顶上铺满；`pointer-events:none` 让手势穿到画布。
      ⚠️ 画布 `#mapCanvas` 的 `order:2` / `flex:1` 仍然要留着：打开摄像头时画面 `order:0`
@@ -710,6 +724,7 @@
          文字一条带、视频在它下面）。 -->
     <div id="navCamPane" class="hidden">
       <img id="navCamImg" class="hidden" alt="摄像头画面">
+      <button id="navCamSwap" title="切换摄像头" aria-label="切换摄像头">广角</button>
       <div id="navCamErr" class="hidden"></div>
     </div>
     <div id="zoomCtl">
@@ -3913,8 +3928,12 @@ function camSrcURL() {
 function navCamURL() { return camSrcURL(); }
 
 function camSwapLabel() {
-  const btn = $('camSwap');
-  if (btn) btn.textContent = camWide ? '主摄' : '广角';
+  // 两个画面（手动 / 导航）共用同一个选择，标签永远一致
+  const text = camWide ? '主摄' : '广角';
+  ['camSwap', 'navCamSwap'].forEach((id) => {
+    const btn = $(id);
+    if (btn) btn.textContent = text;
+  });
 }
 
 function camReload() {
@@ -4045,6 +4064,7 @@ async function openNavCam() {
   if (typeof ensureNavCanvas === 'function') setTimeout(() => ensureNavCanvas(true), 60);
   $('navCamBtn').classList.add('on');
   $('navCamErr').classList.add('hidden');
+  if ($('navCamSwap')) { camSwapLabel(); $('navCamSwap').classList.add('show'); }
   $('navCamImg').classList.add('hidden');   // 拿到地址再显示，别闪破图标
   try {
     // 每次现问服务端要地址（地址可能过期/换网），和手动模式同一套接口
@@ -4057,7 +4077,7 @@ async function openNavCam() {
         '<span style="color:#9fb3c8">用 http:// 打开本页即可内嵌显示</span>';
       return;
     }
-    $('navCamImg').src = media.url + '?t=' + Date.now();
+    $('navCamImg').src = navCamURL();
     $('navCamImg').classList.remove('hidden');
   } catch (e) {
     $('navCamImg').classList.add('hidden');
@@ -4074,11 +4094,30 @@ function closeNavCam() {
   if ($('navView')) $('navView').classList.remove('cam-open');
   if (typeof ensureNavCanvas === 'function') setTimeout(() => ensureNavCanvas(true), 60);
   $('navCamBtn').classList.remove('on');
+  if ($('navCamSwap')) $('navCamSwap').classList.remove('show');
 }
 
 if ($('navCamBtn')) {
   $('navCamBtn').onclick = () => {
     if (navCamWanted) closeNavCam(); else openNavCam();
+  };
+}
+if ($('navCamSwap')) {
+  $('navCamSwap').onclick = (e) => {
+    e.stopPropagation();
+    if (!navCamWanted || !camMedia) return;
+    camWide = !camWide;
+    camSwapLabel();
+    const i = $('navCamImg');       // 只重连导航这一路（手动那块这会儿是隐藏的）
+    i.removeAttribute('src');
+    i.src = navCamURL();
+    if (camWide) {
+      setTimeout(() => {
+        if (navCamWanted && camWide && i.complete && i.naturalWidth === 0) {
+          showToast('广角相机还没出画面（检查 USB 是否插好）', false);
+        }
+      }, 2500);
+    }
   };
 }
 // 断流自愈：和手动模式一致（iPhone 切后台/媒体服务重启会静默掐断长连接）

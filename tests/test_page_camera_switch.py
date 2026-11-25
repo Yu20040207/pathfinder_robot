@@ -69,3 +69,24 @@ def test_reconnect_keeps_selected_camera():
     # 两处自愈（onerror + 3 s 兜底轮询）都走 camReload()
     # 手动画面：onerror + 3 s 兜底 + 点切换各一次
     assert src.count('camReload();') >= 3
+
+
+def test_nav_camera_pane_has_same_switch():
+    """导航模式那块画面也有切换键（用户 2026-11-25：都加上）。"""
+    src = PAGE.read_text(encoding='utf-8')
+    pane = src[src.index('<div id="navCamPane"'):]
+    pane = pane[:pane.index('</div>')]
+    assert 'id="navCamSwap"' in pane
+
+    body = _css('#navCamSwap')
+    assert re.search(r'right:\s*8px', body)
+    assert re.search(r'top:\s*8px', body)
+    # 顶部两行浮层是 z-index 6 且 pointer-events:none，按钮必须更高才点得到
+    assert re.search(r'z-index:\s*7', body)
+
+
+def test_both_switches_share_one_choice():
+    src = PAGE.read_text(encoding='utf-8')
+    m = re.search(r'function camSwapLabel\(\)\s*\{(.*?)\n\}', src, re.S)
+    assert m and "'navCamSwap'" in m.group(1)
+    assert src.count("camWide = !camWide") >= 2      # 手动 + 导航各一个入口
