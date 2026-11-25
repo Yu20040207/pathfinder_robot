@@ -365,11 +365,19 @@
     MJPG 最高 2592×1944@30，实测 1280×720 = **55 KB/帧**。⚠️ 别用 YUYV。
   - 车端：`tools/robot_mjpeg_server.py` 的 `WideUvcThread` 用 `v4l2-ctl` 拉裸流、
     按 `FFD8..FFD9` 切帧（`split_jpeg_frames`，70 帧 0 坏帧）、**零转码透传**；
-    `GET /video?cam=wide` 取广角（默认 `--wide-width 480 --wide-fps 12`，4G 才吃得消），
+    `GET /video?cam=wide` 取广角（`deploy/systemd/fwr-media.service` 里
+    `--wide-width 480 --wide-fps 20 --wide-quality 60 --wide-cam-fps 30`），
     `/video` 仍是 HP60C；`/healthz` 带 `wide` 字段。设备按 by-id 自动找、拔掉每 3 s 重试。
   - 手机页：手动模式画面**右上角** `#camSwap`（主摄时写「广角」、广角时写「主摄」），
     **只在画面打开时出现**；断流自愈/兜底重连都带当前选择。导航模式那块共用同一选择。
-  - 回归：`tests/test_mjpeg_wide_camera.py`（8 例）+ `tests/test_page_camera_switch.py`（8 例）。
+  - ⚡ **帧率三个坑（2026-11-25 优化，10 → 20 fps）**：① `v4l2-ctl` 不设 `--set-parm`
+    时相机**只出 10 fps**（设 30 后 `cap_fps` 实测 30.1）；② 用"距上次发送 < 1/fps 秒就丢"
+    会和 30 fps 源**混叠**（目标 20 实际只有 15），必须用 `decimate_step()` 累加器抽帧，
+    且广角 hub 要 `fps=0` 别再二次限速；③ 720p 全尺寸解码 3.60 ms/帧，
+    目标宽 ≤ 源宽一半时用 `IMREAD_REDUCED_COLOR_2` 降到 1.43 ms。
+    实测：20.0 fps / 17.6 KB/帧 / 2.96 Mbps，观看时 CPU 48%→**37%**，空闲 32%→**17%**；
+    **没人看就不转码**（只留 1 帧/秒原图给 `/snapshot.jpg`）。
+  - 回归：`tests/test_mjpeg_wide_camera.py`（21 例）+ `tests/test_page_camera_switch.py`（8 例）。
   - ⚠️ **USB 供电是现场最大隐患**：8 个设备挤在 4A+1C 上，4G 模块和两路相机都在
     「USB-C → hub1 → hub2」两级级联 hub 后面，峰值接近 3 A。建议分配见
     `docs/hardware/vision.md` §3.9.3（相机/4G 直连、串口设备留 hub）。
