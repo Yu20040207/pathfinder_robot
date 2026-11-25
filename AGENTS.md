@@ -66,6 +66,26 @@
   `usb 3-1.3.3: device descriptor read/all, error -71` 并伴随重新枚举 →
   **模块挂在"根 hub → hub1 → hub2"两级级联 hub 上（与相机、双雷达同一总线）**，供电/信号存疑，
   建议换到主机**直连 USB 口**再评估稳定性。
+- 🛠 **4G 备份链路自动维护（2026-11-25 上线，`fwr-4g-net.timer`）**：
+  - 脚本 `tools/fwr_4g_net.py`（实机 `/usr/local/bin/fwr_4g_net.py`），单元在 `deploy/systemd/`：
+    `fwr-4g-net.service`（oneshot）+ `fwr-4g-net.timer`（开机 40 s 后、之后每 **60 s** 一轮）。
+  - **每轮做两件事**：① 清掉 RNDIS 抢路由并 `ip link set ... down`；② 4G 健康检查/自愈。
+  - **自愈门槛**：默认路由就在 ppp0（4G 是唯一在用链路）→ 1 轮（~8 s）就动手；
+    4G 只是备用 → 连续 **3 轮**（~3 分钟）才动手（避免一次 20 s 闪断就重拨）。冷却 **300 s**。
+  - **三级恢复**（现场实测只有前两级救得回来）：
+    ① `nmcli con down/up 4g` → ② 射频复位 `mmcli --disable/--enable/--3gpp-register-home` +
+    再 `nmcli up` → ③ USB 重新授权（`/sys/bus/usb/devices/<按 2c7c:6005 找>/authorized` 0→1，半小时最多一次）。
+  - 实测（2026-11-25）：① 静默死亡 → 检测到恢复 **33 s**；② 手动 `nmcli con down 4g` →
+    下一轮 **60 s 内拉起、2 s 后可用**；③ 人为造 RNDIS 默认路由（`via 192.168.43.1 metric 20100 onlink`）
+    → 脚本删路由 + 网口 DOWN，`ip route show default` 只剩 wlo1 和 ppp0。
+  - ⚠️ **脚本里所有命令都带 `LC_ALL=C`**：车机是中文 locale，`nmcli` 会把 `yes` 输出成「是」、
+    `mmcli` 状态也会被翻译。另外 `nmcli -f` 的字段名是 **`connection.autoconnect`**
+    （写成 `autoconnect` 直接 `invalid field`，会让脚本每轮都以为用户关了自动连接）。
+  - ⚠️ **不要用 `pkill -f fwr_4g_net.py` 清理进程**：`pkill -f` 会匹配到你自己那条 ssh 命令行
+    （它含脚本名）→ 把会话一起杀掉。用 `sudo systemctl stop fwr-4g-net.service`。
+  - ⚠️ **ModemManager 的状态在 PPP 会话期间不可信**：实测 `registration: idle`、
+    `packet service: detached`、`signal quality: 0% (cached)` 时 ppp0 照样能 ping 通。
+    **判据只能是 ppp0 的实际回包**，别拿 MM 字段当"能用/不能用"的依据。
 - ⚠️ 截至 2026-11-25：`jccontrol.xyz:443` 的 TLS **WiFi 和 4G 都会 reset**（与 4G 无关，是云端 443 自身的问题，
   待单独查）；走 80 端口正常。
 - 云端视频地址**不写死 IP**：`/etc/systemd/system/jc-api.service.d/media.conf` 里

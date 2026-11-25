@@ -12502,3 +12502,45 @@ sudo nmcli con up 4g
 - 把 RNDIS 路由修复做成持久化（systemd oneshot，开机 + 网络变化时执行）。
 - 4G 看门狗：默认路由是 ppp0 但 ping 不通 → 自动 register-home + 重拨（把 93 s 压到 ~20 s）。
 - 评估把 `mqtt_bridge` 的 keep-alive 从 ~45 s 降到 15~20 s（断网感知更快）。
+
+## 2026-11-25 10:53 · RNDIS 抢路由持久化 + 4G 看门狗上线（用户批准的第 1、2 项）
+
+### 交付物
+| 文件 | 位置 | 作用 |
+| --- | --- | --- |
+| `tools/fwr_4g_net.py` | 车端 `/usr/local/bin/fwr_4g_net.py` | `maintain` / `fix-rndis` / `watch` 三种模式 |
+| `deploy/systemd/fwr-4g-net.service` | `/etc/systemd/system/` | oneshot，跑 `maintain`，`TimeoutStartSec=420` |
+| `deploy/systemd/fwr-4g-net.timer` | `/etc/systemd/system/` | 开机 40 s 后开始，之后每 60 s 一轮 |
+| `tests/test_4g_net.py` | 仓库 | **15 例**纯逻辑回归 |
+
+### 策略
+- **RNDIS**：每轮找 MAC `02:0c:29:a3:9b:6d`（或 `enx*` + `cdc_ether`）的网口，
+  删掉它的 v4/v6 默认路由并 `ip link set down`（不 down 的话 DHCP 续租会把路由加回来）。
+- **自愈门槛**：默认路由在 ppp0（4G 是唯一链路）→ 1 轮动手；4G 只是备用 → 连续 3 轮（~3 min）才动手。
+  冷却 300 s。
+- **三级恢复**：`nmcli down/up` → 射频 `--disable/--enable/--3gpp-register-home` + `nmcli up`
+  → USB 重新授权（按 VID:PID `2c7c:6005` 找 sysfs，不写死 `3-1.3.3`；半小时最多一次）。
+
+### 实测（已验证）
+1. **RNDIS 抢路由**：人为 `ip route add default via 192.168.43.1 dev enx020c29a39b6d metric 20100 onlink`
+   → 跑 `fix-rndis`：日志 `清除 RNDIS 默认路由`，`ip route show default` 只剩 `wlo1`(600) 和 `ppp0`(20700)，
+   网口变 `DOWN`。
+2. **静默死亡自愈**：10:35:11 检测到 `registration: idle / packet: detached` 且回包 0
+   → 10:35:36 重拨 → **10:35:44 恢复可用（33 s）**。
+3. **ppp0 消失**：10:46:13 手动 `nmcli con down 4g` → 10:47:17 下一轮发现 `ppp0 不在 → 拉起 4g`
+   → 10:47:19 `拉起后 4G 可用`（**2 s**）。
+4. **健康轮询**：每 60 s 打一条 `4G 健康`；连续失败会打 `连续第 N/3 轮，默认路由在 wlo1 → 先观察`。
+
+### 踩坑（都已修）
+- `nmcli -f autoconnect` **字段名无效**，必须 `connection.autoconnect`；
+  且 `-t` 模式输出带前缀（`connection.autoconnect:yes`），解析要去掉前缀。
+- 中文 locale 会把 `yes` 翻成「是」、`mmcli` 状态翻成中文 → 所有子命令统一 `LC_ALL=C`。
+- `pkill -f fwr_4g_net.py` 会匹配到自己的 ssh 命令行 → 自杀式断连（踩两次）。
+- `subprocess` 的 timeout 能杀掉卡住的 `nmcli`，但 NM 侧的操作仍可能继续 → 三级恢复里每步都有硬超时。
+
+### 未验证 / 遗留
+- 三级恢复的 **②射频复位、③USB 重新授权** 没有人为制造"模块彻底半死"去验证（只有自然偶发时才会走到）。
+- **4G 本身仍不稳**：3 分钟观测里出现过一次 **20 s 闪断**（`registration` 掉回 `idle` 又自己恢复）；
+  1 小时内多次需要重拨才恢复。怀疑：模块挂在**两级级联 hub** 上（与相机、双雷达同总线）供电不足 /
+  天线位置差 / SIM 套餐策略。**建议把模块换到主机直连 USB 口再测**。
+- MM 在 PPP 会话期间的状态字段不可信（实测 idle/detached/0% 时 ppp0 仍能 ping 通）→ 判据只用 ppp0 回包。

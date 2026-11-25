@@ -1,0 +1,11 @@
+[Unit]
+Description=4G 备份链路维护（清 RNDIS 抢路由 / 静默死亡自愈）
+Documentation=file:///usr/local/bin/fwr_4g_net.py
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/bin/fwr_4g_net.py maintain
+TimeoutStartSec=420
+Nice=5

@@ -1,0 +1,11 @@
+[Unit]
+Description=每分钟维护一次 4G 备份链路
+
+[Timer]
+OnBootSec=40s
+OnUnitActiveSec=60s
+AccuracySec=5s
+Unit=fwr-4g-net.service
+
+[Install]
+WantedBy=timers.target
