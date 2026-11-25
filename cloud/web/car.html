@@ -4004,7 +4004,7 @@ function camMount(id, url, visible, onerr) {
   old.replaceWith(fresh);
   if (url && onerr !== undefined) {
     // 本地直连（局域网 IP）在异地根本不可达：Safari 可能几十秒才 onerror，
-    // 所以自己盯 2.5 s —— 一点图都没有就切云端中继重挂一次。
+    // 所以自己盯 1.5 s —— 一点图都没有就切云端中继重挂一次。
     setTimeout(() => {
       if ($(id) !== fresh || fresh.naturalWidth > 0) return;
       if (!camFallbackToRemote()) return;
@@ -4013,7 +4013,7 @@ function camMount(id, url, visible, onerr) {
         if (id === 'camImg' && camWanted) camReload();
         else if (id === 'navCamImg' && navCamWanted) navCamReload();
       });
-    }, 2500);
+    }, 1500);
   }
   return fresh;
 }

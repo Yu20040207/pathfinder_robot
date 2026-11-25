@@ -42,7 +42,7 @@ def test_page_falls_back_when_direct_stream_shows_nothing():
     assert 'function camFallbackToRemote()' in body
     assert 'camRemote.online' in body, '车端中继不在线就别切（切了也是黑屏）'
     assert 'naturalWidth > 0' in body, '2.5 s 探针必须先确认真的没出图'
-    assert '}, 2500);' in body
+    assert '}, 1500);' in body, '异地开始出画面要快，别等 2.5 s'
 
 
 def test_page_refreshes_short_lived_token_before_switching():

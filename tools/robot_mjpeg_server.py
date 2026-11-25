@@ -220,7 +220,7 @@ class FrameHub:
         self._feed_low(image=image)
 
     def publish_jpeg(self, data: bytes, resample: bool = True,
-                     reduce: int = 1) -> None:
+                     reduce: int = 1, source: Optional[bytes] = None) -> None:
         """已经是 JPEG 帧：**需要缩小分辨率时才解码重编码**，否则原样透传。
 
         `resample=False` 用于"没人看"的时候：只留一张原始帧给 `/snapshot.jpg`，
@@ -268,7 +268,9 @@ class FrameHub:
             if len(self._fps_window) > 120:
                 self._fps_window = self._fps_window[-120:]
         self._event.set()
-        self._feed_low(data=data)
+        # `source` = 未经本 hub 缩放的**原始 JPEG**。低码率分身从原始帧自己缩放到
+        # 目标宽度，比"拿已经缩到 480 的帧再缩一次"少一代 JPEG 损失（2026-11-25）。
+        self._feed_low(data=source if source is not None else data)
 
     # ---- 读取侧 ----
     def latest(self) -> tuple[Optional[bytes], int]:
@@ -377,7 +379,10 @@ async def handle_stream(request: web.Request) -> web.StreamResponse:
             if jpeg is None or seq == last_seq:
                 if request.transport is None:            # 客户端已断开
                     break
-                await asyncio.sleep(0.02)
+                # 轮询间隔 = 每帧的**平均额外等待**。原来 20 ms（平均多等 10 ms），
+                # 2026-11-25 用户要"延迟低"→ 5 ms（平均 2.5 ms）；一条连接 200 次/秒
+                # 的事件循环唤醒，开销可忽略。
+                await asyncio.sleep(0.005)
                 continue
             last_seq = seq
             head = (f'--{BOUNDARY}\r\nContent-Type: image/jpeg\r\n'
@@ -639,7 +644,7 @@ def run_ros(hub: FrameHub, topic: str, node_name: str,
             hub.dds_age_ms = (now_ns - stamp_ns) / 1e6
         except Exception:
             pass
-        hub.publish_jpeg(bytes(msg.data))
+        hub.publish_jpeg(bytes(msg.data), source=bytes(msg.data))
 
     def on_image(msg: Image) -> None:
         # 有 compressed 流就用它（相机本来就是 JPEG，别再解一次）
@@ -1089,7 +1094,8 @@ class WideUvcThread(threading.Thread):
                             if send:
                                 # 有人看：缩到 480 宽（720p 源用半尺寸解码）
                                 self.hub.publish_jpeg(
-                                    jpeg, reduce=self.decode_reduce())
+                                    jpeg, reduce=self.decode_reduce(),
+                                    source=jpeg)
                         elif now - self._last_idle_frame > 1.0:
                             # 没人看：只留一张原始帧给 /snapshot.jpg，不解码不编码
                             self._last_idle_frame = now

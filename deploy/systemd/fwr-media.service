@@ -15,7 +15,11 @@ WorkingDirectory=/home/manbaout/Company_Project/Four-wheel-robot
 #   --wide-fps-4g 12 --wide-idle-pause 15   默认路由变成 4G 时自动降到 15（19.4fps×17.9KB=2.8Mbps 太满，15fps≈2.1Mbps）
 #   --wide-quality 60  重编码画质（越小越省流量）
 #   --wide-cam-fps 30  显式让相机按 30 fps 出流（不设时部分 UVC 相机会停在 10 fps）
-ExecStart=/bin/bash -lc "source /opt/ros/humble/setup.bash && source ros2_ws/install/setup.bash && exec ./.venv/bin/python tools/robot_mjpeg_server.py --port 8081 --fps 0 --quality 70 --width 480 --wide-size 640x480 --wide-width 480 --wide-fps 20 --wide-quality 60 --wide-fps-4g 12 --wide-idle-pause 15 --wide-cam-fps 30 --fallback-test-pattern"
+# 异地中继档（--low-*）：2026-11-25 用户要求"单台先把清晰度拉高、延迟压低"，
+# 从 320 宽 12 fps 提到 **480 宽 15 fps q65**（和同 WiFi 直连同分辨率，码率约 2.3 Mbps）。
+# 等上到 5 台再看云端出网预算（16.8 Mbps）决定是否回调到 400/320 宽。
+#   --low-width 0 可整体关掉异地档
+ExecStart=/bin/bash -lc "source /opt/ros/humble/setup.bash && source ros2_ws/install/setup.bash && exec ./.venv/bin/python tools/robot_mjpeg_server.py --port 8081 --fps 0 --quality 70 --width 480 --wide-size 640x480 --wide-width 480 --wide-fps 20 --wide-quality 60 --wide-fps-4g 12 --wide-idle-pause 15 --wide-cam-fps 30 --low-width 480 --low-fps 15 --low-quality 65 --fallback-test-pattern"
 Restart=always
 RestartSec=3
 Nice=5
