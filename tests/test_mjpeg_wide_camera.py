@@ -311,3 +311,16 @@ def test_link_check_does_not_spawn_subprocess():
     body = src[src.index('def default_route_iface'):src.index('def decimate_step')]
     assert '/proc/net/route' in body
     assert 'subprocess.run' not in body.split('def _route_iface_by_ip')[0]
+
+
+def test_decimation_uses_measured_source_rate():
+    """相机宣称 30、实际 20：拿 30 当分母会把 20fps 抽成 13.3（2026-11-25 现场）。"""
+    src = SERVER.read_text(encoding='utf-8')
+    assert 'def effective_source' in src
+    assert 'self.effective_source())' in src
+    # 源帧率等于目标时，必须每帧都发
+    acc, sent = 0.0, 0
+    for _ in range(20):
+        send, acc = decimate_step(acc, 20.0, 20.0)
+        sent += 1 if send else 0
+    assert sent == 20

@@ -922,6 +922,16 @@ class WideUvcThread(threading.Thread):
                 flush=True)
         self.target_fps = fps
 
+    def effective_source(self) -> float:
+        """抽帧用的"源帧率"必须是**实测**的。
+
+        ⚠️ 相机宣称 30 fps、实际只出 20 fps（本机实测 19.4，`--set-parm` 也改不了）。
+        若拿 30 当分母去抽 20，会再抽掉 1/3 → 实测只剩 **13.3 fps**
+        （2026-11-25 现场：配 20 出 13.4，就是这条）。
+        """
+        fps = self.capture_fps()
+        return fps if fps > 1.0 else float(self.cam_fps or 30)
+
     def capture_fps(self) -> float:
         """相机**实际喂过来**的帧率（不受发送限速影响，排查掉帧用）。"""
         with self._cap_lock:
@@ -967,7 +977,8 @@ class WideUvcThread(threading.Thread):
                         self._note_capture(now)
                         if self.hub.has_clients():
                             send, self._send_acc = decimate_step(
-                                self._send_acc, self.target_fps, self.cam_fps)
+                                self._send_acc, self.target_fps,
+                                self.effective_source())
                             if send:
                                 # 有人看：缩到 480 宽（720p 源用半尺寸解码）
                                 self.hub.publish_jpeg(
