@@ -12353,3 +12353,42 @@ P1 = 纯逻辑 + 节点 + 单测，**只发布观测**，用来先采集数据�
 - 真正的"卡住 → 12 s 自愈"还没在实机上故意复现过（要人为 deactivate 一个节点，
   需要用户同意）；目前只有单测覆盖判定逻辑 + 本次启动未触发（因为这次没卡）。
 - 冷启动竞态是否被错峰彻底消除：需要多观察几次开机。
+
+## 2026-11-25 08:53 · 就绪看门狗"自愈"破坏性实测（通过）
+
+用户要求"故意卡一次测试一下"。分两次做，第一次意外测出了 manager 的自愈能力：
+
+### 测试 1：直接 deactivate（**没测到看门狗**）
+- `ros2 lifecycle set /planner_server deactivate` → `Transitioning successful`
+- **3 s 内** `lifecycle_manager_navigation` 发现 bond 丢失 → 把 nav2 全组
+  `Deactivating … → Cleaning up … → 重新 bringup`，**+7 s 时 planner_server 已 `active [3]`**。
+- 结论：**Nav2 自己会在 bond 丢失时整栈重建**，所以"运行中掉线"这种场景本来就不会永久卡住。
+  真实故障（初始 bringup change_state 超时 → manager 放弃退出）**不会**产生 bond 事件，
+  这才是看门狗要覆盖的窗口。
+
+### 测试 2：冻结 manager 后 deactivate（**这一测才有效**）
+- `kill -STOP 4774`（`lifecycle_manager_navigation`）→ 再 deactivate `planner_server`。
+- 时间线（全部来自 `journalctl -u fwr-nav`）：
+  | 时刻 | 事件 |
+  | --- | --- |
+  | 08:51:52 | 人为 deactivate → `inactive [2]` |
+  | 08:52:00 (+9 s) | 仍 `inactive` |
+  | 08:52:04 (+13 s) | 仍 `inactive` |
+  | **08:52:10 (+18 s)** | `导航栈 planner_server 卡在 inactive（第 1/4 次）→ 补激活` |
+  | **08:52:10 (+18 s)** | `导航栈 planner_server 补 activate：成功` |
+  | 08:52:12 (+21 s) | `active [3]` |
+- `kill -CONT 4774` 后 manager 报 `CRITICAL FAILURE: SERVER controller_server IS DOWN
+  after not receiving a heartbeat for 4000 ms`（冻结期间的 bond 超时，预期内），
+  随后自行重建；**40 s 内看门狗重复补激活 0 次**（没和 manager 打架）。
+- 收尾核对：6 个节点全 `active [3]`、安全链 `/cmd_vel_auto_forward_filtered` **20.19 Hz**、
+  `/cmd_vel_auto_safe` 全 0（车没动过）。
+
+### 结论 / 调优点
+- 自愈路径**已验证**：只补 `configure/activate`，不动进程、不发速度。
+- 18 s 的构成 = `ready_drop_grace_s 8 s` + `_health` 5 s 定时器 + 异步状态查询延迟；
+  想更快就把 `_health` 的 `_poll_ready` 周期从 5 s 降到 2 s（约 −3 s），一般不必。
+- ⚠️ 以后测它**必须先 SIGSTOP 掉对应的 `lifecycle_manager`**，否则测的是 manager 自己。
+
+### 顺带发现
+- 测试前 `motion_enabled=True`、`manual_enabled=True`（用户之前点过"开始导航"），
+  但 `/cmd_vel_auto_safe` 为 0、`/explore/state=stopped` → 测试期间车没有动。

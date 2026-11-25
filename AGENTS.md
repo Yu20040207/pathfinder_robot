@@ -241,6 +241,16 @@
     而且 `MONITORS` 是"安全链"语义；就绪补齐只改生命周期状态、不杀进程、不发速度。
   - 实测（11-25 08:47 重启后）：6 个节点全 `active`、安全链 20.6 Hz、
     播种 `match 0.039 m (0.86,-2.96,-105°) 贴墙 88%`、30 s 内 0 次误触发。
+  - ✅ **自愈已实机验证（11-25 08:52）**：`kill -STOP` 冻结 `lifecycle_manager_navigation`
+    后人为 `deactivate planner_server` → 看门狗在 **+18 s** 打
+    `导航栈 planner_server 卡在 inactive（第 1/4 次）→ 补激活`、
+    `补 activate：成功` → **+21 s `active [3]`**；40 s 内 0 次重复补激活（不和 manager 打架）。
+  - ⚠️ **Nav2 的 `lifecycle_manager` 在"bond 丢失"时会自己整栈重建**（实测直接
+    `deactivate planner_server` → 3 s 内 resume 全栈、7 s 回到 active）。
+    所以**只有"初始 bringup 时 change_state 超时 → 管理器放弃退出"这一种**才需要看门狗；
+    测试它必须先把 manager `SIGSTOP` 掉，否则测的是 manager 自己。
+  - ⏱ 18 s 的构成：`ready_drop_grace_s 8 s` + `_health` 5 s 定时器 + 状态异步查询延迟。
+    嫌慢可把 `_health` 的轮询周期从 5 s 降到 2 s（约 −3 s），一般不必。
 - ⚠️ **监控"一直是 inactive"也要管（2026-11-22）**：雷达在启动期反复超时重启时，
   `collision_monitor` 首次 activate 会因 TF 未就绪失败 → `lifecycle_manager` 放弃 →
   节点**永远停在 inactive**，`/cmd_vel_auto_forward_filtered` 恒无 → 手机端
