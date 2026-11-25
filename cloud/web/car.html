@@ -3944,8 +3944,10 @@ function camSwapLabel() {
    所以现在每次（重）连都**换一个全新的 <img> 节点**：旧节点从 DOM 摘掉，
    浏览器立刻回收它那条连接。别再改回"复用同一个 img 改 src"。 */
 let camFails = 0;
+let camMountedAt = 0;      // 上次换节点的时刻（防止兜底巡检把自己刷成重连风暴）
 
 function camMount(id, url, visible, onerr) {
+  camMountedAt = Date.now();
   const old = $(id);
   if (!old) return null;
   const fresh = document.createElement('img');
@@ -4031,9 +4033,9 @@ setInterval(() => {
   if (!camWanted || document.hidden || !camMedia) return;
   const i = $('camImg');
   if (!i || !i.getAttribute('src')) return;
-  if (i.complete && i.naturalWidth === 0) {
-    camReload();
-  }
+  // 刚换过节点就给画面 3 s（广角冷启动要 ~1 s），否则每 3 s 又开一条新连接
+  if (Date.now() - camMountedAt < 3000) return;
+  if (i.complete && i.naturalWidth === 0) camReload();
 }, 3000);
 
 if ($('camRefresh')) {
@@ -4164,6 +4166,8 @@ setInterval(() => {
   if (!navCamWanted || document.hidden || !camMedia) return;
   const i = $('navCamImg');
   if (!i || !i.getAttribute('src')) return;
+  if (Date.now() - camMountedAt < 3000) return;   // 同上：刚换过节点先等画面
+  if (!i) return;
   if (i.complete && i.naturalWidth === 0) navCamReload();
 }, 3000);
 // 切后台就断流（省电省带宽），回来再自动接上

@@ -124,3 +124,10 @@ def test_switch_label_shows_current_camera():
     body = src.split('function camSwapLabel', 1)[1].split('\nfunction ', 1)[0]
     assert "camWide ? '广角' : '主摄'" in body
     assert "' ⇄'" in body
+
+
+def test_reconnect_is_not_a_storm():
+    """每次重连都换新节点 → 必须限速，否则 3 s 巡检会自己把自己刷成连接风暴。"""
+    src = PAGE.read_text(encoding='utf-8')
+    assert 'camMountedAt' in src
+    assert 'Date.now() - camMountedAt < 3000' in src
