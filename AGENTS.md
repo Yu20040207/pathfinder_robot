@@ -366,7 +366,7 @@
   - 车端：`tools/robot_mjpeg_server.py` 的 `WideUvcThread` 用 `v4l2-ctl` 拉裸流、
     按 `FFD8..FFD9` 切帧（`split_jpeg_frames`，70 帧 0 坏帧）、**零转码透传**；
     `GET /video?cam=wide` 取广角（`deploy/systemd/fwr-media.service` 里
-    `--wide-width 480 --wide-fps 20 --wide-quality 60 --wide-cam-fps 30`），
+    `--wide-width 480 --wide-fps 25 --wide-quality 60 --wide-cam-fps 30`），
     `/video` 仍是 HP60C；`/healthz` 带 `wide` 字段。设备按 by-id 自动找、拔掉每 3 s 重试。
   - 手机页：手动模式画面**右上角** `#camSwap`（主摄时写「广角」、广角时写「主摄」），
     **只在画面打开时出现**；断流自愈/兜底重连都带当前选择。导航模式那块共用同一选择。
@@ -375,7 +375,9 @@
     会和 30 fps 源**混叠**（目标 20 实际只有 15），必须用 `decimate_step()` 累加器抽帧，
     且广角 hub 要 `fps=0` 别再二次限速；③ 720p 全尺寸解码 3.60 ms/帧，
     目标宽 ≤ 源宽一半时用 `IMREAD_REDUCED_COLOR_2` 降到 1.43 ms。
-    实测：20.0 fps / 17.6 KB/帧 / 2.96 Mbps，观看时 CPU 48%→**37%**，空闲 32%→**17%**；
+    实测（25 fps 档）：**25.1 fps / 17.9 KB/帧 / 3.67 Mbps**，观看时 CPU **42.8%**、
+    空闲 **16.8%**；⚠️ 3.67 Mbps 已超 4G 上行上限（≈3.5），要经 4G 看视频得回退
+    `--wide-fps 20`（2.96 Mbps）。
     **没人看就不转码**（只留 1 帧/秒原图给 `/snapshot.jpg`）。
   - 回归：`tests/test_mjpeg_wide_camera.py`（21 例）+ `tests/test_page_camera_switch.py`（8 例）。
   - ⚠️ **USB 供电是现场最大隐患**：8 个设备挤在 4A+1C 上，4G 模块和两路相机都在

@@ -138,7 +138,7 @@ def test_idle_viewer_skips_transcoding():
 
 def test_deployed_unit_uses_tuned_wide_args():
     unit = (ROOT / 'deploy/systemd/fwr-media.service').read_text(encoding='utf-8')
-    assert '--wide-fps 20' in unit
+    assert '--wide-fps 25' in unit
     assert '--wide-width 480' in unit
     assert '--wide-cam-fps 30' in unit
 
