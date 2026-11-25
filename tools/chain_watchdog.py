@@ -33,6 +33,35 @@ from rclpy.node import Node
 IN_TOPIC = '/cmd_vel_auto_unchecked'
 OUT_TOPIC = '/cmd_vel_auto_forward_filtered'
 MONITORS = ('collision_monitor_forward',)
+# 2026-11-25：**导航栈就绪**单独一组，绝不能套用 MONITORS 的 _fix()（那会杀进程）。
+# 现场：冷启动时上电同时起 40+ 个节点，`/amcl/change_state` 应答超时 →
+# lifecycle_manager 直接放弃 → map_server/amcl 永远 inactive、Nav2 几个停在
+# unconfigured，手机端「导航栈正在启动」永远不消失（等再久也不会自愈）。
+# 实测正常启动只要 6 s 就全 active（11-24 11:10:21 起，11:10:26 collision_monitor
+# 就 active），所以 12 s 没就绪**确定是卡住了**，补 configure/activate 即可。
+READY_NODES = ('map_server', 'amcl', 'controller_server',
+               'planner_server', 'behavior_server')
+READY_MAX_RETRY = 4
+
+
+def ready_due(state, ever_active, since, now, grace, drop_grace,
+              last_fix, cooldown):
+    """判断某个节点是否该补激活（纯函数，便于单测）。
+
+    * `active` → 不用管；
+    * 状态还未知（None）→ 不动（查询还没回来，别瞎猜）；
+    * 本次启动以来**从未** active → 用 `grace`（12 s，正常 6 s 就该好了）；
+    * 曾经 active 过（运行中掉线）→ 用 `drop_grace`（8 s，故障要更快恢复）；
+    * 同一节点两次修复之间至少隔 `cooldown` 秒（避免刷坏生命周期状态机）。
+    """
+    if state is None or state == 'active':
+        return False
+    g = drop_grace if ever_active else grace
+    if since is None or now - since < g:
+        return False
+    if now - last_fix < cooldown:
+        return False
+    return True
 
 
 class Watchdog(Node):
@@ -131,8 +160,27 @@ class Watchdog(Node):
         self._state_clients = {
             m: self.create_client(GetState, f'/{m}/get_state') for m in MONITORS
         }
+        # —— 导航栈就绪监控（2026-11-25）——
+        self._rdy_state = {n: None for n in READY_NODES}
+        self._rdy_at = {}
+        self._rdy_since = {}
+        self._rdy_ever = {n: False for n in READY_NODES}
+        self._rdy_retry = {}
+        self._rdy_last_fix = {}
+        self._rdy_inflight = {}
+        self._rdy_poll_at = 0.0
+        self._rdy_change = {
+            n: self.create_client(ChangeState, f'/{n}/change_state')
+            for n in READY_NODES}
+        self._rdy_get = {
+            n: self.create_client(GetState, f'/{n}/get_state')
+            for n in READY_NODES}
         self.create_timer(1.0, self._check)
         self.declare_parameter('out_silent_s', 10.0)
+        # 正常启动 6 s 全 active → 12 s 还没好就是卡了；运行中掉线 8 s 就补。
+        self.declare_parameter('ready_grace_s', 12.0)
+        self.declare_parameter('ready_drop_grace_s', 8.0)
+        self.declare_parameter('ready_cooldown_s', 20.0)
         # 2026-11-22：监控"一直不是 active"也要管。见 _watch_inactive()。
         # 2026-11-24：90 s → 45 s。启动期正常配置约 35~45 s，
         # 45 s 足够覆盖；再久就是"卡住了"，用户不该干等一两分钟。
@@ -369,6 +417,106 @@ class Watchdog(Node):
     def _out_fresh(self, window: float = 2.0) -> bool:
         """监控输出是否新鲜（用它验证恢复是否真的生效）。"""
         return bool(self._last_out) and (time.monotonic() - self._last_out) < window
+
+    # ------------------------------------------------------------ 导航栈就绪
+    def _poll_ready(self, now: float) -> None:
+        """异步查一次就绪节点的生命周期状态（毫秒级，不用 CLI）。"""
+        for n in READY_NODES:
+            cl = self._rdy_get.get(n)
+            if cl is None or not cl.service_is_ready():
+                continue
+            if now - self._rdy_inflight.get(n, 0.0) < 5.0:
+                continue
+            self._rdy_inflight[n] = now
+            try:
+                fut = cl.call_async(GetState.Request())
+                fut.add_done_callback(
+                    lambda f, name=n: self._on_ready_state(name, f))
+            except Exception:                    # noqa: BLE001
+                self._rdy_inflight.pop(n, None)
+
+    def _on_ready_state(self, name: str, fut) -> None:
+        try:
+            res = fut.result()
+        except Exception:                        # noqa: BLE001
+            return
+        label = getattr(getattr(res, 'current_state', None), 'label', None)
+        if not label:
+            return
+        self._rdy_state[name] = label
+        self._rdy_at[name] = time.monotonic()
+        if label == 'active':
+            self._rdy_ever[name] = True
+            self._rdy_since.pop(name, None)
+            self._rdy_retry.pop(name, None)
+
+    def _ready_change(self, name: str, verb: str, timeout: float = 8.0) -> bool:
+        """发一次 configure/activate 转换，等结果（只改状态，不动进程/不发速度）。"""
+        cl = self._rdy_change.get(name)
+        if cl is None or not cl.service_is_ready():
+            return False
+        tr = (Transition.TRANSITION_ACTIVATE if verb == 'activate'
+              else Transition.TRANSITION_CONFIGURE)
+        req = ChangeState.Request()
+        req.transition.id = int(tr)
+        fut = cl.call_async(req)
+        t0 = time.monotonic()
+        while not fut.done() and time.monotonic() - t0 < timeout:
+            time.sleep(0.05)
+        if not fut.done():
+            return False
+        try:
+            return bool(fut.result().success)
+        except Exception:                        # noqa: BLE001
+            return False
+
+    def _ready_fix(self, name: str) -> None:
+        """补 configure/activate（后台线程，别堵 1 s 定时器）。"""
+        import threading
+
+        def worker():
+            st = self._rdy_state.get(name)
+            steps = (['activate'] if st == 'inactive'
+                     else ['configure', 'activate'])
+            for verb in steps:
+                ok = self._ready_change(name, verb)
+                self.get_logger().warn(
+                    f'导航栈 {name} 补 {verb}：{"成功" if ok else "失败"}')
+                if not ok:
+                    continue
+                time.sleep(2.5)
+                self._poll_ready(time.monotonic())
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _watch_ready(self, now: float) -> None:
+        """导航栈一直起不来时补齐生命周期（**不杀进程、不发速度**）。"""
+        if self._dry:
+            return
+        grace = float(self.get_parameter('ready_grace_s').value)
+        drop = float(self.get_parameter('ready_drop_grace_s').value)
+        cool = float(self.get_parameter('ready_cooldown_s').value)
+        for n in READY_NODES:
+            st = self._rdy_state.get(n)
+            if st == 'active':
+                self._rdy_since.pop(n, None)
+                self._rdy_retry.pop(n, None)
+                continue
+            since = self._rdy_since.setdefault(n, now)
+            if not ready_due(st, self._rdy_ever.get(n), since, now,
+                             grace, drop, self._rdy_last_fix.get(n, 0.0), cool):
+                continue
+            cnt = self._rdy_retry.get(n, 0) + 1
+            self._rdy_retry[n] = cnt
+            self._rdy_since[n] = now
+            self._rdy_last_fix[n] = now
+            if cnt > READY_MAX_RETRY:
+                self.get_logger().error(
+                    f'导航栈 {n} 补激活 {READY_MAX_RETRY} 次仍是 {st} → 请人工检查')
+                continue
+            self.get_logger().warn(
+                f'导航栈 {n} 卡在 {st}（第 {cnt}/{READY_MAX_RETRY} 次）→ 补激活')
+            self._ready_fix(n)
 
     def _watch_inactive(self, now: float) -> None:
         """监控长时间不是 active 就补齐 configure/activate。
@@ -611,6 +759,11 @@ class Watchdog(Node):
         if self._dry:
             return
         now = time.monotonic()
+        # 导航栈就绪监控（2026-11-25）：每 4 s 异步查一次，卡住就补激活
+        if now - self._rdy_poll_at > 4.0:
+            self._rdy_poll_at = now
+            self._poll_ready(now)
+        self._watch_ready(now)
         # 2026-11-19：_health 原来不受启动宽限期约束，栈刚起来监控还没
         # active 就判"指令流动但输出静默"，一路升级到重启整个导航栈 ——
         # 复现了 10:29 那次自己把自己重启掉的事故。这里补上宽限期。

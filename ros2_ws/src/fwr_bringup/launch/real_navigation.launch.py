@@ -5,6 +5,7 @@ from pathlib import Path
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (ExecuteProcess, DeclareLaunchArgument,
+                            TimerAction,
                             IncludeLaunchDescription)
 from launch.conditions import IfCondition, UnlessCondition
 
@@ -38,6 +39,17 @@ def _py():
     import sys
     return str(v) if v.is_file() else sys.executable
 
+
+def _late(period_s, *actions):
+    """错峰启动（2026-11-25）。
+
+    冷启动时 40+ 个节点同时向 DDS 注册，`/amcl/change_state` 应答会超时，
+    lifecycle_manager 超时一次就**放弃且不重试** → map_server/amcl 永远 inactive、
+    手机端「导航栈正在启动」不消失（11-25 08:37 现场）。
+    非安全关键节点（探索器/后退让位/存档/标注）延后起，让生命周期激活
+    在通信量最低的时候完成；实测正常启动只要 6 s。
+    """
+    return TimerAction(period=period_s, actions=list(actions))
 
 def generate_launch_description():
     share = Path(get_package_share_directory('fwr_bringup'))
@@ -125,10 +137,10 @@ def generate_launch_description():
                               'localizer': LaunchConfiguration('localizer'),
                               'start_rear_lidar': LaunchConfiguration('start_rear_lidar')}.items()),
         # Navigation lifecycle stays inactive until map/TF/scan/drive gates are verified.
-        Node(package='fwr_bringup', executable='trail_reverser',
+        _late(5.0, Node(package='fwr_bringup', executable='trail_reverser',
              name='trail_reverser', output='screen',
              condition=IfCondition(LaunchConfiguration('trail_reverser')),
-             parameters=[{'use_sim_time': use_sim_time}]),
+             parameters=[{'use_sim_time': use_sim_time}])),
         # 碰撞监控看门狗（同上）。用源码树里的 tools/chain_watchdog.py。
         # 2026-11-22：加 respawn —— 看门狗自己崩了以后**没人守安全链**
         # （现场：节点停在 inactive 40 分钟，手机端一直"等待安全链就绪"）。
@@ -140,12 +152,12 @@ def generate_launch_description():
             additional_env={'PYTHONUNBUFFERED': '1'},
             condition=IfCondition(LaunchConfiguration('collision_watchdog'))
             if _watchdog() else IfCondition('false')),
-        Node(package='fwr_bringup', executable='frontier_explorer',
+        _late(5.0, Node(package='fwr_bringup', executable='frontier_explorer',
              name='frontier_explorer', output='screen',
              condition=IfCondition(LaunchConfiguration('start_explorer')),
              parameters=[str(share / 'config' / 'real_exploration.yaml'),
                          {'use_sim_time': use_sim_time, 'require_bridge_arm': True,
-                          'static_map': use_saved_map}]),
+                          'static_map': use_saved_map}])),
         # 地图缝合：把 5~15 cm 的墙缝膨胀封住，供全局代价地图使用。
         # 2026-10-31 回归修复：原来只在建图模式启动，而静态层固定读 /map_sealed，
         # 导致导航模式下代价地图拿不到地图（只剩 5×5 m 滚动窗口，目标稍远就规划失败）。
@@ -167,24 +179,24 @@ def generate_launch_description():
         # slam localization 模式下每 2 分钟把地图（pgm/yaml + posegraph）存盘。
         # 2026-10-30：自动存档在建图模式下也要跑（原来只在 slam localization 模式），
         # 引擎名一起传下去：slam → /serialize_map + /save_map；carto → /write_state。
-        Node(package='fwr_bringup', executable='map_autosave', output='screen',
+        _late(5.0, Node(package='fwr_bringup', executable='map_autosave', output='screen',
              condition=IfCondition(PythonExpression(
                  ["'", use_saved_map, "' != 'true' or '",
                   LaunchConfiguration('localizer'), "' == 'slam'"])),
              parameters=[{'use_sim_time': use_sim_time,
                           'engine': LaunchConfiguration('slam_engine'),
                           'map_name': str(share / 'maps' / 'real_map_2026-10-28'),
-                          'period_s': 120.0}]),
+                          'period_s': 120.0}])),
         # 等 map/scan/地图坐标 TF 都就绪后自动激活导航生命周期，省掉手动 STARTUP。
         Node(package='fwr_bringup', executable='auto_activate_nav', output='screen',
              parameters=[{'use_sim_time': use_sim_time}]),
         # 持续保存 map→base 位姿，下次启动 slam localization 时自动作为起点。
-        Node(package='fwr_bringup', executable='pose_checkpoint', output='screen',
-             parameters=[{'use_sim_time': use_sim_time}]),
+        _late(5.0, Node(package='fwr_bringup', executable='pose_checkpoint', output='screen',
+             parameters=[{'use_sim_time': use_sim_time}])),
         # 房间名以 RViz 文字标注显示；清空 maps/rooms.yaml 可关闭。
-        Node(package='fwr_bringup', executable='room_labels', output='screen',
+        _late(5.0, Node(package='fwr_bringup', executable='room_labels', output='screen',
              parameters=[{'use_sim_time': use_sim_time,
-                          'rooms_file': str(share / 'maps' / 'rooms.yaml')}]),
+                          'rooms_file': str(share / 'maps' / 'rooms.yaml')}])),
         # 2026-11-18（第二次修正）：播种必须用 **360° 合并扫描**。
         # 之前为了绕开"贴墙率 57% < 60%"改成只用前雷达 200°，结果现场匹配到
         # 10 m 外的等分伪解（残差 0.038 比 360° 的 0.064 还低，搜索当然选它）。
