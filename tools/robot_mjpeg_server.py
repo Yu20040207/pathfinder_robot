@@ -142,8 +142,26 @@ class FrameHub:
         self._last_encode = 0.0
         self._clients = 0
         self._event = threading.Event()      # 供 asyncio 侧等待（轮询式）
+        #: 低码率分身（异地走云端中继用）：有人订阅才转码，320 宽 / 12 fps
+        self._low: Optional['FrameHub'] = None
+        self._low_reduce = 1
         self.dds_age_ms = 0.0                # DDS 链路时延（节点 stamp -> 服务收到）
         self._fps_window: list[float] = []
+
+    def attach_low(self, low: 'FrameHub', reduce: int = 1) -> None:
+        """把低码率分身挂上来：主路收到帧、且分身有人看时，才多编一份小的。
+
+        ⚠️ 不能给每条连接都编一次：客户端的 `?profile=low` 全部共用这个分身，
+        没人看就**一次都不编**（异地观看才 1.0 Mbps，局域网仍走原画质）。
+        """
+        self._low = low
+        self._low_reduce = max(1, int(reduce))
+
+    def _feed_low(self) -> 'Optional[FrameHub]':
+        low = self._low
+        if low is None or not low.has_clients():
+            return None
+        return low
 
     # ---- 采集侧（ROS 线程 / 测试线程调用）----
     def publish(self, image: np.ndarray, real: bool = True) -> None:
@@ -224,6 +242,9 @@ class FrameHub:
             if len(self._fps_window) > 120:
                 self._fps_window = self._fps_window[-120:]
         self._event.set()
+        low = self._feed_low()
+        if low is not None:
+            low.publish_jpeg(data, resample=True)
 
     # ---- 读取侧 ----
     def latest(self) -> tuple[Optional[bytes], int]:
@@ -277,11 +298,17 @@ class FrameHub:
 # ---------------------------------------------------------------- HTTP
 
 def hub_for(request: web.Request) -> tuple['FrameHub', str]:
-    """`?cam=wide` → 广角相机；其余一律主摄（HP60C）。"""
-    wide = request.app.get('hub_wide')
-    if request.query.get('cam') == 'wide' and wide is not None:
-        return wide, 'wide'
-    return request.app['hub'], 'main'
+    """`?cam=wide` → 广角；`?profile=low` → 320 宽 / 12 fps 的低码率分身。
+
+    低码率分身给**异地观看**用（走云端中继，1.0~1.2 Mbps）；局域网仍然走原画质。
+    """
+    wide = request.query.get('cam') == 'wide'
+    low = request.query.get('profile') == 'low'
+    if wide:
+        hub = request.app.get('hub_wide_low') if low else request.app.get('hub_wide')
+        return (hub if hub is not None else request.app['hub_wide']), 'wide'
+    hub = request.app.get('hub_low') if low else request.app['hub']
+    return (hub if hub is not None else request.app['hub']), 'main'
 
 
 async def handle_stream(request: web.Request) -> web.StreamResponse:
@@ -506,11 +533,14 @@ async def _follow_services_baseline(_app) -> None:
 
 def build_app(hub: FrameHub, topic: str, uvc: 'UvcSource' = None,
               hub_wide: 'FrameHub' = None, wide_device: str = '',
-              wide_src=None) -> web.Application:
+              wide_src=None, hub_low: 'FrameHub' = None,
+              hub_wide_low: 'FrameHub' = None) -> web.Application:
     app = web.Application()
     app['hub'] = hub
     app['streams'] = []          # 活着的 MJPEG 长连接（超出上限踢最旧的）
     app['hub_wide'] = hub_wide
+    app['hub_low'] = hub_low
+    app['hub_wide_low'] = hub_wide_low
     app['wide_device'] = wide_device
     app['wide_src'] = wide_src
     app['topic'] = topic
@@ -1114,11 +1144,23 @@ def main() -> int:
                     help='默认路由变成 4G 时自动降到这个帧率（4G 上行 ~3.5 Mbps）')
     ap.add_argument('--wide-idle-pause', type=float, default=5.0,
                     help='广角没人看这么多秒就停流释放相机（0=一直占着）')
+    ap.add_argument('--low-width', type=int, default=320,
+                    help='异地把画面走云端中继时的宽度（0=不启用低码率档）')
+    ap.add_argument('--low-fps', type=float, default=12.0,
+                    help='低码率档帧率（4G 上 320 宽 12 fps ≈ 1.0 Mbps）')
+    ap.add_argument('--low-quality', type=int, default=60,
+                    help='低码率档 JPEG 质量')
     ap.add_argument('--wide-cam-fps', type=int, default=30,
                     help='让相机按这个帧率出流（0=不设置，用相机默认）')
     args = ap.parse_args()
 
     hub = FrameHub(quality=args.quality, fps=args.fps, width=args.width)
+    # 低码率分身：只有 `?profile=low` 有人看时才转码（异地走云端中继用）
+    hub_low = None
+    if args.low_width:
+        hub_low = FrameHub(quality=args.low_quality, fps=args.low_fps,
+                           width=args.low_width)
+        hub.attach_low(hub_low)
     uvc = None
     if args.v4l2:
         uvc = UvcSource(hub, args.v4l2, args.v4l2_size)
@@ -1157,7 +1199,13 @@ def main() -> int:
             args.wide_width, args.wide_quality), flush=True)
 
     topic = args.v4l2 or ('test-pattern' if args.test_pattern else args.topic)
-    app = build_app(hub, topic, uvc, hub_wide, wide_device, wide if hub_wide else None)
+    hub_wide_low = None
+    if hub_wide is not None and args.low_width:
+        hub_wide_low = FrameHub(quality=args.low_quality, fps=args.low_fps,
+                                width=args.low_width)
+        hub_wide.attach_low(hub_wide_low)
+    app = build_app(hub, topic, uvc, hub_wide, wide_device,
+                    wide if hub_wide else None, hub_low, hub_wide_low)
     print(f'MJPEG 服务: http://{args.host}:{args.port}/video  '
           f'(topic={app["topic"]}, {args.fps:g} fps, q={args.quality})', flush=True)
     try:

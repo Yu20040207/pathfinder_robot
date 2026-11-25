@@ -1,0 +1,186 @@
+"""端到端自测：假本地 MJPEG + 真 jc-api + 真车端中继 → 拉流验证。
+
+本机就能跑（不需要机器人），用来证明：
+  1) 车端中继能拨上云端并接受 play/stop；
+  2) 云端 `/api/devices/<id>/stream` 输出浏览器认的 multipart MJPEG；
+  3) 逐帧透传不缓冲（延迟 ≈ 一帧时间，不是几秒）；
+  4) 码率/帧率符合异地档（320 宽 12 fps ≈ 1 Mbps）。
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import socket
+import subprocess
+import sys
+import time
+import uuid
+
+import httpx
+from aiohttp import web
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+TOKEN = 'e2e-media-token'
+DEV = 'car-001'
+
+
+def free_port() -> int:
+    s = socket.socket()
+    s.bind(('127.0.0.1', 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+async def fake_mjpeg_server(port: int, fps: int = 12, size: tuple = (320, 240)):
+    """模拟车端 `robot_mjpeg_server`：multipart 里塞带时间戳的 JPEG。"""
+    import cv2
+    import numpy as np
+
+    async def video(request: web.Request):
+        resp = web.StreamResponse(headers={
+            'Content-Type': 'multipart/x-mixed-replace; boundary=fwrframe',
+            'Cache-Control': 'no-store'})
+        await resp.prepare(request)
+        period = 1.0 / fps
+        while True:
+            img = np.zeros((size[1], size[0], 3), np.uint8)
+            img[:] = (30, 30, 30)
+            cv2.putText(img, f'{time.time():.3f}', (6, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            ok, buf = cv2.imencode('.jpg', img, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
+            data = buf.tobytes()
+            # COM 段（FFFE）里放"生成时刻"，用来量端到端延迟（生产帧没有这一段）
+            stamp = ('%.6f' % time.time()).encode()
+            com = b'\xff\xfe' + (len(stamp) + 2).to_bytes(2, 'big') + stamp
+            data = data[:2] + com + data[2:]
+            try:
+                await resp.write(b'--fwrframe\r\nContent-Type: image/jpeg\r\n'
+                                 b'Content-Length: ' + str(len(data)).encode()
+                                 + b'\r\n\r\n' + data + b'\r\n')
+            except Exception:            # 客户端断开：假服务直接收工
+                break
+            await asyncio.sleep(period)
+
+    app = web.Application()
+    app.router.add_get('/video', video)
+    runner = web.AppRunner(app, access_log=None)
+    await runner.setup()
+    site = web.TCPSite(runner, '127.0.0.1', port)
+    await site.start()
+    return runner
+
+
+async def main() -> int:
+    cloud_port = free_port()
+    local_port = free_port()
+    db = f'/tmp/e2e-{uuid.uuid4().hex}.db'
+    env = dict(os.environ, JC_DB=db, JC_SECRET='e2e-secret-0123456789abcdef0123456789ab',
+               JC_MEDIA_TOKEN=TOKEN, JC_BIND_CODE='123456', JC_MQTT_HOST='127.0.0.1',
+               JC_MEDIA_STREAM_TTL='120')
+    fake = await fake_mjpeg_server(local_port)
+    api = subprocess.Popen(
+        [sys.executable, '-m', 'uvicorn', 'app:app', '--host', '127.0.0.1',
+         '--port', str(cloud_port), '--log-level', 'warning'],
+        cwd=os.path.join(ROOT, 'cloud', 'api'), env=env)
+    relay = None
+    try:
+        async with httpx.AsyncClient(base_url=f'http://127.0.0.1:{cloud_port}',
+                                     timeout=10) as http:
+            for _ in range(50):
+                try:
+                    if (await http.get('/api/health')).status_code == 200:
+                        break
+                except httpx.HTTPError:
+                    await asyncio.sleep(0.2)
+            await http.post('/api/register', json={'email': 'e2e@x.y', 'password': 'pw1234'})
+            tok = (await http.post('/api/login', json={'email': 'e2e@x.y',
+                                                       'password': 'pw1234'})).json()['access_token']
+            hdr = {'Authorization': f'Bearer {tok}'}
+            await http.post('/api/devices/bind', headers=hdr,
+                            json={'device_id': DEV, 'code': '123456'})
+            media = (await http.get(f'/api/devices/{DEV}/media', headers=hdr)).json()
+            print('异地入口 :', json.dumps(media['remote'], ensure_ascii=False))
+
+            relay = subprocess.Popen(
+                [sys.executable, os.path.join(ROOT, 'tools', 'media_relay.py'),
+                 '--cloud', f'ws://127.0.0.1:{cloud_port}/ws/media', '--device', DEV,
+                 '--token', TOKEN, '--local', f'http://127.0.0.1:{local_port}'],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            for _ in range(40):
+                st = (await http.get('/api/media/health')).json()
+                if st['devices'].get(DEV, {}).get('online'):
+                    break
+                await asyncio.sleep(0.25)
+            print('车端在线 :', (await http.get('/api/media/health')).json()['devices'].get(DEV))
+
+            url = (f"http://127.0.0.1:{cloud_port}/api/devices/{DEV}/stream"
+                   f"?cam=main&profile=low&t={media['remote']['token']}")
+            t0 = time.time()
+            total = 0
+            frames = 0
+            lat = []
+            async with httpx.AsyncClient(timeout=None) as raw:
+                async with raw.stream('GET', url) as resp:
+                    print('拉流状态 :', resp.status_code, resp.headers.get('content-type'))
+                    buf = bytearray()
+                    async for chunk in resp.aiter_bytes():
+                        buf += chunk
+                        while True:
+                            e = buf.find(b'\xff\xd9')
+                            if e < 0:
+                                break
+                            s = buf.find(b'\xff\xd8')
+                            if s < 0:
+                                break
+                            frame = bytes(buf[s:e + 2])
+                            del buf[:e + 2]
+                            total += len(frame)
+                            frames += 1
+                            at = frame.find(b'\xff\xfe')
+                            if at >= 0 and at + 4 <= len(frame):
+                                n = int.from_bytes(frame[at + 2:at + 4], 'big')
+                                try:
+                                    gen = float(frame[at + 4:at + 2 + n])
+                                    lat.append((time.time() - gen) * 1000.0)
+                                except ValueError:
+                                    pass
+                            if frames >= 40:
+                                break
+                        if frames >= 40:
+                            break
+            span = time.time() - t0
+            if lat:
+                lat.sort()
+                mid = lat[len(lat) // 2]
+                p90 = lat[min(len(lat) - 1, int(len(lat) * 0.9))]
+                print(f'中继延迟 : 中位 {mid:.0f} ms / P90 {p90:.0f} ms'
+                      f'（{len(lat)} 帧，生成→到达；本机回环）')
+            print(f'收到 {frames} 帧 / {span:.2f} s → {frames / span:.1f} fps, '
+                  f'{total / max(1, frames) / 1024:.1f} KB/帧, '
+                  f'{total * 8 / span / 1e6:.2f} Mbps')
+            final = (await http.get('/api/media/health')).json()
+            print('结束统计 :', json.dumps(final['devices'].get(DEV), ensure_ascii=False))
+            ok = frames >= 12 and 0.2 <= total * 8 / span / 1e6 <= 4.0
+            print('结果     :', 'PASS' if ok else 'FAIL')
+            return 0 if ok else 1
+    finally:
+        if relay is not None:
+            relay.terminate()
+            try:
+                out = relay.communicate(timeout=5)[0]
+                print('--- 中继日志尾部 ---')
+                print('\n'.join(out.strip().splitlines()[-6:]))
+            except Exception:
+                relay.kill()
+        api.terminate()
+        try:
+            api.wait(timeout=5)
+        except Exception:
+            api.kill()
+        await fake.cleanup()
+
+
+if __name__ == '__main__':
+    raise SystemExit(asyncio.run(main()))

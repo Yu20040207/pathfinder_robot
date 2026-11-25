@@ -21,6 +21,8 @@
     JC_MQTT_HOST/PORT   EMQX（默认 127.0.0.1:1883）
     JC_MEDIA_HOSTS     摄像头地址表 JSON，如 {"car-001": "192.168.0.20"}
     JC_MEDIA_PORT      机器人 MJPEG 服务端口（默认 8081）
+    JC_MEDIA_TOKEN     车端媒体中继的共享密钥（不配则中继端点关闭）
+    JC_MEDIA_MAX_CLIENTS  同时中继的上限（默认 6，按云端出网带宽定）
 """
 import asyncio
 import hashlib
@@ -32,6 +34,7 @@ from typing import Dict, Optional, Set
 
 import jwt
 from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -71,6 +74,13 @@ def _media_hosts() -> Dict[str, str]:
 
 
 MEDIA_PORT = os.environ.get('JC_MEDIA_PORT', '8081')
+# 车端媒体中继（异地看画面）：车主动拨出，云端按 device_id 路由
+MEDIA_TOKEN = os.environ.get('JC_MEDIA_TOKEN', '')
+MEDIA_MAX_CLIENTS = int(os.environ.get('JC_MEDIA_MAX_CLIENTS', '6'))
+MEDIA_STREAM_TTL = int(os.environ.get('JC_MEDIA_STREAM_TTL', '180'))
+
+# device_id -> {'ws': WebSocket|None, 'subs': {ch: set[Queue]}, 'frames': int, 'bytes': int}
+MEDIA_HUBS: Dict[str, dict] = {}
 # device_id -> 活跃 WebSocket 集合
 CONNECTIONS: Dict[str, Set[WebSocket]] = {}
 LOOP: Optional[asyncio.AbstractEventLoop] = None
@@ -230,23 +240,195 @@ def device_media(device_id: str, user_id: int = Depends(current_user)):
     if not host:
         state = STATE_CACHE.get(device_id) or {}
         host = str(state.get('lan_ip') or '')
-    if not host:
-        raise HTTPException(
-            404, '未配置摄像头地址：请设置 JC_MEDIA_HOSTS，'
-                 '或在机器人 bridge 里上报 lan_ip')
-    host = host.replace('http://', '').replace('/', '')
-    port = MEDIA_PORT
-    if ':' in host:                      # 允许 "192.168.0.20:8081" 覆盖端口
-        host, port = host.split(':', 1)
-    base = f'http://{host}:{port}'
+    # 车在 4G / 只有云端中继时没有可用的局域网地址：不再 404，
+    # 返回空 url + remote 让页面直接走中继（否则异地机器人连播放地址都拿不到）。
+    base = ''
+    if host:
+        host = host.replace('http://', '').replace('/', '')
+        port = MEDIA_PORT
+        if ':' in host:                  # 允许 "192.168.0.20:8081" 覆盖端口
+            host, port = host.split(':', 1)
+        base = f'http://{host}:{port}'
     return {
         'type': 'mjpeg',
-        'url': f'{base}/video',
-        'snapshot': f'{base}/snapshot.jpg',
-        'health': f'{base}/healthz',
-        'page': f'{base}/',          # 自检页：HTTPS 页面被拦时在新窗口打开
+        'url': f'{base}/video' if base else '',
+        'snapshot': f'{base}/snapshot.jpg' if base else '',
+        'health': f'{base}/healthz' if base else '',
+        'page': f'{base}/' if base else '',   # 自检页（HTTPS 页面被拦时用）
         'ttl': 60,
+        # 异地（不在同一 WiFi）走云端中继：同源、同端口 80，页面不用管 CORS
+        'remote': {
+            'url': f'/api/devices/{device_id}/stream',
+            'token': make_stream_token(device_id, user_id),
+            'online': bool((MEDIA_HUBS.get(device_id) or {}).get('ws')),
+        },
     }
+
+
+# ---------------------------------------------------------------- 异地看画面
+# 车端 `tools/media_relay.py` 主动拨出到 `/ws/media/<id>`，云端按设备路由给手机。
+# 手机拿到的仍是同源 MJPEG（`<img src=/api/devices/<id>/stream?...>`），
+# 所以在任何网络下都能看，而且不需要 CORS / 不需要 HTTPS 混合内容例外。
+
+
+def make_stream_token(device_id: str, user_id: int) -> str:
+    """短时观看令牌：只能看这一台设备，`MEDIA_STREAM_TTL` 秒后失效。"""
+    return jwt.encode({'sub': str(user_id), 'dev': device_id, 'kind': 'stream',
+                       'exp': time.time() + MEDIA_STREAM_TTL},
+                      SECRET, algorithm='HS256')
+
+
+def _stream_user(device_id: str, token: str, authorization: str) -> int:
+    """`<img>` 带不了自定义头，所以令牌也可以走 `?t=`（只认观看令牌，不认登录令牌）。"""
+    if token:
+        try:
+            payload = jwt.decode(token, SECRET, algorithms=['HS256'])
+        except Exception:                    # noqa: BLE001
+            raise HTTPException(401, '观看令牌无效或已过期')
+        if payload.get('kind') != 'stream' or payload.get('dev') != device_id:
+            raise HTTPException(401, '观看令牌与设备不匹配')
+        return int(payload['sub'])
+    return current_user(authorization=authorization)
+
+
+def _require_owner(user_id: int, device_id: str) -> None:
+    with db() as conn:
+        row = conn.execute('SELECT owner_id FROM devices WHERE device_id=?',
+                           (device_id,)).fetchone()
+    if row is None or row['owner_id'] != user_id:
+        raise HTTPException(403, '设备不属于当前账号')
+
+
+def _media_hub(device_id: str) -> dict:
+    hub = MEDIA_HUBS.get(device_id)
+    if hub is None:
+        hub = {'ws': None, 'subs': {}, 'frames': 0, 'bytes': 0}
+        MEDIA_HUBS[device_id] = hub
+    return hub
+
+
+def active_streams() -> int:
+    return sum(len(queues) for hub in MEDIA_HUBS.values()
+               for queues in hub['subs'].values())
+
+
+@app.get('/api/media/health')
+def media_health():
+    """中继自检：谁在线、有几路在看、累计转了多少字节（排查用）。"""
+    return {
+        'token': bool(MEDIA_TOKEN),
+        'max_clients': MEDIA_MAX_CLIENTS,
+        'active': active_streams(),
+        'devices': {dev: {'online': bool(hub.get('ws')),
+                          'frames': hub.get('frames', 0),
+                          'bytes': hub.get('bytes', 0),
+                          'viewers': {str(ch): len(queues)
+                                      for ch, queues in hub['subs'].items()}}
+                    for dev, hub in MEDIA_HUBS.items()},
+    }
+
+
+@app.websocket('/ws/media/{device_id}')
+async def media_ws(ws: WebSocket, device_id: str, token: str = ''):
+    """车端中继拨入：二进制帧 = 1 字节通道号 + 完整 JPEG。"""
+    await ws.accept()
+    if not MEDIA_TOKEN or not hmac_compare(token, MEDIA_TOKEN):
+        await ws.close(code=4401)
+        return
+    hub = _media_hub(device_id)
+    hub['ws'] = ws
+    # 车重连后，把还在等画面的通道重新播起来（旧连接可能已经被掐掉）
+    for ch in list(hub['subs']):
+        if hub['subs'][ch]:
+            try:
+                await ws.send_json({'cmd': 'play', 'ch': ch, 'profile': 'low'})
+            except Exception:                # noqa: BLE001
+                break
+    try:
+        while True:
+            raw = await ws.receive()
+            if raw.get('type') == 'websocket.disconnect':
+                break
+            data = raw.get('bytes')
+            if data:
+                ch = data[0]
+                frame = data[1:]
+                hub['frames'] = hub.get('frames', 0) + 1
+                hub['bytes'] = hub.get('bytes', 0) + len(frame)
+                for queue in list(hub['subs'].get(ch, ())):
+                    if queue.full():         # 慢客户端：丢最旧，绝不排长队
+                        try:
+                            queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            pass
+                    try:
+                        queue.put_nowait(frame)
+                    except asyncio.QueueFull:
+                        pass
+            elif raw.get('text'):
+                try:
+                    msg = json.loads(raw['text'])
+                except ValueError:
+                    continue
+                if msg.get('type') == 'hello':
+                    STATE_CACHE.setdefault(device_id, {})['media_relay'] = True
+    except WebSocketDisconnect:
+        pass
+    finally:
+        if hub.get('ws') is ws:
+            hub['ws'] = None
+        state = STATE_CACHE.get(device_id)
+        if state is not None:
+            state['media_relay'] = False
+
+
+@app.get('/api/devices/{device_id}/stream')
+async def device_stream(device_id: str, cam: str = 'main', profile: str = 'low',
+                        t: str = '', authorization: str = Header(default='')):
+    """把车端中继上来的 JPEG 转成浏览器认的 multipart MJPEG（异地观看）。
+
+    ⚠️ 必须**边收边发**：任何一层缓冲（uvicorn/nginx/浏览器）都会把 150 ms
+    的延迟放大成好几秒，所以这里逐帧 yield、并显式 `X-Accel-Buffering: no`。
+    """
+    user_id = _stream_user(device_id, t, authorization)
+    _require_owner(user_id, device_id)
+    hub = MEDIA_HUBS.get(device_id)
+    if not hub or hub.get('ws') is None:
+        raise HTTPException(503, '机器人不在线：异地观看需要车端媒体中继在跑（fwr-media-relay）')
+    if active_streams() >= MEDIA_MAX_CLIENTS:
+        raise HTTPException(429, '当前观看人数已满，请稍后再试')
+    ch = 1 if cam == 'wide' else 0
+    queue: asyncio.Queue = asyncio.Queue(maxsize=2)
+    queues = hub['subs'].setdefault(ch, set())
+    queues.add(queue)
+    try:
+        await hub['ws'].send_json({'cmd': 'play', 'ch': ch,
+                                   'profile': 'low' if profile != 'full' else 'full'})
+    except Exception:                        # noqa: BLE001
+        queues.discard(queue)
+        raise HTTPException(503, '车端连接刚刚断开，请刷新重试')
+
+    async def frames():
+        try:
+            while True:
+                frame = await queue.get()
+                yield (b'--frame\r\nContent-Type: image/jpeg\r\nContent-Length: '
+                       + str(len(frame)).encode() + b'\r\n\r\n' + frame + b'\r\n')
+        finally:
+            queues.discard(queue)
+            if not queues:
+                hub['subs'].pop(ch, None)
+                ws = hub.get('ws')
+                if ws is not None:
+                    try:
+                        await ws.send_json({'cmd': 'stop', 'ch': ch})
+                    except Exception:        # noqa: BLE001
+                        pass
+
+    return StreamingResponse(
+        frames(), media_type='multipart/x-mixed-replace; boundary=frame',
+        headers={'Cache-Control': 'no-store, no-cache',
+                 'X-Accel-Buffering': 'no'})
 
 
 @app.post('/api/admin/reset_password')

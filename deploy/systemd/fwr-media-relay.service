@@ -1,0 +1,25 @@
+[Unit]
+Description=FWR media relay (robot dials out to cloud so remote phones can watch)
+Documentation=file:/home/manbaout/Company_Project/Four-wheel-robot/tools/media_relay.py
+After=network-online.target fwr-media.service
+Wants=network-online.target
+# fwr-media 只是"本地有画面"，起不来也不该拖住中继（中继自己会重试本地连接）
+Requires=fwr-media.service
+
+[Service]
+Type=simple
+# 车机是中文 locale：不设 PYTHONUNBUFFERED 日志会被 4 KB 缓冲吞掉（踩过）
+Environment=HOME=/home/manbaout
+Environment=PYTHONUNBUFFERED=1
+Environment=MEDIA_RELAY_CLOUD=ws://jccontrol.xyz/ws/media
+Environment=MEDIA_RELAY_DEVICE=car-001
+Environment=MEDIA_RELAY_LOCAL=http://127.0.0.1:8081
+# 密钥不进仓库：/etc/fwr/media_relay.env 里写 MEDIA_RELAY_TOKEN=xxx
+EnvironmentFile=-/etc/fwr/media_relay.env
+ExecStart=/home/manbaout/Company_Project/Four-wheel-robot/.venv/bin/python \
+    /home/manbaout/Company_Project/Four-wheel-robot/tools/media_relay.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

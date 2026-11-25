@@ -3909,8 +3909,13 @@ if ($('logoutBtn')) $('logoutBtn').onclick = logout;
 $('stop').onclick = () => { resetKnob(); if (wsReady) ws.send(JSON.stringify({type: 'stop'})); };
 
 /* ---------- 摄像头画面（MJPEG；地址由 /media 接口下发，换 4G 只改服务端） ---------- */
-let camMedia = null;        // {url, snapshot}
+let camMedia = null;        // {url, snapshot, remote}
 let camWanted = false;      // 用户是否打开了画面
+/* 2026-11-25：异地（不在同一 WiFi）看画面走云端中继。
+   `/media` 现在多返回一个 `remote`（同源 /api/...，短时令牌），
+   局域网直连不通时自动切过去；同 WiFi 仍然直连（更快、不占云端带宽）。 */
+let camRemote = null;       // {url, token, online}
+let camViaRemote = false;   // 当前画面是否走中继
 
 /* 2026-11-25 用户要求：画面右上角加"切摄像头"，主摄（HP60C）↔ 120° 广角。
    两路都走同一个 MJPEG 服务，`?cam=wide` 取第二路（服务端零转码透传 JPEG）。
@@ -3919,9 +3924,37 @@ let camWide = false;
 
 function camSrcURL() {
   if (!camMedia) return '';
-  const base = String(camMedia.url);
+  const cam = camWide ? 'wide' : 'main';
+  const remote = camRemote && camRemote.url && (camViaRemote || !camMedia.url);
+  if (remote) {
+    // ⚠️ 必须用**同源相对地址**：绝对 http:// 地址在 https 页面上会被当混合内容拦掉，
+    // 而中继路径 `/api/...` 天然和页面同源。
+    // 中继一律推低码率档（320 宽 12 fps ≈ 1 Mbps），云端出网按客户数算钱。
+    return camRemote.url + '?cam=' + cam + '&profile=low&t=' +
+      encodeURIComponent(camRemote.token || '');
+  }
+  const base = String(camMedia.url || '');
+  if (!base) return '';
   const sep = base.indexOf('?') >= 0 ? '&' : '?';
-  return base + sep + 'cam=' + (camWide ? 'wide' : 'main') + '&t=' + Date.now();
+  return base + sep + 'cam=' + cam + '&t=' + Date.now();
+}
+
+/* 本地直连不通时切云端中继；返回 true 表示"这次是真的切了"。 */
+function camFallbackToRemote() {
+  if (camViaRemote) return false;
+  if (!camRemote || !camRemote.url || !camRemote.online) return false;
+  camViaRemote = true;
+  camFails = 0;
+  return true;
+}
+
+/* 重新问服务端要地址（换网/令牌过期时用；中继令牌只有 3 分钟） */
+async function camRefreshMedia() {
+  try {
+    camMedia = await api('/api/devices/' + DEVICE + '/media');
+    camRemote = camMedia.remote || null;
+    if (!camMedia.url) camViaRemote = true;
+  } catch (e) { /* 拿不到就沿用旧的 */ }
 }
 
 // 导航模式那块画面用同一个摄像头选择（按钮只在手动模式画面里，但选择是全局的）
@@ -3969,11 +4002,25 @@ function camMount(id, url, visible, onerr) {
   }
   old.removeAttribute('src');
   old.replaceWith(fresh);
+  if (url && onerr !== undefined) {
+    // 本地直连（局域网 IP）在异地根本不可达：Safari 可能几十秒才 onerror，
+    // 所以自己盯 2.5 s —— 一点图都没有就切云端中继重挂一次。
+    setTimeout(() => {
+      if ($(id) !== fresh || fresh.naturalWidth > 0) return;
+      if (!camFallbackToRemote()) return;
+      // 中继令牌只有 3 分钟：切之前先要一张新的，否则会 401（画面全黑）
+      camRefreshMedia().then(() => {
+        if (id === 'camImg' && camWanted) camReload();
+        else if (id === 'navCamImg' && navCamWanted) navCamReload();
+      });
+    }, 2500);
+  }
   return fresh;
 }
 
 function camImgErr() {
   if (!camWanted || !camMedia) return;
+  if (camFallbackToRemote()) { camRefreshMedia().then(camReload); return; }
   camFails += 1;
   if (camFails >= 3) {                      // 连不上就明说，别一直黑屏重试
     camStop();
@@ -4058,8 +4105,11 @@ async function openCam() {
   try {
     // 每次都问服务端要地址：以后切 4G 中继，页面这一行不用改
     camMedia = await api('/api/devices/' + DEVICE + '/media');
+    camRemote = camMedia.remote || null;
+    if (!camMedia.url) camViaRemote = true;   // 车只在 4G：没局域网地址，直接走中继
     // 页面是 https、视频是 http 时浏览器会拦（混合内容）→ 给条能走的路
-    if (location.protocol === 'https:' && String(camMedia.url).indexOf('http://') === 0) {
+    if (!camViaRemote && location.protocol === 'https:' &&
+        String(camMedia.url).indexOf('http://') === 0) {
       $('camErr').classList.remove('hidden');
       $('camErr').innerHTML = '页面是 HTTPS，浏览器拦掉了 HTTP 画面<br>' +
         '<span style="color:#9fb3c8">用 http:// 打开本页即可内嵌显示，或者</span><br>' +
@@ -4103,7 +4153,10 @@ async function openNavCam() {
     // 每次现问服务端要地址（地址可能过期/换网），和手动模式同一套接口
     const media = await api('/api/devices/' + DEVICE + '/media');
     camMedia = media;
-    if (location.protocol === 'https:' && String(media.url).indexOf('http://') === 0) {
+    camRemote = media.remote || null;
+    if (!media.url) camViaRemote = true;
+    if (!camViaRemote && location.protocol === 'https:' &&
+        String(media.url).indexOf('http://') === 0) {
       $('navCamImg').classList.add('hidden');
       $('navCamErr').classList.remove('hidden');
       $('navCamErr').innerHTML = '页面是 HTTPS，浏览器拦掉了 HTTP 画面<br>' +
@@ -4121,6 +4174,7 @@ async function openNavCam() {
 
 function navCamImgErr() {
   if (!navCamWanted) return;
+  if (camFallbackToRemote()) { camRefreshMedia().then(navCamReload); return; }
   setTimeout(() => { if (navCamWanted && camMedia) navCamReload(); }, 600);
 }
 
