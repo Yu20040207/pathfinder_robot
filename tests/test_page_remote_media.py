@@ -34,7 +34,8 @@ def test_page_uses_same_origin_url_for_remote():
     assert 'camRemote.url + ' in code
     assert "'http://' +" not in code and '"http://" +' not in code, \
         '中继分支不许拼绝对地址'
-    assert "profile=low" in block, '中继必须走低码率档（云端出网按客户数算钱）'
+    assert "'&profile=' + camProfile()" in block, \
+        '中继必须带画质档（高清 low / 弱网 eco），云端出网按客户数算钱'
 
 
 def test_page_falls_back_when_direct_stream_shows_nothing():
@@ -65,3 +66,28 @@ def test_page_handles_robot_without_lan_address():
     body = text()
     assert 'if (!camMedia.url) camViaRemote = true;' in body
     assert 'if (!media.url) camViaRemote = true;' in body
+
+
+def test_page_has_two_remote_quality_tiers():
+    """2026-11-25 用户报「手机 4G 延迟大、偶尔卡住」：异地必须能切到弱网档。
+
+    4G 下 2.3 Mbps 的 480p 会把手机下行塞满（实测限速 1.2 Mbps 时端到端延迟
+    从 2 ms 涨到 10 s），所以页面要能发 `?profile=eco`（320 宽 10 fps ≈ 0.5 Mbps）。
+    """
+    body = text()
+    assert 'function camProfile()' in body
+    assert "return camEco ? 'eco' : 'low';" in body
+    assert "&profile=' + camProfile() + '&t='" in body
+    # 默认按接入类型自动选（iOS 没有 navigator.connection → 当弱网）
+    assert 'navigator.connection' in body
+    assert 'function camAutoEco()' in body
+    # 手动切档的键
+    assert 'id="camQuality"' in body
+    assert "camEco = camProfile() === 'eco' ? false : true;" in body
+
+
+def test_page_refreshes_token_when_switching_camera():
+    """切摄像头时令牌可能已过期（180 s）→ 401 → 黑屏（云端日志实锤 3 次）。"""
+    body = text()
+    assert body.count('if (camViaRemote) camRefreshMedia().then(camReload);') == 1
+    assert body.count('if (camViaRemote) camRefreshMedia().then(reload);') == 1

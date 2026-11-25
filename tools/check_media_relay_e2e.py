@@ -33,23 +33,33 @@ def free_port() -> int:
     return port
 
 
-async def fake_mjpeg_server(port: int, fps: int = 12, size: tuple = (320, 240)):
+async def fake_mjpeg_server(port: int, fps: int = 15, size: tuple = (480, 360)):
     """模拟车端 `robot_mjpeg_server`：multipart 里塞带时间戳的 JPEG。"""
     import cv2
     import numpy as np
 
     async def video(request: web.Request):
+        # 和车端一样按 `?profile=` 转码：eco = 320 宽 q55 / 10 fps（弱网档约 0.5 Mbps）
+        eco = (request.query.get('profile') == 'eco')
+        want_w, quality, use_fps = (320, 55, 10) if eco else (480, 60, fps)
         resp = web.StreamResponse(headers={
             'Content-Type': 'multipart/x-mixed-replace; boundary=fwrframe',
             'Cache-Control': 'no-store'})
         await resp.prepare(request)
         period = 1.0 / fps
         while True:
-            img = np.zeros((size[1], size[0], 3), np.uint8)
-            img[:] = (30, 30, 30)
+            # 帧要像真机那样"有细节但可压缩"（480 宽 q60 约 15~18 KB）。
+            # 直接用纯噪声会压到 80 KB，e2e 的码率闸门会误判失败。
+            rng = np.random.default_rng(int(time.time() * 1000) % 65536)
+            img = cv2.GaussianBlur(
+                rng.integers(0, 255, (size[1], size[0], 3), dtype=np.uint8),
+                (11, 11), 0)
+            if want_w != size[0]:
+                img = cv2.resize(img, (want_w, int(size[1] * want_w / size[0])),
+                                 interpolation=cv2.INTER_AREA)
             cv2.putText(img, f'{time.time():.3f}', (6, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            ok, buf = cv2.imencode('.jpg', img, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
+            ok, buf = cv2.imencode('.jpg', img, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
             data = buf.tobytes()
             # COM 段（FFFE）里放"生成时刻"，用来量端到端延迟（生产帧没有这一段）
             stamp = ('%.6f' % time.time()).encode()
@@ -61,7 +71,7 @@ async def fake_mjpeg_server(port: int, fps: int = 12, size: tuple = (320, 240)):
                                  + b'\r\n\r\n' + data + b'\r\n')
             except Exception:            # 客户端断开：假服务直接收工
                 break
-            await asyncio.sleep(period)
+            await asyncio.sleep(1.0 / use_fps)
 
     app = web.Application()
     app.router.add_get('/video', video)
@@ -72,7 +82,7 @@ async def fake_mjpeg_server(port: int, fps: int = 12, size: tuple = (320, 240)):
     return runner
 
 
-async def main() -> int:
+async def main(read_kbps: float = 0.0, profile: str = 'low') -> int:
     cloud_port = free_port()
     local_port = free_port()
     db = f'/tmp/e2e-{uuid.uuid4().hex}.db'
@@ -116,17 +126,25 @@ async def main() -> int:
             print('车端在线 :', (await http.get('/api/media/health')).json()['devices'].get(DEV))
 
             url = (f"http://127.0.0.1:{cloud_port}/api/devices/{DEV}/stream"
-                   f"?cam=main&profile=low&t={media['remote']['token']}")
+                   f"?cam=main&profile={profile}&t={media['remote']['token']}")
             t0 = time.time()
             total = 0
             frames = 0
             lat = []
+            # --read-kbps 模拟手机下行带宽：读取端按这条速率消费，堵住时看延迟怎么涨
+            budget = 0.0
+            pace_start = time.time()
             async with httpx.AsyncClient(timeout=None) as raw:
                 async with raw.stream('GET', url) as resp:
                     print('拉流状态 :', resp.status_code, resp.headers.get('content-type'))
                     buf = bytearray()
                     async for chunk in resp.aiter_bytes():
                         buf += chunk
+                        if read_kbps > 0:      # 限速：允许的时间额度用完了就等
+                            budget += len(chunk) * 8 / 1000.0
+                            ahead = budget - (time.time() - pace_start) * read_kbps
+                            if ahead > 0:
+                                await asyncio.sleep(ahead / read_kbps)
                         while True:
                             e = buf.find(b'\xff\xd9')
                             if e < 0:
@@ -183,4 +201,10 @@ async def main() -> int:
 
 
 if __name__ == '__main__':
-    raise SystemExit(asyncio.run(main()))
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--read-kbps', type=float, default=0.0,
+                    help='读取端限速（模拟 4G 下行），0=不限')
+    ap.add_argument('--profile', default='low', choices=['low', 'eco'])
+    a = ap.parse_args()
+    raise SystemExit(asyncio.run(main(a.read_kbps, a.profile)))

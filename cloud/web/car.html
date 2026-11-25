@@ -259,6 +259,19 @@
   }
   #camSwap.show { display: flex; }
   #camSwap:active { background: rgba(56, 189, 248, .40); }
+  /* 2026-11-25 用户报"手机 4G 延迟大、偶尔卡住"：异地分两档，左上角手动切。
+     只有**走中继**的时候才显示（同 WiFi 直连本来就是 480 宽 20 fps，没得选）。 */
+  #camQuality {
+    position: absolute; left: 8px; top: 8px; z-index: 3;
+    height: 30px; padding: 0 12px; border-radius: 15px;
+    border: 1px solid rgba(255, 255, 255, .55); background: rgba(0, 0, 0, .38);
+    color: #f0f6fc; font-size: 13px; font-weight: 600;
+    display: none; align-items: center; justify-content: center;
+    text-shadow: 0 0 3px rgba(0, 0, 0, .95), 0 0 1px rgba(0, 0, 0, 1);
+    touch-action: manipulation; -webkit-tap-highlight-color: transparent;
+  }
+  #camQuality.show { display: flex; }
+  #camQuality:active { background: rgba(56, 189, 248, .40); }
   /* ---------- 跟随模式（人体识别 + 点框选人） ---------- */
   #followView { position: absolute; inset: 0; display: flex; flex-direction: column;
     background: #000; }
@@ -682,6 +695,7 @@
       <div id="camStage">
         <img id="camImg" class="hidden" alt="摄像头画面">
         <button id="camSwap" title="切换摄像头" aria-label="切换摄像头">广角</button>
+        <button id="camQuality" title="异地画质：高清 / 流畅" aria-label="异地画质">流畅</button>
         <button id="camRefresh" title="刷新画面" aria-label="刷新画面">⟳</button>
         <div id="camErr" class="hidden"></div>
       </div>
@@ -3922,6 +3936,43 @@ let camViaRemote = false;   // 当前画面是否走中继
    开关**只在画面打开时**出现（camStop 里摘掉 .show）。 */
 let camWide = false;
 
+/* 2026-11-25 用户报「手机 4G 延迟大、有时候卡住」：异地分两档，
+   `低码率档` 由服务端按 `?profile=` 转码（车端有人看才编，不占常态 CPU）：
+     low（高清）= 480 宽 / 15 fps ≈ 2.3 Mbps
+     eco（流畅）= 320 宽 / 10 fps ≈ 0.5 Mbps  ← 弱网默认
+   默认按浏览器报的接入类型自动选：Android Chrome 有 `navigator.connection`，
+   iOS Safari 没有 → 当作弱网（走流畅），用户可以点左上角自己切高清。 */
+let camEco = null;          // null = 还没决定（首次按网络类型自动选）
+
+function camAutoEco() {
+  const c = navigator.connection || navigator.mozConnection || {};
+  if (c.saveData) return true;                  // 开了省流量
+  const t = String(c.type || '');
+  if (t) return t === 'cellular' || t === 'none';
+  const et = String(c.effectiveType || '');
+  if (et) return !/4g|wifi|ethernet/.test(et);  // 2g/3g/slow-2g → 流畅
+  return true;                                  // 问不出来就当弱网
+}
+
+function camProfile() {
+  if (camEco === null) camEco = camAutoEco();
+  return camEco ? 'eco' : 'low';
+}
+
+function camQualityLabel() {
+  const btn = $('camQuality');
+  if (btn) btn.textContent = camProfile() === 'eco' ? '流畅' : '高清';
+}
+
+function camShowQualityBtn(show) {
+  const btn = $('camQuality');
+  if (!btn) return;
+  // 只有走中继才有意义；同 WiFi 直连不带 profile
+  const on = !!show && camViaRemote && !!(camRemote && camRemote.url);
+  btn.classList.toggle('show', on);
+  if (on) camQualityLabel();
+}
+
 function camSrcURL() {
   if (!camMedia) return '';
   const cam = camWide ? 'wide' : 'main';
@@ -3929,8 +3980,8 @@ function camSrcURL() {
   if (remote) {
     // ⚠️ 必须用**同源相对地址**：绝对 http:// 地址在 https 页面上会被当混合内容拦掉，
     // 而中继路径 `/api/...` 天然和页面同源。
-    // 中继一律推低码率档（320 宽 12 fps ≈ 1 Mbps），云端出网按客户数算钱。
-    return camRemote.url + '?cam=' + cam + '&profile=low&t=' +
+    // 中继按画质档下发：low=480 宽 15 fps（约 2.3 Mbps）/ eco=320 宽 10 fps（约 0.5 Mbps）
+    return camRemote.url + '?cam=' + cam + '&profile=' + camProfile() + '&t=' +
       encodeURIComponent(camRemote.token || '');
   }
   const base = String(camMedia.url || '');
@@ -4033,6 +4084,7 @@ function camImgErr() {
 }
 
 function camReload() {
+  camShowQualityBtn(camWanted);
   if (!camWanted || !camMedia) { camStop(); return; }
   camMount('camImg', camSrcURL(), true, camImgErr);
 }
@@ -4043,6 +4095,7 @@ function camStop() {
   if (btn) btn.classList.remove('show');
   const swap = $('camSwap');
   if (swap) swap.classList.remove('show');
+  camShowQualityBtn(false);
 }
 
 function camStart() {
@@ -4054,6 +4107,18 @@ function camStart() {
   if (btn) btn.classList.add('show');
   const swap = $('camSwap');
   if (swap) { camSwapLabel(); swap.classList.add('show'); }
+  camShowQualityBtn(true);
+}
+
+if ($('camQuality')) {
+  $('camQuality').onclick = (e) => {
+    e.stopPropagation();
+    if (!camWanted) return;
+    camEco = camProfile() === 'eco' ? false : true;   // 高清 ⇄ 流畅
+    camQualityLabel();
+    camRefreshMedia().then(camReload);
+    showToast(camEco ? '已切到流畅（省流量、延迟低）' : '已切到高清（对应网络更吃带宽）', true);
+  };
 }
 
 if ($('camSwap')) {
@@ -4062,7 +4127,8 @@ if ($('camSwap')) {
     if (!camWanted || !camMedia) return;
     camWide = !camWide;
     camSwapLabel();
-    camReload();
+    if (camViaRemote) camRefreshMedia().then(camReload);   // 令牌 180 s，先换新的
+    else camReload();
     if (camWide) {
       setTimeout(() => {
         const i = $('camImg');
@@ -4204,7 +4270,9 @@ if ($('navCamSwap')) {
     if (!navCamWanted || !camMedia) return;
     camWide = !camWide;
     camSwapLabel();
-    navCamReload();                 // 只重连导航这一路（换新节点，见 camMount）
+    // 令牌 180 s 就过期：中继模式下先换新的再重挂，否则 401 → 黑屏（2026-11-25 日志实锤 3 次）
+    const reload = () => navCamReload();   // 只重连导航这一路（换新节点，见 camMount）
+    if (camViaRemote) camRefreshMedia().then(reload); else reload();
     if (camWide) {
       setTimeout(() => {
         const i = $('navCamImg');

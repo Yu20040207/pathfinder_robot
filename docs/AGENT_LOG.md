@@ -12851,3 +12851,45 @@ sudo nmcli con up 4g
   `fwr-media.service` 已带 `--low-width 480 --low-fps 15 --low-quality 65` 并重启。
 - **未验证**：真机 4G 手机端观感；4G 上行实测只有 ~3.5 Mbps，异地 wide（3.39 Mbps）在 4G 上会顶格，
   main（2.32 Mbps）安全。5 台阶段务必回调码率。
+
+### 2026-11-25 15:20 手机 4G 卡顿：加"弱网档 eco"（320 宽 10 fps）+ 会话令牌修复
+
+用户反馈：「手机用 4G 的时候延迟还是比较大，而且有时候会卡住，WiFi 的就很好」。
+
+**诊断（已验证的根因）**
+1. **码率 > 链路带宽 = 延迟爆炸**。本机端到端复现（`tools/check_media_relay_e2e.py --read-kbps`）：
+   链路限 1200 kbps 时，480p 档（1.8~2.3 Mbps）中继延迟 **809 ms 中位 / 1395 ms P90**；
+   同链路换成 320p 弱网档（0.62 Mbps）→ **1 ms 中位**。这就是"越看越卡、偶尔卡死"。
+2. **切摄像头 401**：云端 nginx 日志里 3 条 `stream?...&t=<旧令牌> 401`。
+   观看令牌只有 180 s，切摄像头走的是 `camReload()`，没重取令牌 → 黑屏。
+3. 附带发现：广角分身帧率超标（low 27 fps / eco 21.5 fps，配置 15/10）——
+   `WideUvcThread` 往 `hub.source_fps` 写的是**相机到达速率**（30），而它自己已经抽到 20 再发布，
+   分身拿 30 当分母 → 少抽。改成写 `min(相机, 本线程目标)`。
+
+**改动**
+- 车端 `tools/robot_mjpeg_server.py`：一档分身改成**多档分身**（`_sinks` 列表），新增
+  `--eco-width 320 --eco-fps 10 --eco-quality 55`；`?profile=eco` 走 `hub_eco`/`hub_wide_eco`。
+- 车端 `tools/media_relay.py`：按 **(通道, 画质档) → 槽位**（0 主摄高清 /1 广角高清 /2 主摄流畅 /3 广角流畅）
+  分别拉流、分别只留最新一帧，**两档互不打断**（两台手机一 WiFi 一 4G 能同时看）。
+- 云端 `cloud/api/app.py`：`/stream?profile=` 原样下发、按槽位分发；`media_slot()` 与车端同规则。
+- 页面 `cloud/web/car.html`：
+  - 异地分两档，**默认自动**（`navigator.connection`：cellular/saveData/2g/3g → 流畅；
+    **iOS 问不出来 → 当弱网**走流畅）；左上角新增 `#camQuality` 键手动切「高清/流畅」。
+  - 切摄像头（手动/导航两块）在异地模式下**先重取令牌再重挂**，不再 401。
+- 单元 `deploy/systemd/fwr-media.service`：加 `--eco-width 320 --eco-fps 10 --eco-quality 55`。
+
+**实测（已验证，2026-11-25 15:16~15:20）**
+
+| 档 | 分辨率 | 帧率 | 每帧 | 码率 | 异地首帧 | 帧间隔 P90 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 主摄 高清 low | 480×360 | 15.4 fps | 24.0 KB | **3.00 Mbps** | 135 ms | 77.4 ms |
+| 主摄 流畅 eco | 320×240 | 10.3 fps | 12.3 KB | **1.02 Mbps** | **70 ms** | 140 ms |
+| 广角 高清 low | 480×360 | 17.3 fps | 22.0 KB | 3.12 Mbps | — | — |
+| 广角 流畅 eco | 320×240 | 10.0 fps | 10.4 KB | 0.85 Mbps | — | — |
+
+- 中继日志实证按档拉流：`本地流已连上 0（…profile=low）` → `开始推流 2` → `本地流已连上 2（…profile=eco）`。
+- 单元/接口回归：车端 38 例、中继 28 例、云端 13 例、页面 8 例全过；`--profile eco` 端到端 PASS。
+- **未验证**：真机 4G 观感（需要用户拿手机看）；iOS 是否真的走到 eco（拿不到 `navigator.connection`
+  时按弱网处理，属"宁卡勿糊"的取舍）。
+- 回滚：页面左上角切「高清」即可；服务端 `--eco-width 0` 关掉弱网档；
+  `--low-width 0` 关掉整个异地档。

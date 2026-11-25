@@ -80,20 +80,45 @@ def jpeg_frames(buf: bytearray) -> list[bytes]:
         del buf[:end + 2]
 
 
-def control_action(msg: dict) -> tuple[str, int]:
-    """把云端控制消息翻译成 (动作, 通道)。非法消息 → ('ignore', -1)。"""
+#: 画质档 → 槽位偏移：`low`=高清档（480 宽），`eco`=弱网档（320 宽，手机 4G）
+PROFILE_SLOT = {'low': 0, 'eco': 2}
+
+
+def slot_of(ch: int, profile: str) -> int:
+    """(通道, 画质档) → 0..3 的槽位号（上行 1 字节头就发它）。"""
+    return ch + PROFILE_SLOT.get(profile, 0)
+
+
+def channel_of(slot: int) -> tuple[int, str]:
+    """槽位号 → (通道, 画质档)；非法返回 (-1, '')。"""
+    slot = int(slot)
+    if slot not in (0, 1, 2, 3):
+        return -1, ''
+    return slot % 2, ('eco' if slot >= 2 else 'low')
+
+
+def control_action(msg: dict) -> tuple[str, int, str]:
+    """把云端控制消息翻译成 (动作, 通道, 画质档)。非法消息 → ('ignore', -1, '')。
+
+    ⚠️ 画质档必须跟 `ch` 一起带下去：手机走 4G 时云端要 `eco`（320 宽约 0.5 Mbps），
+    在 WiFi 下要 `low`（480 宽约 2.3 Mbps）。**同一个通道两个档必须能同时存在**
+    （两台手机一 WiFi 一 4G），合并成一个"当前档"会互相打断。
+    """
     cmd = str(msg.get('cmd') or '')
     if cmd == 'ping':
-        return 'pong', -1
+        return 'pong', -1, ''
     if cmd not in ('play', 'stop'):
-        return 'ignore', -1
+        return 'ignore', -1, ''
     try:
         ch = int(msg.get('ch', CH_MAIN))
     except (TypeError, ValueError):
-        return 'ignore', -1
+        return 'ignore', -1, ''
     if ch not in (CH_MAIN, CH_WIDE):
-        return 'ignore', -1
-    return cmd, ch
+        return 'ignore', -1, ''
+    profile = str(msg.get('profile') or 'low')
+    if profile not in PROFILE_SLOT:
+        return 'ignore', -1, ''
+    return cmd, ch, profile
 
 
 def backoff_delay(attempt: int, base: float = 1.0, cap: float = 30.0) -> float:
@@ -125,9 +150,9 @@ class MediaRelay:
         self.local = local
         self.profile = profile
         self.verbose = verbose
-        self.latest: Dict[int, bytes] = {}
+        self.latest: Dict[int, bytes] = {}          # 槽位 → 最新一帧
         self.pending = asyncio.Event()
-        self.pullers: Dict[int, asyncio.Task] = {}
+        self.pullers: Dict[int, asyncio.Task] = {}  # 槽位 → 拉流任务
         self._stop = asyncio.Event()
         self.frames_sent = 0
         self.bytes_sent = 0
@@ -139,52 +164,53 @@ class MediaRelay:
             print(f'[relay {time.strftime("%H:%M:%S")}] {text}', flush=True)
 
     # ---- 通道拉流 ----
-    async def _puller(self, session, ch: int) -> None:
-        url = channel_url(self.local, ch, self.profile)
+    async def _puller(self, session, slot: int) -> None:
+        ch, profile = channel_of(slot)
+        url = channel_url(self.local, ch, profile)
         while not self._stop.is_set():
             try:
                 async with session.get(url, timeout=None) as resp:
                     if resp.status != 200:
                         raise RuntimeError(f'HTTP {resp.status}')
-                    self.log(f'本地流已连上 ch{ch}（{url}）')
+                    self.log(f'本地流已连上 {slot}（{url}）')
                     buf = bytearray()
                     async for chunk in resp.content.iter_any():
                         buf += chunk
                         for frame in jpeg_frames(buf):
-                            self.latest[ch] = frame      # 只留最新一帧
+                            self.latest[slot] = frame    # 只留最新一帧
                             self.pending.set()
                         if self._stop.is_set():
                             break
             except asyncio.CancelledError:
                 raise
             except Exception as exc:              # noqa: BLE001
-                self.log(f'本地流断开 ch{ch}：{exc}（2 s 后重试）')
+                self.log(f'本地流断开 {slot}：{exc}（2 s 后重试）')
             await asyncio.sleep(2.0)
 
-    def start_puller(self, session, ch: int) -> None:
-        task = self.pullers.get(ch)
+    def start_puller(self, session, slot: int) -> None:
+        task = self.pullers.get(slot)
         if task is not None and not task.done():
             return
-        self.pullers[ch] = asyncio.create_task(self._puller(session, ch))
-        self.log(f'开始推流 ch{ch}')
+        self.pullers[slot] = asyncio.create_task(self._puller(session, slot))
+        self.log(f'开始推流 {slot}')
 
-    def stop_puller(self, ch: int) -> None:
-        task = self.pullers.pop(ch, None)
+    def stop_puller(self, slot: int) -> None:
+        task = self.pullers.pop(slot, None)
         if task is not None:
             task.cancel()
-        self.latest.pop(ch, None)
-        self.log(f'停止推流 ch{ch}')
+        self.latest.pop(slot, None)
+        self.log(f'停止推流 {slot}')
 
     # ---- 上行发送 ----
     async def _sender(self, ws) -> None:
         while not self._stop.is_set():
             await self.pending.wait()
             self.pending.clear()
-            for ch in (CH_MAIN, CH_WIDE):
-                frame = self.latest.pop(ch, None)
+            for slot in list(self.latest):
+                frame = self.latest.pop(slot, None)
                 if not frame:
                     continue
-                await ws.send_bytes(bytes([ch]) + frame)
+                await ws.send_bytes(bytes([slot]) + frame)
                 self.frames_sent += 1
                 self.bytes_sent += len(frame)
 
@@ -197,7 +223,8 @@ class MediaRelay:
                                 headers=headers) as ws:
             self.log(f'已连上云端 {url.split("?")[0]}')
             await ws.send_str(json.dumps({'type': 'hello', 'device': self.device,
-                                          'cams': [CH_MAIN, CH_WIDE]}))
+                                          'cams': [CH_MAIN, CH_WIDE],
+                                          'profiles': sorted(PROFILE_SLOT)}))
             sender = asyncio.create_task(self._sender(ws))
             try:
                 async for msg in ws:
@@ -206,13 +233,13 @@ class MediaRelay:
                             data = json.loads(msg.data)
                         except ValueError:
                             continue
-                        action, ch = control_action(data)
+                        action, ch, profile = control_action(data)
                         if action == 'pong':
                             await ws.send_str(json.dumps({'type': 'pong'}))
                         elif action == 'play':
-                            self.start_puller(http, ch)
+                            self.start_puller(http, slot_of(ch, profile))
                         elif action == 'stop':
-                            self.stop_puller(ch)
+                            self.stop_puller(slot_of(ch, profile))
                     elif msg.type in (aiohttp.WSMsgType.CLOSED,
                                       aiohttp.WSMsgType.ERROR):
                         break

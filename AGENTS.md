@@ -110,6 +110,25 @@
     5 台 ≈5.5 Mbps 才安全）。另：**4G 上行实测只有 ~3.5 Mbps**，所以异地广角（3.39）在 4G 上会顶格。
     ⚠️ `handle_stream` 的轮询是 **5 ms**（原来 20 ms，每帧白等 10 ms）；页面切中继的门限是
     **1.5 s**（局域网 1.5 s 没出图才切，异地出画快 1 秒）。
+  - 📶 **手机 4G 卡顿 → 弱网档 `eco`（2026-11-25 上线，已验证链路/未验证真机观感）**
+    - 根因实测：**码率超过链路带宽，延迟会被 TCP 缓冲堆到几秒**。本机端到端复现：
+      链路限 1200 kbps 时 480p 档延迟 **809 ms 中位 /1395 ms P90**；换 320p 档 **1 ms**。
+    - 两档并存（车端各一个分身，**有人看才编**，互不打断）：
+      `low`（高清）= 480 宽 15 fps q65 ≈ **2.9~3.0 Mbps**；
+      `eco`（流畅）= 320 宽 10 fps q55 ≈ **0.85~1.02 Mbps**。
+    - 槽位协议：**槽位 = 通道(0 主摄/1 广角) + 档位偏移(0 高清 / 2 流畅)**，
+      云端 `media_slot()` 与车端 `media_relay.slot_of()` 必须一致；上行仍是 1 字节槽位头。
+      ⚠️ 同一通道的两档**必须能同时在拉**（两台手机一 WiFi 一 4G），别合并成"当前档"。
+    - 页面默认自动：`navigator.connection` 报 cellular/saveData/2g/3g → 流畅；
+      **iOS 拿不到 → 当弱网**（宁卡勿糊）；左上角 `#camQuality` 可手动「高清/流畅」。
+    - 切摄像头**必须先重取令牌**（观看令牌 180 s，旧令牌 401 → 黑屏，云端日志实锤 3 次）。
+    - ⚠️ 广角分身的抽帧分母要写 **`min(相机到达, 本线程目标)`**：写相机 30 而线程自己只发 20 时，
+      分身按 30 当分母 → 配 15 实际出 17~27 fps（2026-11-25 实测）。
+    - 回归：`tests/test_mjpeg_wide_camera.py::test_two_low_profiles_are_independent_sinks`、
+      `tests/test_media_relay.py::test_slot_roundtrip`、
+      `tests/test_cloud_media_relay.py::test_media_slot_maps_cam_and_profile`、
+      `tests/test_page_remote_media.py::test_page_has_two_remote_quality_tiers`。
+      `tools/check_media_relay_e2e.py --profile eco --read-kbps 1200` 是弱网复现口。
     ⚠️ **两个"分身"专有坑**（踩过，别再引入）：
     ① `FrameHub.has_clients()` **必须把分身观众算进去**——广角线程靠它决定"没人看就停流"，
        只数自己的连接会让广角 low 档**只出 1 帧就断流**（观众在等、相机被关，互锁）；

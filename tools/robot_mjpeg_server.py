@@ -143,10 +143,8 @@ class FrameHub:
         self._clients = 0
         self._event = threading.Event()      # 供 asyncio 侧等待（轮询式）
         #: 低码率分身（异地走云端中继用）：有人订阅才转码，320 宽 / 12 fps
-        self._low: Optional['FrameHub'] = None
-        self._low_reduce = 1
-        self._low_target = 0.0       # 低码率分身的目标帧率（抽帧用）
-        self._low_acc = 0.0
+        #: 低码率分身列表（每项 = 一个 `?profile=` 档：low / eco）
+        self._sinks: list = []
         #: 采集线程写进来的**真实源帧率**（抽帧分母）。窗口实测值在"刚恢复取流"时
         #: 会掺着暂停期 1 帧/秒的旧样本 → 估算偏低 → 低码率档抽帧失效（20 fps 全放），
         #: 所以广角这种会暂停的源必须显式告诉 hub 自己多少帧。
@@ -156,15 +154,14 @@ class FrameHub:
 
     def attach_low(self, low: 'FrameHub', reduce: int = 1,
                    target_fps: float = 0.0) -> None:
-        """把低码率分身挂上来：主路收到帧、且分身有人看时，才多编一份小的。
+        """挂一个低码率分身：主路收到帧、**且这个分身有人看**时才多编一份。
 
-        ⚠️ 不能给每条连接都编一次：客户端的 `?profile=low` 全部共用这个分身，
-        没人看就**一次都不编**（异地观看才 1.0 Mbps，局域网仍走原画质）。
+        ⚠️ 不能给每条连接都编一次：同一档的客户端共用一个分身，没人看就一次都不编。
+        现在有两档（2026-11-25）：`low` = 480 宽 15 fps（WiFi/好网），
+        `eco` = 320 宽 10 fps（手机 4G 弱网，约 0.5 Mbps，卡顿优先于清晰度）。
         """
-        self._low = low
-        self._low_reduce = max(1, int(reduce))
-        self._low_target = max(0.0, float(target_fps))
-        self._low_acc = 0.0
+        self._sinks.append({'hub': low, 'reduce': max(1, int(reduce)),
+                            'target': max(0.0, float(target_fps)), 'acc': 0.0})
 
     def _feed_low(self, image=None, data: Optional[bytes] = None) -> None:
         """把当前帧喂给低码率分身（**没人看就一次都不编**）。
@@ -173,20 +170,21 @@ class FrameHub:
         源是 20.5 fps、目标 12 fps 时，时间阈值只会抽出 **10.2 fps**（和广角那个
         "配 20 出 13.4" 是同一个坑，2026-11-25 实测 low 档只有 9.6 fps）。
         """
-        low = self._low
-        if low is None or not low.has_clients():
+        if not self._sinks:
             return
-        if self._low_target > 0:
-            src = self.source_fps or self.fps()
-            if src > 0:
-                send, self._low_acc = decimate_step(self._low_acc,
-                                                    self._low_target, src)
+        src = self.source_fps or self.fps()
+        for sink in self._sinks:
+            low = sink['hub']
+            if not low.has_clients():
+                continue                      # 这一档没人看 → 一次都不编
+            if sink['target'] > 0 and src > 0:
+                send, sink['acc'] = decimate_step(sink['acc'], sink['target'], src)
                 if not send:
-                    return
-        if image is not None:
-            low.publish(image)
-        elif data is not None:
-            low.publish_jpeg(data, resample=True)
+                    continue
+            if image is not None:
+                low.publish(image)
+            elif data is not None:
+                low.publish_jpeg(data, resample=True)
 
     # ---- 采集侧（ROS 线程 / 测试线程调用）----
     def publish(self, image: np.ndarray, real: bool = True) -> None:
@@ -315,11 +313,9 @@ class FrameHub:
         15 s 后 kill 掉 v4l2-ctl，而 `_low` 的观众永远等不到帧（自锁）。
         """
         with self._lock:
-            mine = self._clients > 0
-        if mine:
-            return True
-        low = self._low
-        return bool(low is not None and low.has_clients())
+            if self._clients > 0:
+                return True
+        return any(s['hub'].has_clients() for s in self._sinks)
 
     def has_real_frames(self) -> bool:
         with self._lock:
@@ -338,12 +334,17 @@ def hub_for(request: web.Request) -> tuple['FrameHub', str]:
     低码率分身给**异地观看**用（走云端中继，1.0~1.2 Mbps）；局域网仍然走原画质。
     """
     wide = request.query.get('cam') == 'wide'
-    low = request.query.get('profile') == 'low'
+    profile = request.query.get('profile') or ''
     if wide:
-        hub = request.app.get('hub_wide_low') if low else request.app.get('hub_wide')
-        return (hub if hub is not None else request.app['hub_wide']), 'wide'
-    hub = request.app.get('hub_low') if low else request.app['hub']
-    return (hub if hub is not None else request.app['hub']), 'main'
+        table = (('eco', 'hub_wide_eco'), ('low', 'hub_wide_low'))
+        default = request.app['hub_wide']
+    else:
+        table = (('eco', 'hub_eco'), ('low', 'hub_low'))
+        default = request.app['hub']
+    for name, key in table:
+        if profile == name and request.app.get(key) is not None:
+            return request.app[key], ('wide' if wide else 'main')
+    return default, ('wide' if wide else 'main')
 
 
 async def handle_stream(request: web.Request) -> web.StreamResponse:
@@ -572,13 +573,16 @@ async def _follow_services_baseline(_app) -> None:
 def build_app(hub: FrameHub, topic: str, uvc: 'UvcSource' = None,
               hub_wide: 'FrameHub' = None, wide_device: str = '',
               wide_src=None, hub_low: 'FrameHub' = None,
-              hub_wide_low: 'FrameHub' = None) -> web.Application:
+              hub_wide_low: 'FrameHub' = None, hub_eco: 'FrameHub' = None,
+              hub_wide_eco: 'FrameHub' = None) -> web.Application:
     app = web.Application()
     app['hub'] = hub
     app['streams'] = []          # 活着的 MJPEG 长连接（超出上限踢最旧的）
     app['hub_wide'] = hub_wide
     app['hub_low'] = hub_low
     app['hub_wide_low'] = hub_wide_low
+    app['hub_eco'] = hub_eco
+    app['hub_wide_eco'] = hub_wide_eco
     app['wide_device'] = wide_device
     app['wide_src'] = wide_src
     app['topic'] = topic
@@ -1088,7 +1092,10 @@ class WideUvcThread(threading.Thread):
                         self._note_capture(now)
                         if self.hub.has_clients():
                             src_fps = self.effective_source()
-                            self.hub.source_fps = src_fps
+                            # ⚠️ 写"**实际发布**速率"而不是相机到达速率：分身拿这个当分母抽帧，
+                            # 写相机 30 fps 而本线程已经抽到 20 fps 时，分身会按 30 算 →
+                            # 配 15 实际出 22.5（2026-11-25 实测 w low 27 fps / w eco 21.5 fps）。
+                            self.hub.source_fps = min(src_fps, self.target_fps)
                             send, self._send_acc = decimate_step(
                                 self._send_acc, self.target_fps, src_fps)
                             if send:
@@ -1184,6 +1191,12 @@ def main() -> int:
                     help='默认路由变成 4G 时自动降到这个帧率（4G 上行 ~3.5 Mbps）')
     ap.add_argument('--wide-idle-pause', type=float, default=5.0,
                     help='广角没人看这么多秒就停流释放相机（0=一直占着）')
+    ap.add_argument('--eco-width', type=int, default=0,
+                    help='弱网档宽度（手机 4G 用，0=关；建议 320）')
+    ap.add_argument('--eco-fps', type=float, default=10.0,
+                    help='弱网档帧率')
+    ap.add_argument('--eco-quality', type=int, default=55,
+                    help='弱网档 JPEG 质量')
     ap.add_argument('--low-width', type=int, default=320,
                     help='异地把画面走云端中继时的宽度（0=不启用低码率档）')
     ap.add_argument('--low-fps', type=float, default=12.0,
@@ -1196,11 +1209,15 @@ def main() -> int:
 
     hub = FrameHub(quality=args.quality, fps=args.fps, width=args.width)
     # 低码率分身：只有 `?profile=low` 有人看时才转码（异地走云端中继用）
-    hub_low = None
+    hub_low = hub_eco = None
     if args.low_width:
         hub_low = FrameHub(quality=args.low_quality, fps=0,
                            width=args.low_width)
         hub.attach_low(hub_low, target_fps=args.low_fps)
+    if args.eco_width:
+        hub_eco = FrameHub(quality=args.eco_quality, fps=0,
+                           width=args.eco_width)
+        hub.attach_low(hub_eco, target_fps=args.eco_fps)
     uvc = None
     if args.v4l2:
         uvc = UvcSource(hub, args.v4l2, args.v4l2_size)
@@ -1239,13 +1256,18 @@ def main() -> int:
             args.wide_width, args.wide_quality), flush=True)
 
     topic = args.v4l2 or ('test-pattern' if args.test_pattern else args.topic)
-    hub_wide_low = None
+    hub_wide_low = hub_wide_eco = None
     if hub_wide is not None and args.low_width:
         hub_wide_low = FrameHub(quality=args.low_quality, fps=0,
                                 width=args.low_width)
         hub_wide.attach_low(hub_wide_low, target_fps=args.low_fps)
+    if hub_wide is not None and args.eco_width:
+        hub_wide_eco = FrameHub(quality=args.eco_quality, fps=0,
+                                width=args.eco_width)
+        hub_wide.attach_low(hub_wide_eco, target_fps=args.eco_fps)
     app = build_app(hub, topic, uvc, hub_wide, wide_device,
-                    wide if hub_wide else None, hub_low, hub_wide_low)
+                    wide if hub_wide else None, hub_low, hub_wide_low,
+                    hub_eco, hub_wide_eco)
     print(f'MJPEG 服务: http://{args.host}:{args.port}/video  '
           f'(topic={app["topic"]}, {args.fps:g} fps, q={args.quality})', flush=True)
     try:

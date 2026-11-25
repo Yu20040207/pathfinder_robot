@@ -319,7 +319,9 @@ def test_decimation_uses_measured_source_rate():
     assert 'def effective_source' in src
     # 分母必须是实测帧率，并且要写进 hub（低码率档抽帧也用它）
     assert 'self.effective_source()' in src
-    assert 'self.hub.source_fps = src_fps' in src
+    # ⚠️ 要写"实际发布速率"（min(相机, 本线程目标)）：写相机 30 而本线程只发 20 时，
+    # 分身按 30 当分母 → 配 15 实际出 22.5 fps（2026-11-25 实测 27 / 21.5）
+    assert 'self.hub.source_fps = min(src_fps, self.target_fps)' in src
     assert 'src = self.source_fps or self.fps()' in src
     # 源帧率等于目标时，必须每帧都发
     acc, sent = 0.0, 0
@@ -354,9 +356,12 @@ def _frame_hub_class():
     import numpy as np
     tree = ast.parse(SERVER.read_text(encoding='utf-8'))
     cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'FrameHub')
+    helper = next(n for n in tree.body
+                  if isinstance(n, ast.FunctionDef) and n.name == 'decimate_step')
     ns = {'cv2': cv2, 'np': np, 'time': __import__('time'),
           'threading': __import__('threading'), 'Optional': object}
-    exec(compile(ast.Module(body=[cls], type_ignores=[]), '<hub>', 'exec'), ns)
+    # 抽帧函数要一起 exec，否则吃的是测试里另写的一份（会和产品代码不一致）
+    exec(compile(ast.Module(body=[helper, cls], type_ignores=[]), '<hub>', 'exec'), ns)
     return ns['FrameHub']
 
 
@@ -396,3 +401,49 @@ def test_low_hub_only_gets_frames_when_someone_watches_it():
     assert got is not None, '有人看时必须喂帧'
     small = cv2.imdecode(np.frombuffer(got, np.uint8), cv2.IMREAD_COLOR)
     assert small.shape[1] == 320, '分身要缩到 320 宽'
+
+
+def test_two_low_profiles_are_independent_sinks():
+    """2026-11-25：异地分两档（low=480 宽 / eco=320 宽弱网档），互不影响。
+
+    4G 上 2.3 Mbps 会把手机下行塞满（实测延迟从 2 ms 涨到 10 s），
+    所以弱网档必须能单独选、单独限帧，且**各自只在有人看时才编**。
+    """
+    Hub = _frame_hub_class()
+    hub = Hub(quality=65, fps=0, width=480)
+    low = Hub(quality=65, fps=0, width=480)
+    eco = Hub(quality=55, fps=0, width=320)
+    hub.attach_low(low, target_fps=15)
+    hub.attach_low(eco, target_fps=10)
+
+    import cv2
+    import numpy as np
+    ok, buf = cv2.imencode('.jpg', np.full((360, 640, 3), 40, np.uint8))
+    assert ok
+    raw = buf.tobytes()
+    hub.source_fps = 20.0
+    for _ in range(40):                     # 20 fps 源跑 2 s
+        hub.publish_jpeg(raw, resample=False)
+
+    assert low.latest()[0] is None and eco.latest()[0] is None, '都没人看 → 一张都不编'
+    low.add_client(1)
+    eco.add_client(2)
+    def seq(h):
+        return h.latest()[1]
+    frames_low = frames_eco = 0
+    s_low, s_eco = seq(low), seq(eco)
+    for _ in range(40):
+        hub.publish_jpeg(raw, resample=False)
+        if seq(low) != s_low:
+            frames_low += 1
+            s_low = seq(low)
+        if seq(eco) != s_eco:
+            frames_eco += 1
+            s_eco = seq(eco)
+    assert frames_low, '高清档没人看也要出帧'
+    # 20 fps 源、各 2 s：15 fps 档约 30 帧、10 fps 档约 20 帧
+    assert 24 <= frames_low <= 34, f'高清档应约 15 fps，实测 {frames_low} 帧/2 s'
+    assert 15 <= frames_eco <= 25, f'弱网档应约 10 fps，实测 {frames_eco} 帧/2 s'
+    w = cv2.imdecode(np.frombuffer(eco.latest()[0], np.uint8),
+                     cv2.IMREAD_COLOR).shape[1]
+    assert w == 320, '弱网档必须是 320 宽'

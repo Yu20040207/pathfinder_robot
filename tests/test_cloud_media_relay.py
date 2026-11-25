@@ -178,3 +178,25 @@ def test_stream_sets_no_buffering_header():
 def test_stream_never_buffers_more_than_two_frames():
     text = (ROOT / 'cloud' / 'api' / 'app.py').read_text(encoding='utf-8')
     assert 'asyncio.Queue(maxsize=2)' in text
+
+
+# ---------------------------------------------------------------- 画质档（弱网 eco）
+
+def test_media_slot_maps_cam_and_profile():
+    """槽位 = 通道 + 档位偏移，必须和车端 `media_relay.slot_of` 一致。"""
+    import importlib
+    mod = sys.modules.get('app') or importlib.import_module('app')
+    assert mod.media_slot('main', 'low') == 0
+    assert mod.media_slot('wide', 'low') == 1
+    assert mod.media_slot('main', 'eco') == 2
+    assert mod.media_slot('wide', 'eco') == 3
+
+
+def test_stream_requests_eco_profile_from_robot():
+    """手机走 4G 时页面要 `?profile=eco`：云端必须把档位原样下发给车端，
+    并按槽位（主摄/广角 + 档位）分发帧，否则同一通道两档会互相打断。"""
+    text = (ROOT / 'cloud' / 'api' / 'app.py').read_text(encoding='utf-8')
+    assert "'cmd': 'play', 'ch': ch, 'profile': profile" in text
+    assert 'slot = media_slot(cam, profile)' in text
+    assert "hub['subs'].setdefault(slot, set())" in text
+    assert 'MEDIA_PROFILE_OFFSET = {' in text

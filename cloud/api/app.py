@@ -79,7 +79,14 @@ MEDIA_TOKEN = os.environ.get('JC_MEDIA_TOKEN', '')
 MEDIA_MAX_CLIENTS = int(os.environ.get('JC_MEDIA_MAX_CLIENTS', '6'))
 MEDIA_STREAM_TTL = int(os.environ.get('JC_MEDIA_STREAM_TTL', '180'))
 
-# device_id -> {'ws': WebSocket|None, 'subs': {ch: set[Queue]}, 'frames': int, 'bytes': int}
+# device_id -> {'ws': WebSocket|None, 'subs': {slot: set[Queue]}, 'frames': int, 'bytes': int}
+#: 槽位 = 通道(0 主摄/1 广角) + 画质档偏移(0 高清 low / 2 弱网 eco)，与车端 `media_relay` 一致
+MEDIA_PROFILE_OFFSET = {'low': 0, 'eco': 2}
+
+
+def media_slot(cam: str, profile: str) -> int:
+    """(摄像头, 画质档) → 0..3 槽位号。"""
+    return (1 if cam == 'wide' else 0) + MEDIA_PROFILE_OFFSET.get(profile, 0)
 MEDIA_HUBS: Dict[str, dict] = {}
 # device_id -> 活跃 WebSocket 集合
 CONNECTIONS: Dict[str, Set[WebSocket]] = {}
@@ -338,10 +345,11 @@ async def media_ws(ws: WebSocket, device_id: str, token: str = ''):
     hub = _media_hub(device_id)
     hub['ws'] = ws
     # 车重连后，把还在等画面的通道重新播起来（旧连接可能已经被掐掉）
-    for ch in list(hub['subs']):
-        if hub['subs'][ch]:
+    for slot in list(hub['subs']):
+        if hub['subs'][slot]:
             try:
-                await ws.send_json({'cmd': 'play', 'ch': ch, 'profile': 'low'})
+                await ws.send_json({'cmd': 'play', 'ch': slot % 2,
+                                    'profile': 'eco' if slot >= 2 else 'low'})
             except Exception:                # noqa: BLE001
                 break
     try:
@@ -351,11 +359,11 @@ async def media_ws(ws: WebSocket, device_id: str, token: str = ''):
                 break
             data = raw.get('bytes')
             if data:
-                ch = data[0]
+                slot = data[0]
                 frame = data[1:]
                 hub['frames'] = hub.get('frames', 0) + 1
                 hub['bytes'] = hub.get('bytes', 0) + len(frame)
-                for queue in list(hub['subs'].get(ch, ())):
+                for queue in list(hub['subs'].get(slot, ())):
                     if queue.full():         # 慢客户端：丢最旧，绝不排长队
                         try:
                             queue.get_nowait()
@@ -397,13 +405,15 @@ async def device_stream(device_id: str, cam: str = 'main', profile: str = 'low',
         raise HTTPException(503, '机器人不在线：异地观看需要车端媒体中继在跑（fwr-media-relay）')
     if active_streams() >= MEDIA_MAX_CLIENTS:
         raise HTTPException(429, '当前观看人数已满，请稍后再试')
+    if profile not in ('low', 'eco'):
+        profile = 'low'
     ch = 1 if cam == 'wide' else 0
+    slot = media_slot(cam, profile)
     queue: asyncio.Queue = asyncio.Queue(maxsize=2)
-    queues = hub['subs'].setdefault(ch, set())
+    queues = hub['subs'].setdefault(slot, set())
     queues.add(queue)
     try:
-        await hub['ws'].send_json({'cmd': 'play', 'ch': ch,
-                                   'profile': 'low' if profile != 'full' else 'full'})
+        await hub['ws'].send_json({'cmd': 'play', 'ch': ch, 'profile': profile})
     except Exception:                        # noqa: BLE001
         queues.discard(queue)
         raise HTTPException(503, '车端连接刚刚断开，请刷新重试')
@@ -417,11 +427,11 @@ async def device_stream(device_id: str, cam: str = 'main', profile: str = 'low',
         finally:
             queues.discard(queue)
             if not queues:
-                hub['subs'].pop(ch, None)
+                hub['subs'].pop(slot, None)
                 ws = hub.get('ws')
                 if ws is not None:
                     try:
-                        await ws.send_json({'cmd': 'stop', 'ch': ch})
+                        await ws.send_json({'cmd': 'stop', 'ch': ch, 'profile': profile})
                     except Exception:        # noqa: BLE001
                         pass
 

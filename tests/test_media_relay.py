@@ -50,14 +50,17 @@ def test_drops_garbage_before_first_marker():
 # ---------------------------------------------------------------- 控制消息
 
 @pytest.mark.parametrize('msg,expected', [
-    ({'cmd': 'play', 'ch': 0}, ('play', 0)),
-    ({'cmd': 'play', 'ch': 1}, ('play', 1)),
-    ({'cmd': 'play'}, ('play', 0)),          # 缺省主摄
-    ({'cmd': 'stop', 'ch': 1}, ('stop', 1)),
-    ({'cmd': 'ping'}, ('pong', -1)),
-    ({'cmd': 'bogus'}, ('ignore', -1)),
-    ({'cmd': 'play', 'ch': 9}, ('ignore', -1)),
-    ({'cmd': 'play', 'ch': 'x'}, ('ignore', -1)),
+    ({'cmd': 'play', 'ch': 0}, ('play', 0, 'low')),
+    ({'cmd': 'play', 'ch': 1}, ('play', 1, 'low')),
+    ({'cmd': 'play'}, ('play', 0, 'low')),   # 缺省主摄 / 高清档
+    ({'cmd': 'stop', 'ch': 1}, ('stop', 1, 'low')),
+    ({'cmd': 'play', 'ch': 0, 'profile': 'eco'}, ('play', 0, 'eco')),
+    ({'cmd': 'play', 'ch': 1, 'profile': 'eco'}, ('play', 1, 'eco')),
+    ({'cmd': 'ping'}, ('pong', -1, '')),
+    ({'cmd': 'bogus'}, ('ignore', -1, '')),
+    ({'cmd': 'play', 'ch': 9}, ('ignore', -1, '')),
+    ({'cmd': 'play', 'ch': 'x'}, ('ignore', -1, '')),
+    ({'cmd': 'play', 'ch': 0, 'profile': 'weird'}, ('ignore', -1, '')),
 ])
 def test_control_action(msg, expected):
     assert relay.control_action(msg) == expected
@@ -67,6 +70,19 @@ def test_unknown_command_never_starts_a_stream():
     """云端发来乱七八糟的东西时**不能**顺手开流（否则车端白烧 CPU）。"""
     for bad in ({}, {'cmd': ''}, {'cmd': None}, {'cmd': 'PLAY'}):
         assert relay.control_action(bad)[0] == 'ignore'
+
+
+@pytest.mark.parametrize('ch,profile,slot', [
+    (0, 'low', 0), (1, 'low', 1), (0, 'eco', 2), (1, 'eco', 3),
+])
+def test_slot_roundtrip(ch, profile, slot):
+    """槽位号 = 通道 + 档位偏移；反解必须还原（云端按槽位分发帧）。"""
+    assert relay.slot_of(ch, profile) == slot
+    assert relay.channel_of(slot) == (ch, profile)
+
+
+def test_slot_rejects_garbage():
+    assert relay.channel_of(9) == (-1, '')
 
 
 # ---------------------------------------------------------------- 地址 / 退避
@@ -105,7 +121,7 @@ def test_relay_does_not_import_aiohttp_at_module_level():
 def test_relay_only_keeps_latest_frame():
     """每通道只留最新一帧：排队会故意加延迟。"""
     text = (ROOT / 'tools' / 'media_relay.py').read_text(encoding='utf-8')
-    assert 'self.latest[ch] = frame' in text
+    assert 'self.latest[slot] = frame' in text
     assert 'asyncio.Queue' not in text.split('class MediaRelay')[1]
 
 

@@ -11,7 +11,10 @@ Type=simple
 # 车机是中文 locale：不设 PYTHONUNBUFFERED 日志会被 4 KB 缓冲吞掉（踩过）
 Environment=HOME=/home/manbaout
 Environment=PYTHONUNBUFFERED=1
-Environment=MEDIA_RELAY_CLOUD=ws://jccontrol.xyz/ws/media
+# ⚠️ 用**公网 IP**，不要用域名：`jccontrol.xyz` 走 80 会被 nginx 301 到 https，
+# 而 https(443) 目前 TLS 直接 reset；域名还会被阿里云「未备案」拦截页（Server: Beaver）挡住。
+# 实测（2026-11-25）：`ws://jccontrol.xyz/...` → 403，`ws://8.163.69.109/...` → 101。
+Environment=MEDIA_RELAY_CLOUD=ws://8.163.69.109/ws/media
 Environment=MEDIA_RELAY_DEVICE=car-001
 Environment=MEDIA_RELAY_LOCAL=http://127.0.0.1:8081
 # 密钥不进仓库：/etc/fwr/media_relay.env 里写 MEDIA_RELAY_TOKEN=xxx

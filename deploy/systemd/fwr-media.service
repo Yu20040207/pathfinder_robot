@@ -18,8 +18,12 @@ WorkingDirectory=/home/manbaout/Company_Project/Four-wheel-robot
 # 异地中继档（--low-*）：2026-11-25 用户要求"单台先把清晰度拉高、延迟压低"，
 # 从 320 宽 12 fps 提到 **480 宽 15 fps q65**（和同 WiFi 直连同分辨率，码率约 2.3 Mbps）。
 # 等上到 5 台再看云端出网预算（16.8 Mbps）决定是否回调到 400/320 宽。
+#   --eco-* 是**手机 4G 专用弱网档**：320 宽 / 10 fps / q55 ≈ 0.5~0.6 Mbps。
+#   手机页会按网络类型自动选（iOS 问不出来就当弱网），左上角也能手动切"高清/流畅"。
+#   实测（2026-11-25 本机端到端，链路限 1.2 Mbps）：480p 档延迟 809 ms 中位 /1395 ms P90，
+#   320p 弱网档 1 ms 中位 —— 弱网下"少发点"比"清晰点"重要。
 #   --low-width 0 可整体关掉异地档
-ExecStart=/bin/bash -lc "source /opt/ros/humble/setup.bash && source ros2_ws/install/setup.bash && exec ./.venv/bin/python tools/robot_mjpeg_server.py --port 8081 --fps 0 --quality 70 --width 480 --wide-size 640x480 --wide-width 480 --wide-fps 20 --wide-quality 60 --wide-fps-4g 12 --wide-idle-pause 15 --wide-cam-fps 30 --low-width 480 --low-fps 15 --low-quality 65 --fallback-test-pattern"
+ExecStart=/bin/bash -lc "source /opt/ros/humble/setup.bash && source ros2_ws/install/setup.bash && exec ./.venv/bin/python tools/robot_mjpeg_server.py --port 8081 --fps 0 --quality 70 --width 480 --wide-size 640x480 --wide-width 480 --wide-fps 20 --wide-quality 60 --wide-fps-4g 12 --wide-idle-pause 15 --wide-cam-fps 30 --low-width 480 --low-fps 15 --low-quality 65 --eco-width 320 --eco-fps 10 --eco-quality 55 --fallback-test-pattern"
 Restart=always
 RestartSec=3
 Nice=5
