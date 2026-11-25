@@ -160,3 +160,43 @@ def test_frame_hub_skips_resample_when_asked(tmp_path):
     jpeg, _seq = hub.latest()
     assert jpeg == raw                     # 一模一样，说明没走 cv2
     assert hub.has_clients() is False
+
+
+# ---------------------------------------------------------------- 抽帧
+
+decimate_step = _load_functions('decimate_step')[0]
+
+
+def test_decimate_keeps_target_rate_not_time_threshold():
+    """30 fps 源、目标 20 fps：30 帧里必须发 20 帧（时间阈值只会发 15 帧）。"""
+    acc, sent = 0.0, 0
+    for _ in range(30):
+        send, acc = decimate_step(acc, 20.0, 30.0)
+        sent += 1 if send else 0
+    assert sent == 20
+
+
+def test_decimate_half_rate():
+    acc, sent = 0.0, 0
+    for _ in range(30):
+        send, acc = decimate_step(acc, 15.0, 30.0)
+        sent += 1 if send else 0
+    assert sent == 15
+
+
+def test_decimate_passes_through_when_target_above_source():
+    acc = 0.0
+    for _ in range(10):
+        send, acc = decimate_step(acc, 60.0, 30.0)
+        assert send
+
+
+def test_decimate_disabled_when_target_zero():
+    assert decimate_step(0.0, 0.0, 30.0) == (True, 0.0)
+
+
+def test_wide_hub_does_not_time_gate_again():
+    """广角 hub 的 fps 必须传 0：再套一层时间阈值会把 20 fps 又压成 15。"""
+    src = SERVER.read_text(encoding='utf-8')
+    assert 'FrameHub(quality=args.wide_quality, fps=0,' in src
+    assert 'target_fps=args.wide_fps' in src

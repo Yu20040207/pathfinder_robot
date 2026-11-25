@@ -666,6 +666,22 @@ def wide_device_path(by_id_dir: str = WIDE_BY_ID_DIR,
     return ''
 
 
+def decimate_step(acc: float, target: float, source: float) -> tuple[bool, float]:
+    """按"每 N 帧取一帧"的累加器抽帧，返回 (这一帧要不要发, 新累加值)。
+
+    ⚠️ **不能用"距上次发送 < 1/target 秒就丢"**：相机 30 fps、目标 20 fps 时，
+    50 ms 门限会把节奏卡成"每 2 帧发 1 帧"→ 实际只有 **15 fps**
+    （2026-11-25 实测：配置 20、实测 15.1）。累加器能保住平均 20 fps
+    （发、丢、发 的 2/3 比例）。
+    """
+    if target <= 0 or source <= 0:
+        return True, 0.0
+    acc += target
+    if acc >= source:
+        return True, acc - source
+    return False, acc
+
+
 def split_jpeg_frames(buf: bytes) -> tuple[list[bytes], bytes]:
     """从 MJPEG 裸流里切出完整 JPEG（FFD8..FFD9），返回 (帧列表, 剩余半帧)。
 
@@ -701,7 +717,8 @@ class WideUvcThread(threading.Thread):
     MAX_BUFFER = 8 * 1024 * 1024    # 半帧缓冲上限，防把内存吃光
 
     def __init__(self, hub: 'FrameHub', device: str = '', size: str = '1280x720',
-                 restart_delay: float = 3.0, cam_fps: int = 30) -> None:
+                 restart_delay: float = 3.0, cam_fps: int = 30,
+                 target_fps: float = 0.0) -> None:
         super().__init__(daemon=True)
         self.hub = hub
         self.fixed_device = device
@@ -709,6 +726,9 @@ class WideUvcThread(threading.Thread):
         self.restart_delay = float(restart_delay)
         #: 让 `v4l2-ctl` 明确设置相机帧率（不设的话部分 UVC 相机会停在 10 fps）
         self.cam_fps = int(cam_fps)
+        #: 发送上限（0=不限，抽帧交给 FrameHub）；用累加器而不是时间阈值
+        self.target_fps = float(target_fps)
+        self._send_acc = 0.0
         self._stop = threading.Event()
         self._cap_lock = threading.Lock()
         self._cap_times: list[float] = []
@@ -770,7 +790,10 @@ class WideUvcThread(threading.Thread):
                         now = time.monotonic()
                         self._note_capture(now)
                         if self.hub.has_clients():
-                            self.hub.publish_jpeg(jpeg)        # 有人看：缩到 480 宽
+                            send, self._send_acc = decimate_step(
+                                self._send_acc, self.target_fps, self.cam_fps)
+                            if send:
+                                self.hub.publish_jpeg(jpeg)    # 有人看：缩到 480 宽
                         elif now - self._last_idle_frame > 1.0:
                             # 没人看：只留一张原始帧给 /snapshot.jpg，不解码不编码
                             self._last_idle_frame = now
@@ -879,10 +902,11 @@ def main() -> int:
     hub_wide = None
     wide_device = ''
     if not args.no_wide:
-        hub_wide = FrameHub(quality=args.wide_quality, fps=args.wide_fps,
+        hub_wide = FrameHub(quality=args.wide_quality, fps=0,
                             width=args.wide_width)
         wide = WideUvcThread(hub_wide, args.wide_device, args.wide_size,
-                             cam_fps=args.wide_cam_fps)
+                             cam_fps=args.wide_cam_fps,
+                             target_fps=args.wide_fps)
         wide_device = wide.device()
         wide.start()
         print('广角相机：%s（%s，发送 %g fps / 相机 %d fps，%d 宽 q%d）' % (
