@@ -774,6 +774,28 @@ class WideUvcThread(threading.Thread):
 
     MAX_BUFFER = 8 * 1024 * 1024    # 半帧缓冲上限，防把内存吃光
 
+    def probe_parm(self, device: str) -> None:
+        """开始取流前问一次相机"你到底按多少 fps 出"（排查掉帧用）。
+
+        `--set-parm` 在不支持的帧率上会**只报错不生效**，而 stderr 以前被丢掉，
+        现场就表现为"配了 30 实际只有 20"。这里把设置结果和相机回报都写进日志。
+        """
+        if self.cam_fps <= 0:
+            return
+        run = subprocess.run(['v4l2-ctl', '-d', device,
+                              '--set-parm=%d' % self.cam_fps],
+                             capture_output=True, text=True, timeout=5)
+        err = (run.stderr or '').strip()
+        try:
+            q = subprocess.run(['v4l2-ctl', '-d', device, '--get-parm'],
+                               capture_output=True, text=True, timeout=5)
+            got = ' '.join(q.stdout.split())
+        except (OSError, subprocess.SubprocessError):
+            got = ''
+        print('广角相机帧率设置 %d fps：%s%s' % (
+            self.cam_fps, '失败（' + err.splitlines()[-1] + '）' if err else '成功',
+            ('；相机回报 ' + got) if got else ''), flush=True)
+
     def decode_reduce(self) -> int:
         """源宽度的 1/2 仍 ≥ 目标宽度时，用半尺寸解码省一半 CPU。"""
         try:
@@ -864,6 +886,7 @@ class WideUvcThread(threading.Thread):
                 continue
             proc = None
             try:
+                self.probe_parm(device)
                 print('广角相机取流：%s %s' % (device, self.size), flush=True)
                 proc = subprocess.Popen(self.command(), stdout=subprocess.PIPE,
                                         stderr=subprocess.PIPE, bufsize=0)
