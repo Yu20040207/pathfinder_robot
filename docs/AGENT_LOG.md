@@ -12725,3 +12725,63 @@ sudo nmcli con up 4g
 - 部署：车端脚本 + 单元（`--wide-idle-pause 15`）、云端 `car.html`
   **209690 字节 / md5 `07dfa578…`（80 端口一致）**。
 - **未验证**：手机真机在导航模式里连续切换的手感/是否还黑。
+
+---
+
+## 2026-11-25 12:10 异地看画面：车端主动中继 + 云端 MJPEG 转发（已部署，低码率档待重启生效）
+
+**背景**：手机只有在办公室 WiFi 里才能看画面——`/media` 下发的是**机器人局域网 IP**
+（`http://192.168.0.24:8081/video`）。控制本来走云 MQTT（车主动连
+`8.163.69.109:1883`），所以异地能控、不能看。用户要求"延迟低"，先按最省事的方案做。
+
+**架构（5 台规模，不做 100 台那套）**
+
+```
+手机 http(s)://<云端>/car/ ──同源──► /api/devices/<id>/stream?cam=&profile=low&t=<短时令牌>
+                                        │ jc-api 逐帧转发（X-Accel-Buffering: no）
+                                        ▼
+                              车端 fwr-media-relay ──WS 拨出──► /ws/media/<id>
+                                        ▼
+                              本机 127.0.0.1:8081/video?cam=&profile=low
+```
+
+- 车端只**拨出**（`tools/media_relay.py`）：`{"cmd":"play","ch":0}` 开流、`stop` 停流；
+  上行二进制 = 1 字节通道 + 完整 JPEG；**每通道只留最新一帧**（排队=故意加延迟）。
+- 云端（`cloud/api/app.py`）：`/ws/media/<id>`（共享密钥 `JC_MEDIA_TOKEN`）
+  + `/api/devices/<id>/stream`（同源 multipart，**短时 180 s 观看令牌**，不能用登录令牌）
+  + `/api/media/health`（在线/路数/累计字节）。上限 `JC_MEDIA_MAX_CLIENTS=6`。
+- `/media` 多返回 `remote`，车只挂 4G 没有局域网地址时**不再 404**（返回空 `url`）。
+- 页面：局域网直连 → **2.5 s 没出图就自动切中继**（手动 / 导航两块都切，
+  切之前先刷新 3 分钟令牌）；中继一律低码率档。
+
+**低码率档**：`robot_mjpeg_server.py` 新增 `?profile=low` → 320 宽 / 12 fps / q60
+（`--low-width/--low-fps/--low-quality`），**有人看才转码**（`FrameHub.attach_low`），
+局域网直连仍是原来的 480 宽 20 fps。
+
+**实测（已验证）**
+- 本机端到端（假 MJPEG + 真 jc-api + 真中继，`tools/check_media_relay_e2e.py`）：
+  11.9 fps、**中继延迟中位 1 ms / P90 2 ms**（回环，证明逐帧透传**没有缓冲**）。
+- 真机经公网（办公室 WiFi → 云端 → 车）：主摄 / 广角都 **19.0 fps**，
+  3.64 / 3.19 Mbps（**这是没重启 fwr-media 的老画质**，低码率档还没生效）。
+- 云端 `api/media/health`：`online:true`，10 s 累计 154 帧 / 3.68 MB。
+- 单测：`tests/test_media_relay.py` 20 例、`tests/test_cloud_media_relay.py` 11 例
+  （需 fastapi/httpx：`/tmp/jcvenv`）、`tests/test_page_remote_media.py` 6 例。
+
+**⚠️ 域名踩坑（关键，别再白试）**
+- `ws://jccontrol.xyz/ws/media/...` → **403**，响应头 `Server: Beaver` =
+  **阿里云「未备案」拦截页**（Non-compliance ICP Filing）；`/api/health` 也一样。
+- 该域名的 80 端口 server 块还会 **301 跳 https**，而 `443` 目前 **TLS 直接 reset**。
+- 同一台机器用**公网 IP** `ws://8.163.69.109/...` → **101 Switching Protocols**，正常。
+- 所以车端单元里写的是 **IP**（`MEDIA_RELAY_CLOUD=ws://8.163.69.109/ws/media`）；
+  页面同理要用 `http://8.163.69.109/car/`。**要恢复域名必须先解决备案 + 443。**
+
+**部署（2026-11-25 12:05~12:08）**
+- 车端：`/etc/systemd/system/fwr-media-relay.service`（`enable --now`）、
+  `/etc/fwr/media_relay.env`（600，放 `MEDIA_RELAY_TOKEN`）。
+- 云端：`/opt/jc/api/app.py`、`/opt/jc/web/car.html`（**212299 字节**）、
+  `/etc/systemd/system/jc-api.service.d/media-relay.conf`（600）+ `restart jc-api`。
+
+**未完成 / 未验证**
+- **`fwr-media` 还没重启** → `?profile=low` 尚未生效（现在异地看仍是 3.6 Mbps）。
+  重启后应降到 ≈1.0 Mbps；**重启需用户同意**，且会顺带停掉 vision/follow（本来是 inactive）。
+- 手机真机在 4G 下的观感/延迟未测（需要真实 4G 客户端）。
