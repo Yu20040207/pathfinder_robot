@@ -145,10 +145,17 @@ class FrameHub:
         #: 低码率分身（异地走云端中继用）：有人订阅才转码，320 宽 / 12 fps
         self._low: Optional['FrameHub'] = None
         self._low_reduce = 1
+        self._low_target = 0.0       # 低码率分身的目标帧率（抽帧用）
+        self._low_acc = 0.0
+        #: 采集线程写进来的**真实源帧率**（抽帧分母）。窗口实测值在"刚恢复取流"时
+        #: 会掺着暂停期 1 帧/秒的旧样本 → 估算偏低 → 低码率档抽帧失效（20 fps 全放），
+        #: 所以广角这种会暂停的源必须显式告诉 hub 自己多少帧。
+        self.source_fps = 0.0
         self.dds_age_ms = 0.0                # DDS 链路时延（节点 stamp -> 服务收到）
         self._fps_window: list[float] = []
 
-    def attach_low(self, low: 'FrameHub', reduce: int = 1) -> None:
+    def attach_low(self, low: 'FrameHub', reduce: int = 1,
+                   target_fps: float = 0.0) -> None:
         """把低码率分身挂上来：主路收到帧、且分身有人看时，才多编一份小的。
 
         ⚠️ 不能给每条连接都编一次：客户端的 `?profile=low` 全部共用这个分身，
@@ -156,12 +163,30 @@ class FrameHub:
         """
         self._low = low
         self._low_reduce = max(1, int(reduce))
+        self._low_target = max(0.0, float(target_fps))
+        self._low_acc = 0.0
 
-    def _feed_low(self) -> 'Optional[FrameHub]':
+    def _feed_low(self, image=None, data: Optional[bytes] = None) -> None:
+        """把当前帧喂给低码率分身（**没人看就一次都不编**）。
+
+        ⚠️ 抽帧必须用 `decimate_step()` 累加器，**不能**靠"距上一帧不足 1/fps 就丢"：
+        源是 20.5 fps、目标 12 fps 时，时间阈值只会抽出 **10.2 fps**（和广角那个
+        "配 20 出 13.4" 是同一个坑，2026-11-25 实测 low 档只有 9.6 fps）。
+        """
         low = self._low
         if low is None or not low.has_clients():
-            return None
-        return low
+            return
+        if self._low_target > 0:
+            src = self.source_fps or self.fps()
+            if src > 0:
+                send, self._low_acc = decimate_step(self._low_acc,
+                                                    self._low_target, src)
+                if not send:
+                    return
+        if image is not None:
+            low.publish(image)
+        elif data is not None:
+            low.publish_jpeg(data, resample=True)
 
     # ---- 采集侧（ROS 线程 / 测试线程调用）----
     def publish(self, image: np.ndarray, real: bool = True) -> None:
@@ -192,6 +217,7 @@ class FrameHub:
             if len(self._fps_window) > 120:
                 self._fps_window = self._fps_window[-120:]
         self._event.set()
+        self._feed_low(image=image)
 
     def publish_jpeg(self, data: bytes, resample: bool = True,
                      reduce: int = 1) -> None:
@@ -242,9 +268,7 @@ class FrameHub:
             if len(self._fps_window) > 120:
                 self._fps_window = self._fps_window[-120:]
         self._event.set()
-        low = self._feed_low()
-        if low is not None:
-            low.publish_jpeg(data, resample=True)
+        self._feed_low(data=data)
 
     # ---- 读取侧 ----
     def latest(self) -> tuple[Optional[bytes], int]:
@@ -282,9 +306,18 @@ class FrameHub:
             return self._clients
 
     def has_clients(self) -> bool:
-        """有没有人在看（广角相机用它做"没人看就省电省 CPU"）。"""
+        """有没有人在看（广角相机用它做"没人看就省电省 CPU"）。
+
+        ⚠️ **低码率分身也算**：异地中继的观众挂在 `_low` 上，主 hub 自己 `_clients == 0`。
+        2026-11-25 现场：广角 low 档只出 1 帧就断——广角线程看到主 hub 没人看，
+        15 s 后 kill 掉 v4l2-ctl，而 `_low` 的观众永远等不到帧（自锁）。
+        """
         with self._lock:
-            return self._clients > 0
+            mine = self._clients > 0
+        if mine:
+            return True
+        low = self._low
+        return bool(low is not None and low.has_clients())
 
     def has_real_frames(self) -> bool:
         with self._lock:
@@ -1049,9 +1082,10 @@ class WideUvcThread(threading.Thread):
                         now = time.monotonic()
                         self._note_capture(now)
                         if self.hub.has_clients():
+                            src_fps = self.effective_source()
+                            self.hub.source_fps = src_fps
                             send, self._send_acc = decimate_step(
-                                self._send_acc, self.target_fps,
-                                self.effective_source())
+                                self._send_acc, self.target_fps, src_fps)
                             if send:
                                 # 有人看：缩到 480 宽（720p 源用半尺寸解码）
                                 self.hub.publish_jpeg(
@@ -1158,9 +1192,9 @@ def main() -> int:
     # 低码率分身：只有 `?profile=low` 有人看时才转码（异地走云端中继用）
     hub_low = None
     if args.low_width:
-        hub_low = FrameHub(quality=args.low_quality, fps=args.low_fps,
+        hub_low = FrameHub(quality=args.low_quality, fps=0,
                            width=args.low_width)
-        hub.attach_low(hub_low)
+        hub.attach_low(hub_low, target_fps=args.low_fps)
     uvc = None
     if args.v4l2:
         uvc = UvcSource(hub, args.v4l2, args.v4l2_size)
@@ -1201,9 +1235,9 @@ def main() -> int:
     topic = args.v4l2 or ('test-pattern' if args.test_pattern else args.topic)
     hub_wide_low = None
     if hub_wide is not None and args.low_width:
-        hub_wide_low = FrameHub(quality=args.low_quality, fps=args.low_fps,
+        hub_wide_low = FrameHub(quality=args.low_quality, fps=0,
                                 width=args.low_width)
-        hub_wide.attach_low(hub_wide_low)
+        hub_wide.attach_low(hub_wide_low, target_fps=args.low_fps)
     app = build_app(hub, topic, uvc, hub_wide, wide_device,
                     wide if hub_wide else None, hub_low, hub_wide_low)
     print(f'MJPEG 服务: http://{args.host}:{args.port}/video  '

@@ -12785,3 +12785,41 @@ sudo nmcli con up 4g
 - **`fwr-media` 还没重启** → `?profile=low` 尚未生效（现在异地看仍是 3.6 Mbps）。
   重启后应降到 ≈1.0 Mbps；**重启需用户同意**，且会顺带停掉 vision/follow（本来是 inactive）。
 - 手机真机在 4G 下的观感/延迟未测（需要真实 4G 客户端）。
+
+### 2026-11-25 13:55 低码率档生效（重启 fwr-media）+ 现场抓出两个"分身"相关 bug
+
+用户批准后重启 `fwr-media`，`?profile=low` 第一次真正跑到线上。**第一轮就出问题**，
+两个都是"低码率分身"引入的新坑，已修并复测：
+
+**Bug 1：广角 low 档只出 1 帧就断流（自锁）**
+- 现象：`curl 'http://127.0.0.1:8081/video?cam=wide&profile=low'` 8 s 只拿到 **1 帧**。
+- 真因：广角线程用 `hub_wide.has_clients()` 判断"有没有人看，没人看就 `--wide-idle-pause`
+  15 s 后 kill `v4l2-ctl`"，而异地观众挂在 **`hub_wide_low`** 上，主 hub 自己 `_clients==0`
+  → 15 s 后停流，分身永远等不到帧（观众在等、相机被关，互锁）。
+- 修法：`FrameHub.has_clients()` 把分身也算进来（`self._low.has_clients()`）。
+  单测 `test_has_clients_counts_low_profile_viewers`。
+
+**Bug 2：low 档帧率不受控（配 12 实测 19.9）**
+- 真因有两条：① `FrameHub` 原来靠"距上帧 < 1/fps 就丢"的时间阈值 → 20.5 fps 源抽成
+  **10.2 fps**（和广角那次的混叠是同一个坑）；② 改用 `decimate_step()` 后分母取窗口实测
+  帧率，而广角**暂停期间只有 1 帧/秒**，窗口里混着旧样本 → 估出的"源帧率"偏低（~3 fps）
+  → 抽帧全放行，实测仍 **19.9 fps**。
+- 修法：分身目标帧率用 `decimate_step()` 累加器；分母优先用采集线程写进来的
+  `hub.source_fps`（`WideUvcThread` 每帧写入 `effective_source()`），没有才退回窗口实测。
+
+**实测（已验证，2026-11-25 13:55~14:00）**
+
+| 路径 | 帧率 | 每帧 | 码率 |
+| --- | --- | --- | --- |
+| 局域网原画质（对照） | 20.5 fps | 23.3 KB | **3.92 Mbps** |
+| low 主摄（本机） | 11.8 fps | 10.9 KB | **1.05 Mbps** |
+| low 广角（本机） | 9.1 fps | 10.7 KB | **0.80 Mbps** |
+| low 主摄（经公网中继，办公室 WiFi） | 11.9 fps | 10.9 KB | **1.06 Mbps** |
+| low 广角（经公网中继） | 9.3 fps | 10.7 KB | **0.82 Mbps** |
+
+- `fwr-media` 观看 low 档时 CPU **20.9%**；`/api/media/health` 累计转发 519 帧 / 9.21 MB。
+- 5 台同时看按 1.1 Mbps/台 ≈ **5.5 Mbps**，云端出网 16.8 Mbps 有余量（原画质 3.9 Mbps/台 就不行了）。
+- 回归：`tests/test_mjpeg_wide_camera.py` **37 例**（新增分身观众计数、分身才喂帧、
+  抽帧分母显式传入 3 条）。
+- **未验证**：真·4G 手机端的流畅度与端到端延迟（需要用户拿手机在 4G 下看）。
+- ⚠️ 重启 `fwr-media` 会按设计停掉 `fwr-vision`/`fwr-follow`（本次它们本来就是 inactive）。

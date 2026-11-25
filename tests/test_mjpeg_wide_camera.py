@@ -317,7 +317,10 @@ def test_decimation_uses_measured_source_rate():
     """相机宣称 30、实际 20：拿 30 当分母会把 20fps 抽成 13.3（2026-11-25 现场）。"""
     src = SERVER.read_text(encoding='utf-8')
     assert 'def effective_source' in src
-    assert 'self.effective_source())' in src
+    # 分母必须是实测帧率，并且要写进 hub（低码率档抽帧也用它）
+    assert 'self.effective_source()' in src
+    assert 'self.hub.source_fps = src_fps' in src
+    assert 'src = self.source_fps or self.fps()' in src
     # 源帧率等于目标时，必须每帧都发
     acc, sent = 0.0, 0
     for _ in range(20):
@@ -342,3 +345,54 @@ def test_wide_camera_stops_when_nobody_watches():
     assert '--wide-idle-pause' in src
     assert 'idle_pause_s' in src
     assert '停流释放设备' in src
+
+
+def _frame_hub_class():
+    """把 `FrameHub` 类单独 exec 出来（服务端模块依赖 aiohttp/rclpy，测试环境不一定有）。"""
+    import ast
+    import cv2
+    import numpy as np
+    tree = ast.parse(SERVER.read_text(encoding='utf-8'))
+    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'FrameHub')
+    ns = {'cv2': cv2, 'np': np, 'time': __import__('time'),
+          'threading': __import__('threading'), 'Optional': object}
+    exec(compile(ast.Module(body=[cls], type_ignores=[]), '<hub>', 'exec'), ns)
+    return ns['FrameHub']
+
+
+def test_has_clients_counts_low_profile_viewers():
+    """⚠️ 2026-11-25 现场：异地观众挂低码率分身，主 hub 自己 `_clients==0`。
+
+    广角线程靠 `hub.has_clients()` 决定"没人看就 kill v4l2-ctl"，
+    如果只数自己的连接，广角 low 档会**只出 1 帧就停流**（现场实测 8 s 1 帧）。
+    """
+    Hub = _frame_hub_class()
+    hub = Hub(quality=60, fps=0, width=480)
+    low = Hub(quality=60, fps=12, width=320)
+    hub.attach_low(low)
+    assert hub.has_clients() is False
+    low.add_client(1)
+    assert hub.has_clients() is True, '低码率分身的观众必须算"有人在看"'
+    low.add_client(-1)
+    assert hub.has_clients() is False
+
+
+def test_low_hub_only_gets_frames_when_someone_watches_it():
+    """没人看 low 档就不许多编一份（否则白烧 CPU，还会拖慢局域网那条）。"""
+    Hub = _frame_hub_class()
+    hub = Hub(quality=60, fps=0, width=480)
+    low = Hub(quality=60, fps=12, width=320)
+    import cv2
+    import numpy as np
+    hub.attach_low(low)
+    ok, buf = cv2.imencode('.jpg', np.full((360, 480, 3), 40, np.uint8))
+    assert ok
+    raw = buf.tobytes()
+    hub.publish_jpeg(raw, resample=False)
+    assert low.latest()[0] is None, '没人看时不该给分身喂帧'
+    low.add_client(1)
+    hub.publish_jpeg(raw, resample=False)
+    got = low.latest()[0]
+    assert got is not None, '有人看时必须喂帧'
+    small = cv2.imdecode(np.frombuffer(got, np.uint8), cv2.IMREAD_COLOR)
+    assert small.shape[1] == 320, '分身要缩到 320 宽'
