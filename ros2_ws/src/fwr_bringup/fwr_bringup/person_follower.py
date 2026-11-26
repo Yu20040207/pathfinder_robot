@@ -37,7 +37,7 @@ from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import String
 
-from fwr_bringup.follow_core import (DEFAULTS, OscGuard, adopt_moving_track, bearing_ema, cam_bearing, decide, door_clear, door_metrics, door_swept_radius, flip_confirm, lidar_backed, lidar_drive_allowed, lidar_follow, lidar_search_cmd, limit_pair, passage_metrics, pick_lidar_track, predict_person, reacquire_track, reacq_cap, scan_metrics)
+from fwr_bringup.follow_core import (DEFAULTS, OscGuard, adopt_moving_track, bearing_ema, cam_bearing, decide, door_clear, door_metrics, door_swept_radius, flip_confirm, lidar_backed, lidar_drive_allowed, lidar_follow, lidar_search_cmd, limit_pair, passage_metrics, pick_lidar_track, predict_person, rate_damp, reacquire_track, reacq_cap, scan_metrics)
 
 
 class PersonFollower(Node):
@@ -55,6 +55,10 @@ class PersonFollower(Node):
         self.reacq_soft_s = float(p('reacq_soft_s', 0.80).value)
         self.reacq_wmax = float(p('reacq_wmax', 0.40).value)
         self.reacq_soft_ex = float(p('reacq_soft_ex', 0.45).value)
+        # 中线圈用**实测转速**做阻尼（2026-11-26 "对准左右摆"）：帧间误差导数比真实
+        # 转动晚 1~2 帧，而底盘占空比爬升又让车在收力后继续转，纯 PD 永远迟一步。
+        self.yaw_rate_kd = float(p('yaw_rate_kd', 0.90).value)
+        self.yaw_rate_window = float(p('yaw_rate_window', 0.25).value)
         # 跟随专用参数（ROS 参数可覆盖，默认值见 follow_core.DEFAULTS）
         self.p = {k: type(v)(p(k, v).value) for k, v in DEFAULTS.items()}
         self.v_accel = float(p('v_accel', 0.60).value)      # m/s²
@@ -112,6 +116,7 @@ class PersonFollower(Node):
         # "显示跟随中但车不动"检测（2026-11-21 实机踩坑）：底盘整帧丢弃命令时
         # 页面完全看不出来。这里对比"我发的 v"和"里程计实际速度"。
         self.odom_v = 0.0
+        self.odom_w = 0.0
         self._odom_at = 0.0
         self._nomotion_s = 0.0
         self.nomotion = False
@@ -158,10 +163,14 @@ class PersonFollower(Node):
                self.p['corridor_m'], self.p['front_hard_m'], self.p['back_hard_m'],
                self.p['face_ex'] * 100, self.p['yaw_kp'], self.p['yaw_kd'],
                self.p['steer_wmax']))
+        self.get_logger().info(
+            '对准阻尼：实测转速 kd %.2f（中线圈 |误差|<%.0f%%）'
+            % (self.yaw_rate_kd, self.yaw_rate_window * 100))
 
     # ------------------------------------------------------------ 回调
     def on_odom(self, msg: Odometry) -> None:
         self.odom_v = float(msg.twist.twist.linear.x)
+        self.odom_w = float(msg.twist.twist.angular.z)   # 实测转速，给对准阻尼用
         self._odom_at = time.monotonic()
         # P2：把雷达轨迹（odom 系）换算到车体系要用位姿；跟随只在车体系里算
         q = msg.pose.pose.orientation
@@ -335,6 +344,7 @@ class PersonFollower(Node):
                    'nomotion': bool(self.nomotion),
                    'err_dot': round(float(self.err_dot), 2),
                    'osc_gain': round(float(self.osc_gain), 2),
+                   'odom_w': round(float(self.odom_w), 3),
                    'lidar_bearing_deg': (round(math.degrees(self._lidar_bearing), 1)
                                          if self._lidar_bearing is not None else None),
                    'lidar_rate_deg_s': round(math.degrees(self._lidar_rate), 1),
@@ -599,6 +609,21 @@ class PersonFollower(Node):
                 and self._ema['cx'] is not None):
             w = reacq_cap(w, float(self._ema['cx']) - 0.5, True,
                           self.reacq_wmax, self.reacq_soft_ex)
+
+        # 中线圈转速阻尼：车已经在转就先把指令压回来（**用实测转速，没有帧延迟**）。
+        # 只在相机驱动、误差已经不大时生效，大误差照旧满速。
+        if (reason in ('facing', 'following', 'obstacle_slow')
+                and self._ema['cx'] is not None
+                and (now - self._odom_at) < 0.3):
+            w_was = w
+            w = rate_damp(w, float(self._ema['cx']) - 0.5, self.odom_w,
+                          self.yaw_rate_kd, self.yaw_rate_window, self.p['wmax'])
+            # 现场核对用：只在"阻尼真的压了明显一截"时打一行（3 s 节流）
+            if abs(w - w_was) > 0.20:
+                self.get_logger().info(
+                    '对准阻尼：指令 %+.2f → %+.2f（实测 ω %+.2f，误差 %+.2f）'
+                    % (w_was, w, self.odom_w, float(self._ema['cx']) - 0.5),
+                    throttle_duration_sec=3.0)
 
         # —— 雷达续跟接管（2026-11-24）——
         # 只在**相机已经丢人**（target_lost/no_target/target_gone）时接管；

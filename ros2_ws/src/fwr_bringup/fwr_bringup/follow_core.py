@@ -749,6 +749,27 @@ def door_clear(front_lon, p: dict | None = None) -> bool:
     return front_lon < -(door_swept_radius(q) + q['door_clear_margin_m'])
 
 
+def rate_damp(w: float, err: float, w_meas: float, kd: float = 0.9,
+              window: float = 0.25, wmax: float = 0.74) -> float:
+    """中线圈里用**实测转速**做阻尼，专治"对准时左右摆"。
+
+    为什么不能用帧间误差导数：框中心的变化率比真实转动**晚 1~2 帧**（相机 15 fps +
+    检测 12 Hz + EMA），而底盘占空比爬升（固件 `DUTY_RAMP_PER_S 0.5`）又让车在
+    "命令归零之后"继续转 0.5~1.2 s。于是"看到对准了 → 收力"永远迟一步 →
+    过冲 → 反着修 → 来回摆（2026-11-26 用户反复报的现象）。
+
+    实测转速（`/odom` 的 `twist.angular.z`）**没有这个延迟**，直接拿它做
+    "反向制动"：车已经在左转，就先把指令往右压一点。只在 `|err| < window`
+    的中线圈里生效（大误差还要满速追，别把掉头/大角度对准变慢），
+    越靠近中线阻尼越强（`1 - |err|/window`）。
+    """
+    if abs(err) >= window or kd <= 0.0:
+        return w
+    gain = 1.0 - abs(err) / window
+    out = w - kd * gain * float(w_meas)
+    return max(-wmax, min(wmax, out))
+
+
 def reacq_cap(w: float, err: float, active: bool,
               soft_wmax: float = 0.40, soft_ex: float = 0.45) -> float:
     """重新认领目标后的"软对准"：框还在画面边缘时不许提前收力。
