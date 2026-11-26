@@ -13524,3 +13524,22 @@ gitee 搜索 API 返回空数组、GitHub 不通 → **拿不到官方文档和�
 **已验证**：`test_manual_speed_chain.py` 3 passed；页面内联 script `node --check` 通过；
 `sendCmd(mjx, mjy);` 旧写法 0 处残留（3 处都带 `MAP_MAX_*`）。
 **未验证**：手机摇杆满推是否真 0.40（要部署 ECS + 重启 jc-api 后实测）。
+
+**部署（2026-11-26 14:12，已获批）**
+- ECS：`car.html` → `/opt/jc/web/car.html`，`http://127.0.0.1/car/` 返回 **200 / 219631 B**，
+  md5 `a8f9666a…` **与本地完全一致**；页面里 `MAX_LINEAR = 0.40, MAX_ANGULAR = 0.74`、
+  `MAP_MAX_LINEAR = 0.30, MAP_MAX_ANGULAR = 0.60` 都在。
+- ECS：`/etc/systemd/system/jc-api.service.d/speed.conf` 落地 + `daemon-reload` + `restart jc-api`；
+  `systemctl is-active jc-api` = **active**，进程环境 **`JC_MAX_LINEAR=0.40` / `JC_MAX_ANGULAR=0.74`**；
+  journal 无 error/Traceback，`GET /api/media/health` → `car-001 online:true`。
+
+**四道闸现在的实际值（全部 0.40 / 0.74）**
+| 闸 | 位置 | 实测值 |
+| --- | --- | --- |
+| ① | 页面 `MAX_LINEAR/MAX_ANGULAR` | 0.40 / 0.74（ECS 页面 md5 核对） |
+| ② | 云端 `jc-api` env | `JC_MAX_LINEAR=0.40` / `JC_MAX_ANGULAR=0.74`（/proc 读取） |
+| ③ | 车端 `mqtt_bridge` | `max_linear_mps:=0.40` / `max_angular_rps:=0.74`（进程参数） |
+| ④ | 底盘 `base_bridge` | `manual_max_speed_mps` = 0.4（ros2 param get） |
+
+**未验证**：手机满推的实际车速（需用户实测）。若仍看到 0.30，说明手机拿的是旧页面
+（`Cache-Control: no-store` 已确认存在，普通刷新应能拿到新页）。
