@@ -130,3 +130,32 @@ def test_follow_picture_sits_at_top_like_other_modes():
     head = body.split('#followTop {')[1].split('}')[0]
     assert 'background: transparent' in head
     assert 'text-shadow' in body.split('#followTop #followHint {')[1].split('}')[0]
+
+
+def test_follow_ui_refresh_corner_bigger_joystick_and_two_buttons():
+    """2026-11-26 用户要求（跟随模式）：① 刷新键放到画面右下角 ② 摇杆再大一点
+    ③ 加「开始跟随 / 停止跟随」两颗按键。
+
+    画面块做成 4:3 后，刷新键的 right/bottom 就贴着**画面**角（原来贴在整块 stage
+    的角上，画面贴顶后那个角在黑区里）。
+    """
+    body = text()
+    # ① 画面块 = 4:3，刷新键在块内右下角
+    stage = body.split('#followStage {')[1].split('}')[0]
+    assert 'aspect-ratio: 4 / 3' in stage
+    assert 'flex: none' in stage
+    refresh = body.split('#followRefresh {')[1].split('}')[0]
+    assert 'right: 10px' in refresh and 'bottom: 10px' in refresh
+    # ② 摇杆 104 → 136，旋钮 44 → 58，半径按元素算（写死 52 会让活动范围错）
+    joy = body.split('#followJoy {')[1].split('}')[0]
+    assert 'width: 136px' in joy and 'height: 136px' in joy
+    knob = body.split('#followKnob {')[1].split('}')[0]
+    assert 'width: 58px' in knob
+    assert 'const FR = fRadius();' in body
+    assert 'const FR = 52;' not in body
+    # ③ 两颗按钮常驻（用 disabled 变暗，不再用 .hidden 跳位置）
+    assert '>开始跟随</button>' in body and '>停止跟随</button>' in body
+    assert '取消跟踪' not in body
+    assert "$('followCancel').disabled = !followOn;" in body
+    assert "$('followGo').disabled = !(followSel >= 0 && !followOn);" in body
+    assert "#followGo, #followCancel { flex: 1 1 0;" in body

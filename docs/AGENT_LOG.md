@@ -12943,3 +12943,23 @@ sudo nmcli con up 4g
 **验证**：`tests/test_page_remote_media.py::test_follow_picture_sits_at_top_like_other_modes`；
 内联 script `node --check` 通过；页面 217619 B / md5 `ba389bfe…` 与 80 端口一致。
 **未验证**：手机实际观看效果（需用户刷新页面看）。
+
+### 2026-11-26 11:15 跟随模式界面：刷新键贴画面角 / 摇杆放大 / 开始+停止按钮常驻
+
+用户要求：「刷新的按键也放到画面的右下角，并且摇杆再大一点，加上开始跟随和停止跟随这两个按键」。
+
+**改动（全在 `cloud/web/car.html`）**
+1. `#followStage` 从 `flex:1` 改成 **`flex:none; width:100%; aspect-ratio:4/3; max-height:70vh`**
+   → 画面块 = 画面本身，`#followRefresh`（`right:10px; bottom:10px`）自然贴在**画面**右下角。
+   之前画面贴顶后，刷新键还挂在整块 stage 的角上（= 黑区底部，离画面很远）。
+   `#followJoyWrap` 加 `margin-top:auto` 把摇杆+按钮顶到屏幕底部。
+2. 摇杆 **104 → 136 px**、旋钮 **44 → 58 px**；⚠️ 半径原来写死 `const FR = 52`
+   （=104/2），改成 `const fRadius() = 元素宽度/2`，否则放大后活动范围只有 76% 且推不到边。
+3. 底部按钮：「取消跟踪」改名 **「停止跟随」**，与「开始跟随」**常驻各占一半宽**
+   （`flex:1 1 0`，字号 15、加粗）。**不再用 `.hidden` 切换显隐**（会让按钮跳位置），
+   改成 `disabled` + `opacity:.38` 变暗：没选人时「开始跟随」不可用、没在跟时「停止跟随」不可用。
+   状态在 `drawFollow()` 里更新，`followStart/followStop/followSelect` 都会调它，所以点完立即生效。
+
+**验证**：`tests/test_page_remote_media.py::test_follow_ui_refresh_corner_bigger_joystick_and_two_buttons`；
+页面测试 28 例（含相机切换、建图布局）全过；`node --check` 通过；
+页面 218739 B / md5 `f040eb85…` 与 80 端口一致。**未验证**：手机实际手感与按钮尺寸。

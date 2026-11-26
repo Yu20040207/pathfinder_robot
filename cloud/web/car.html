@@ -276,7 +276,11 @@
   #followView { position: absolute; inset: 0; display: flex; flex-direction: column;
     background: #000; }
   #followView.hidden { display: none; }
-  #followStage { position: relative; flex: 1; min-height: 0; display: flex;
+  /* 2026-11-26 用户要求：① 刷新键放到**画面**右下角 ② 摇杆再大一点 ③ 加开始/停止跟随按钮。
+     画面块直接做成 4:3（= 画面本身），刷新键的 right/bottom 就自然贴着画面角；
+     摇杆和按钮用 `margin-top:auto` 顶到屏幕底部。 */
+  #followStage { position: relative; flex: none; width: 100%; aspect-ratio: 4 / 3;
+    max-height: 70vh; min-height: 0; display: flex;
     align-items: center; justify-content: center; }
   /* 2026-11-26 用户要求「画面放到最上面，跟其他模式的画面一样」：
      原来 4:3 画面在整块区域里**垂直居中**，上下各一条黑边，看起来没贴顶。
@@ -285,8 +289,8 @@
                object-position: top center; display: block; }
   #followCanvas { position: absolute; inset: 0; width: 100%; height: 100%;
     touch-action: manipulation; }
-  #followRefresh { position: absolute; right: 8px; bottom: 8px; z-index: 3;
-    width: 40px; height: 40px; padding: 0; border: 0; border-radius: 50%;
+  #followRefresh { position: absolute; right: 10px; bottom: 10px; z-index: 4;
+    width: 42px; height: 42px; padding: 0; border: 0; border-radius: 50%;
     background: none; color: #f0f6fc; font-size: 38px; line-height: 1;
     display: none; align-items: center; justify-content: center;
     text-shadow: 0 0 3px rgba(0, 0, 0, .95), 0 0 1px rgba(0, 0, 0, 1);
@@ -310,20 +314,26 @@
   #followHint b { color: #3fb950; }
   /* 与导航栏按钮完全同一套尺寸/圆角/字号（用户 2026-11-21 明确要求） */
   /* 跟随模式的小摇杆（用户 2026-11-21 要求：放在画面下面、做小一点） */
-  #followJoyWrap { flex: none; display: flex; justify-content: center; padding: 2px 0 4px; }
-  #followJoy { width: 104px; height: 104px; border-radius: 50%; position: relative;
+  #followJoyWrap { flex: none; margin-top: auto; display: flex; justify-content: center;
+                   padding: 6px 0 8px; }
+  #followJoy { width: 136px; height: 136px; border-radius: 50%; position: relative;
                background: radial-gradient(circle at 50% 50%, #1f6f3a 0%, #0d3b22 70%);
                border: 2px solid #2ea043; box-shadow: 0 0 12px rgba(46,160,67,.28);
                touch-action: none; }
-  #followKnob { position: absolute; left: 50%; top: 50%; width: 44px; height: 44px;
+  #followKnob { position: absolute; left: 50%; top: 50%; width: 58px; height: 58px;
                 border-radius: 50%; transform: translate(-50%,-50%);
                 background: #2ea043; box-shadow: 0 1px 4px rgba(0,0,0,.5); }
-  #followGo, #followCancel { flex: none; padding: 12px 14px; border-radius: 10px;
-    font-size: 14px; border: 1px solid #30363d;
-    background: rgba(22, 27, 34, .92); color: #e6edf3; }
+  /* 「开始跟随 / 停止跟随」常驻，各占一半宽度（用户 2026-11-26 要求）。
+     ⚠️ 不再用 `.hidden` 切换显隐（会让按钮跳位置），改用 `disabled` + 变暗。 */
+  #followGo, #followCancel { flex: 1 1 0; padding: 14px 10px; border-radius: 10px;
+    font-size: 15px; font-weight: 600; border: 1px solid #30363d;
+    background: rgba(22, 27, 34, .92); color: #e6edf3;
+    -webkit-tap-highlight-color: transparent; }
   #followGo { border-color: #238636; color: #3fb950; }
   #followCancel { border-color: #f85149; color: #ff7b72; }
-  #followGo.hidden, #followCancel.hidden { display: none; }
+  #followGo:disabled, #followCancel:disabled { opacity: .38; }
+  #followGo:active:not(:disabled), #followCancel:active:not(:disabled) {
+    background: rgba(56, 189, 248, .22); }
 
   #camErr { position: absolute; inset: 0; display: flex; align-items: center;
             justify-content: center; text-align: center; color: #ff7b72;
@@ -728,8 +738,8 @@
     </div>
     <div id="followJoyWrap"><div id="followJoy"><div id="followKnob"></div></div></div>
     <div id="followBar">
-      <button id="followGo" class="hidden">开始跟随</button>
-      <button id="followCancel" class="hidden">取消跟踪</button>
+      <button id="followGo" disabled>开始跟随</button>
+      <button id="followCancel" disabled>停止跟随</button>
     </div>
   </div>
 
@@ -4468,10 +4478,11 @@ function drawFollow() {
     } else {
       hint.textContent = '画面里还没识别到人（走近一点、别背对镜头）';
     }
-    $('followCancel').classList.toggle('hidden', !followOn);
-    $('followGo').classList.toggle('hidden', !(followSel >= 0 && !followOn));
-    if ($('followGo') && !followOn) {
-      $('followGo').textContent = robotState.manual ? '开始跟随' : '授权并跟随';
+    // 两颗按钮常驻：不可用时变暗而不是消失（用户 2026-11-26 要求「加上这两个按键」）
+    if ($('followCancel')) $('followCancel').disabled = !followOn;
+    if ($('followGo')) {
+      $('followGo').disabled = !(followSel >= 0 && !followOn);
+      if (!followOn) $('followGo').textContent = robotState.manual ? '开始跟随' : '授权并跟随';
     }
   }
 }
@@ -4736,7 +4747,9 @@ $('followCanvas').onclick = (ev) => {
 
 /* ---- 跟随模式小摇杆：一碰就退出自动跟随，交给人手动开 ---- */
 const followJoyEl = $('followJoy'), followKnobEl = $('followKnob');
-const FR = 52;                    // 半径（元素 104px）
+// ⚠️ 半径不能用写死的常量：摇杆大小改过一次（104 → 136 px），写死会让活动范围缩放错。
+// 每次按事件算 radius，摇杆再改尺寸也不用动这里。
+const fRadius = () => followJoyEl.getBoundingClientRect().width / 2;
 let fJoyActive = false, fjx = 0, fjy = 0;
 function fEventPoint(e) {
   const t = (e.touches && e.touches[0]) || (e.changedTouches && e.changedTouches[0]) || e;
@@ -4746,6 +4759,7 @@ function fEventPoint(e) {
 // ⚠️ 必须写共享的 jx/jy/joyActive：50 ms 的 sendTimer 只认这三个，
 // 否则"按住不动"时一条指令都不发 → 底盘 TTL(800 ms) 到点就停 → 一卡一卡（2026-11-21）。
 function fMoveKnob(dx, dy) {
+  const FR = fRadius();
   const len = Math.hypot(dx, dy), k = len > FR ? FR / len : 1;
   const x = dx * k, y = dy * k;
   followKnobEl.style.transform = `translate(calc(-50% + ${x}px), calc(-50% + ${y}px))`;
