@@ -14399,4 +14399,7 @@ build_system_prompt(now=None)  # SYSTEM_PROMPT + time_sentence()
 - 回归测试 `tests/test_page_speed_bar.py` 改成钉死"**只有跟随一条**"
   （手动块 DOM 里不许出现 `spdBar`、`#spdBarManual`/`#spdBarNav` 都不许加回来），
   相关子集 **37 passed**；JS `node --check` 通过。
-- **状态**：已提交，**页面未部署**（等用户批准）。
+- **状态**：已提交 `b18817e`，**已部署（2026-11-26 17:28）**：
+备份 `car.html.bak.20261126-1728` → `cat >` 覆盖；ECS md5 `61eeb3f5…` = 本地；
+`http://127.0.0.1/car/` → **200 / 222741 B**；线上 `spdBarManual` **0**、`spdBarNav` **0**、
+`spdBarFollow` **1**（= 只剩跟随那一条）。
