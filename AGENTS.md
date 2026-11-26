@@ -676,14 +676,14 @@
   （0.5 m 处 ±35°、横向 0.29 m）会被当成障碍 → **人出门后车出不了门**。
   现在 `scan_metrics` 只把横向 |lat| ≤ **0.22 m**（车身半宽 0.215 + 5 mm）的点算障碍，
   走廊内 0.35 m 停、0.60 m 降速。侧向 ±30~70° 仍只看距离，用于判断"能不能转"。
-- 参数（全部**跟随专用**，不动 `real_nav2.yaml`）：`vmax 0.29`、`wmax 0.70`、
+- 参数（全部**跟随专用**，不动 `real_nav2.yaml`）：`vmax 0.38`、`wmax 0.74`、
   `yaw_kp 2.4`（第七版 PD；第一版 2.2 跟不住人横走、第三版 3.5 又摆，取中间）、
   `yaw_kd 0.9`、`v_accel 0.60`、`w_accel 3.0`、
   `corridor_m 0.22`、`front_hard_m 0.35`、`front_slow_m 0.60`、
   `side_clear_m 0.30`、`lost_stop 0.8`、`lost_abort 3.0`、
   `face_ex 0.30`、`back_box_h 0.92`、`back_release_box_h 0.85`、`back_vmax 0.22`（2026-11-26 上调，随前进一起算单轮包络 0.287 < 0.29）、
-  `back_hard_m 0.30`、`back_slow_m 0.60`、`follow_hz 20`、`smooth_alpha 0.35`、
-  `max_wheel_mps 0.29`、`track_m 0.317`、`yaw_kd 0.9`、`steer_wmax 0.42`、
+  `back_hard_m 0.30`、`back_slow_m 0.60`、`follow_hz 20`、`smooth_alpha 0.50`（2026-11-26 0.35→0.50）、
+  `max_wheel_mps 0.38`、`track_m 0.317`、`yaw_kd 0.9`、`steer_wmax 0.74`、
   `gate_look_m 1.10`、`gate_half_span_m 1.20`、`gate_min_gap_m 0.55`、`gate_wide_m 1.05`、
   `gate_align_m 0.07`、`gate_kp 2.5`、`gate_wmax 0.45`、`gate_vmax 0.18`、`gate_hold_s 0.35`、
   `align_first_m 0.80`、`align_first_ex 0.12`、
