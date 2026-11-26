@@ -1,6 +1,8 @@
 """ROS 2 adapter for voice input and high-level tasks."""
 
 from concurrent.futures import ThreadPoolExecutor
+import json
+import os
 import threading
 import uuid
 
@@ -20,7 +22,8 @@ from .intent import parse_local
 from .pipeline import VoicePipeline
 from .providers import OpenAICompatibleProvider
 from .task_slot import TaskSlot
-from .tts import DashscopeCosyVoiceTts, FallbackTts, SherpaVitsTts
+from .tts import (DashscopeCosyVoiceTts, FallbackTts, SeedTts,
+                 SherpaVitsTts, VolcengineTts)
 from .wake import EchoGuard, WakeGate, is_goodbye
 
 
@@ -31,6 +34,12 @@ def allow_during_playback(text: str, locations) -> bool:
 
 def log_text(text: str) -> str:
     return text.replace("\n", " ").replace("\r", " ")[:500]
+
+
+def audio_device(value):
+    """空字符串/None 一律当作「用 ALSA default」。"""
+    text = str(value or "").strip()
+    return text or None
 
 
 class VoiceNode(Node):
@@ -46,11 +55,32 @@ class VoiceNode(Node):
         self.declare_parameter("tts_cloud_model", "cosyvoice-v3-flash")
         self.declare_parameter("tts_cloud_voice", "")
         self.declare_parameter("tts_cloud_websocket_url", "")
+        self.declare_parameter("tts_volc_voice_type", "")
+        self.declare_parameter("tts_volc_cluster", "volcano_tts")
+        self.declare_parameter("tts_volc_endpoint", VolcengineTts.DEFAULT_ENDPOINT)
+        self.declare_parameter("tts_volc_encoding", "pcm")
+        self.declare_parameter("tts_volc_appid_env", "FWR_VOLC_APPID")
+        self.declare_parameter("tts_volc_token_env", "FWR_VOLC_TOKEN")
+        # 豆包语音「语音合成 2.0 / Seed-TTS」：鉴权走 X-Api-Key + X-Api-Resource-Id，
+        # 和上面的经典版不是一套（详见 tts.SeedTts 文档）。
+        self.declare_parameter("tts_seed_voice", "saturn_zh_female_keainvsheng_tob")
+        self.declare_parameter("tts_seed_resource_id", SeedTts.DEFAULT_RESOURCE_ID)
+        self.declare_parameter("tts_seed_endpoint", SeedTts.DEFAULT_ENDPOINT)
+        self.declare_parameter("tts_seed_encoding", "pcm")
+        self.declare_parameter("tts_seed_apikey_env", "FWR_VOLC_APIKEY")
         self.declare_parameter("cloud_base_url", "")
         self.declare_parameter("cloud_model", "")
         self.declare_parameter("cloud_api_key_env", "FWR_LLM_API_KEY")
+        # 各家兼容接口的私有字段，JSON 字符串。方舟关思考要传
+        #   {"thinking":{"type":"disabled"}}
+        # 不传的话思考型模型会先吐 2~3 秒 reasoning_content，语音场景不能接受。
+        self.declare_parameter("cloud_extra_json", "")
         self.declare_parameter("input_wav", "")
         self.declare_parameter("microphone_enabled", False)
+        # 留空 = 走 ALSA default；显式指定写成 plughw:1,0 / hw:1,0 之类。
+        # 电池机与主控的声卡编号不同（开发机 mic=card1、主控 mic=card0），必须可配。
+        self.declare_parameter("microphone_device", "")
+        self.declare_parameter("speaker_device", "")
         self.declare_parameter("wake_word", "小明同学")
         self.declare_parameter("wake_timeout_s", 30.0)
         self.declare_parameter("simulation", True)
@@ -63,9 +93,12 @@ class VoiceNode(Node):
         asr_dir = self.get_parameter("asr_model_dir").value
         tts_dir = self.get_parameter("tts_model_dir").value
         cloud_url = self.get_parameter("cloud_base_url").value
+        self.microphone_device = audio_device(self.get_parameter("microphone_device").value)
+        speaker_device = audio_device(self.get_parameter("speaker_device").value)
         self.asr = SherpaSenseVoice(asr_dir) if asr_dir else None
         local_tts = (SherpaVitsTts(
             tts_dir,
+            device=speaker_device,
             speaker_id=int(self.get_parameter("tts_speaker_id").value),
             speed=float(self.get_parameter("tts_speed").value)) if tts_dir else None)
         provider = self.get_parameter("tts_provider").value
@@ -75,19 +108,58 @@ class VoiceNode(Node):
                 model=self.get_parameter("tts_cloud_model").value,
                 key_env=self.get_parameter("cloud_api_key_env").value,
                 websocket_url=self.get_parameter("tts_cloud_websocket_url").value,
-                speed=float(self.get_parameter("tts_speed").value))
+                speed=float(self.get_parameter("tts_speed").value),
+                device=speaker_device)
             self.tts = (FallbackTts(
                 cloud_tts, local_tts,
                 on_fallback=lambda reason: self.get_logger().warning(
                     f"百炼语音不可用，使用本地音色: {reason}"))
                 if local_tts else cloud_tts)
+        elif provider == "volcengine":
+            cloud_tts = VolcengineTts(
+                self.get_parameter("tts_volc_voice_type").value,
+                cluster=self.get_parameter("tts_volc_cluster").value,
+                endpoint=self.get_parameter("tts_volc_endpoint").value,
+                encoding=self.get_parameter("tts_volc_encoding").value,
+                appid_env=self.get_parameter("tts_volc_appid_env").value,
+                token_env=self.get_parameter("tts_volc_token_env").value,
+                speed=float(self.get_parameter("tts_speed").value),
+                device=speaker_device)
+            self.tts = (FallbackTts(
+                cloud_tts, local_tts,
+                on_fallback=lambda reason: self.get_logger().warning(
+                    f"豆包语音不可用，使用本地音色: {reason}"))
+                if local_tts else cloud_tts)
+        elif provider == "doubao":
+            cloud_tts = SeedTts(
+                self.get_parameter("tts_seed_voice").value,
+                resource_id=self.get_parameter("tts_seed_resource_id").value,
+                endpoint=self.get_parameter("tts_seed_endpoint").value,
+                encoding=self.get_parameter("tts_seed_encoding").value,
+                apikey_env=self.get_parameter("tts_seed_apikey_env").value,
+                device=speaker_device)
+            self.tts = (FallbackTts(
+                cloud_tts, local_tts,
+                on_fallback=lambda reason: self.get_logger().warning(
+                    f"豆包 Seed-TTS 不可用，使用本地音色: {reason}"))
+                if local_tts else cloud_tts)
         elif provider == "local":
             self.tts = local_tts
         else:
             raise ValueError("unsupported tts_provider")
+        # ⚠️ 走环境变量优先：`ros2 launch ... cloud_extra_json:='{"a":1}'`
+        # 会被 launch 当成 YAML 解析成 dict 而报 "Got <class 'dict'>"。
+        extra_raw = (self.get_parameter("cloud_extra_json").value
+                     or os.environ.get("FWR_CLOUD_EXTRA_JSON", "")).strip()
+        try:
+            cloud_extra = json.loads(extra_raw) if extra_raw else {}
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"cloud_extra_json 不是合法 JSON: {exc}") from exc
+        if not isinstance(cloud_extra, dict):
+            raise ValueError("cloud_extra_json 必须是 JSON 对象")
         cloud = (OpenAICompatibleProvider(cloud_url, self.get_parameter("cloud_model").value,
                                          self.get_parameter("cloud_api_key_env").value,
-                                         timeout_s=8.0)
+                                         timeout_s=8.0, extra_payload=cloud_extra)
                  if cloud_url else None)
         self.action = ActionClient(self, ExecuteRobotTask, "/robot/task/execute")
         self.task_slot = TaskSlot()
@@ -281,7 +353,7 @@ class VoiceNode(Node):
             self._publish_response("语音识别失败。", "error", type(exc).__name__)
 
     def _microphone_loop(self):
-        microphone = MicrophoneInput()
+        microphone = MicrophoneInput(self.microphone_device)
         while rclpy.ok() and not self.stop_event.is_set():
             try:
                 speech_epoch = self.speech_epoch
