@@ -278,7 +278,11 @@
   #followView.hidden { display: none; }
   #followStage { position: relative; flex: 1; min-height: 0; display: flex;
     align-items: center; justify-content: center; }
-  #followImg { width: 100%; height: 100%; object-fit: contain; display: block; }
+  /* 2026-11-26 用户要求「画面放到最上面，跟其他模式的画面一样」：
+     原来 4:3 画面在整块区域里**垂直居中**，上下各一条黑边，看起来没贴顶。
+     现在图像内容顶对齐（object-position: top），画布矩形也跟着从 y=0 算。 */
+  #followImg { width: 100%; height: 100%; object-fit: contain;
+               object-position: top center; display: block; }
   #followCanvas { position: absolute; inset: 0; width: 100%; height: 100%;
     touch-action: manipulation; }
   #followRefresh { position: absolute; right: 8px; bottom: 8px; z-index: 3;
@@ -294,11 +298,15 @@
     border-top: 1px solid #21262d; }
   #followHint { flex: 1; font-size: 13px; color: #c9d1d9; }
   /* 顶部提示条（与 #navInfo 同款）；绝对定位，不占 flex 流 */
+  /* 2026-11-26：画面贴顶后提示条会压在画面上，改成和 `#navTopWrap` 同款**全透明浮层**，
+     只靠 text-shadow 描边保证在白墙/亮画面上也看得清（**不要**加半透明底色）。 */
   #followTop { position: absolute; left: 0; right: 0; top: 3px; z-index: 6;
-               background: rgba(13,17,23,.62); padding: 4px 10px;
+               background: transparent; padding: 4px 10px;
                text-align: center; pointer-events: none; }
   #followTop #followHint { display: block; flex: none; font-size: 12px;
-                           color: #d7e3ec; letter-spacing: .3px; }
+                           color: #d7e3ec; letter-spacing: .3px;
+                           text-shadow: 0 0 3px rgba(0,0,0,.95), 0 0 1px rgba(0,0,0,1),
+                                        -1px -1px 0 rgba(0,0,0,.72), 1px 1px 0 rgba(0,0,0,.72); }
   #followHint b { color: #3fb950; }
   /* 与导航栏按钮完全同一套尺寸/圆角/字号（用户 2026-11-21 明确要求） */
   /* 跟随模式的小摇杆（用户 2026-11-21 要求：放在画面下面、做小一点） */
@@ -4361,7 +4369,9 @@ function followImgRect() {
   const ar = (followData.w && followData.h) ? followData.w / followData.h : 4 / 3;
   let iw = w, ih = w / ar;
   if (ih > h) { ih = h; iw = h * ar; }
-  return { x: (w - iw) / 2, y: (h - ih) / 2, w: iw, h: ih };
+  // 画面是**顶对齐**的（object-position: top center），矩形也必须从 y=0 起算，
+  // 否则人体框会整体下移半个黑边、点框选人也会偏（2026-11-26）。
+  return { x: (w - iw) / 2, y: 0, w: iw, h: ih };
 }
 
 function drawFollow() {

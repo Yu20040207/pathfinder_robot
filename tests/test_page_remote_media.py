@@ -113,3 +113,20 @@ def test_follow_mode_works_over_relay():
     assert 'followMedia = m;' in body and 'camRemote = m.remote || camRemote;' in body
     # 视频挂载统一走 camMount（换新节点断旧长连接）
     assert "camMount('followImg', followVideoURL(), true)" in body
+
+
+def test_follow_picture_sits_at_top_like_other_modes():
+    """2026-11-26 用户要求「跟随模式画面放到最上面，跟其他模式的画面一样」。
+
+    原来 4:3 画面在整块区域里垂直居中 → 上下各有黑边。现在图像内容顶对齐，
+    画布矩形也必须同步从 y=0 起算（否则人体框整体下移半个黑边）。
+    顶部提示条同时改成导航模式那种**全透明浮层**（文字压在画面上，靠描边）。
+    """
+    body = text()
+    assert 'object-position: top center' in body
+    assert 'return { x: (w - iw) / 2, y: 0, w: iw, h: ih };' in body
+    # followTop 不许再有半透明底色（要和 #navTopWrap 一致）
+    assert 'background: rgba(13,17,23,.62)' not in body
+    head = body.split('#followTop {')[1].split('}')[0]
+    assert 'background: transparent' in head
+    assert 'text-shadow' in body.split('#followTop #followHint {')[1].split('}')[0]
