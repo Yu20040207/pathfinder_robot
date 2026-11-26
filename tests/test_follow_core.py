@@ -44,24 +44,25 @@ def test_box_at_stop_threshold_stops():
 
 
 def test_mid_box_slows():
-    """框在 go_box_h(0.82) ~ stop_box_h(0.85) 之间 → 按比例慢走。
+    """框在 go_box_h(0.72) ~ stop_box_h(0.80) 之间 → 按比例慢走。
 
-    2026-11-21 晚用户第三次实测：停距 0.75 → 0.85、起走 0.65 → 0.80
-    （"框 80 的时候就可以跟随了，不用停住等我"），减速带只剩 0.82~0.85。
+    2026-11-21 晚用户第三次实测：停距 0.75 → 0.85；
+    2026-11-26 用户又要求 85 → **80**，减速带顺延成 0.72~0.80。
     """
-    v, _, r, _ = _decide(person={'x': 0.4, 'y': 0.3, 'w': 0.2, 'h': 0.84})
+    v, _, r, _ = _decide(person={'x': 0.4, 'y': 0.3, 'w': 0.2, 'h': 0.78})
     assert r == 'following' and 0.05 < v < P['vmax']
-    # 框 ≤0.82 全速（最常见的跟随距离），不再爬行
-    v2, _, r2, _ = _decide(person={'x': 0.4, 'y': 0.3, 'w': 0.2, 'h': 0.78})
+    # 框 ≤0.72 全速（最常见的跟随距离），不再爬行
+    v2, _, r2, _ = _decide(person={'x': 0.4, 'y': 0.3, 'w': 0.2, 'h': 0.70})
     assert r2 == 'following' and v2 == pytest.approx(P['vmax'])
 
 
-def test_stop_at_85_percent():
-    """2026-11-21 晚用户第三次实测：框到 **85%** 才停，75% 时还要继续跟。"""
-    v, _, r, _ = _decide(person={'x': 0.4, 'y': 0.3, 'w': 0.2, 'h': 0.86})
+def test_stop_at_80_percent():
+    """2026-11-26 用户要求：停距从框高 **85% → 80%**（人靠得更近才停）。"""
+    v, _, r, _ = _decide(person={'x': 0.4, 'y': 0.3, 'w': 0.2, 'h': 0.81})
     assert v == 0.0 and r == 'too_close'
-    v2, _, r2, _ = _decide(person={'x': 0.4, 'y': 0.3, 'w': 0.15, 'h': 0.80})
-    assert r2 == 'following' and v2 > 0.2
+    # 0.75 落在新的减速带（0.72~0.80）里 → 走但不满速；0.70 才满速
+    v2, _, r2, _ = _decide(person={'x': 0.4, 'y': 0.3, 'w': 0.15, 'h': 0.75})
+    assert r2 == 'following' and 0.1 < v2 < P['vmax']
 
 
 def test_size_hold_keeps_stopped_until_resume():
@@ -226,8 +227,17 @@ def test_scan_metrics_rear_corridor():
 
 # ------------------------------------------------ 第三版补：底盘硬限（2026-11-21 实机踩坑）
 def test_wmax_below_base_bridge_hard_limit():
-    """base_bridge 的 manual_velocity 硬限 |ω| ≤ 0.75，超了整帧被丢 → 车不动。"""
-    assert DEFAULTS['wmax'] <= 0.70
+    """base_bridge 的 manual_velocity 硬限 |ω| ≤ 0.75，超了整帧被丢 → 车不动。
+
+    2026-11-26 用户要求"转向提高一倍"：`steer_wmax 0.42 → 0.74`（翻倍是 0.84，
+    被 0.75 硬限挡住），所有跟随转向上限都必须 **≤ 0.75**。
+    """
+    assert DEFAULTS['wmax'] <= 0.75
+    assert DEFAULTS['steer_wmax'] <= 0.75
+    assert DEFAULTS['lidar_wmax'] <= 0.75
+    assert DEFAULTS['search_wmax'] <= 0.75
+    # 翻倍：至少 0.70（0.42 × 1.66），且不越 0.75 硬限
+    assert DEFAULTS['steer_wmax'] >= 0.70
 
 
 def test_limit_pair_caps_omega():
