@@ -14335,3 +14335,47 @@ build_system_prompt(now=None)  # SYSTEM_PROMPT + time_sentence()
 - 回归：`tests/test_page_speed_bar.py`（4 例：三处都在 / 在画面之后且非 absolute /
   用已有字段 / 导航随画面开关）+ 页面相关子集 **39 passed**；JS `node --check` 通过。
 - **状态**：已提交，**页面未部署**。
+
+### 2026-11-26 17:10 "车跑去跟别人"：收严认领规则 + 衣服颜色指纹（用户选 C+A）
+
+现场：用户跟随中，**另一个人朝车走过来，车转去跟他了**。
+
+**根因是三条"只看位置"的认领路径（都不是 bug，是设计太松）**
+1. `person_detector._run`：`pick_selected()`（按上次的框就近认领）之后，
+   还有一条 **`if new_id is None and len(ids) == 1: new_id = ids[0][0]`
+   ——"画面里只剩一个人就认他"，0 s 就认** → 路人一进画面、目标刚好在车后 → 直接换人。
+2. `vision_boxes.assign_ids`：几何贪心匹配，人一交叉 id 就换。
+3. `follow_core.adopt_moving_track`：雷达轨迹**无相机背书**也认，
+   只要"在走动 + 落在预测位置 0.8 m 内" → 路人从预测位置走过就被认领。
+
+**C：收规则**
+- 独占画面认领加时间闸：`adopt_lone_min_s **3.0 s**`（目标至少丢这么久才允许认独苗）。
+- 盲认领（雷达轨迹 `cam=False`）加两道：`lidar_adopt_blind_s **1.5 s**` 且
+  `lidar_adopt_m_blind **0.45 m**`（+ 原有每秒放宽 0.60 m/s）。有相机背书的照旧。
+
+**A：衣服颜色指纹（`vision_boxes`）**
+- `color_descriptor(img, box)`：框中间带（跳过头部/脚，`0.20~0.80`）的 HSV 色相
+  12 档直方图，**只统计 S≥40、V≥40 的像素**（白墙/灰砖/暗处不计票），L2 归一化。
+  像素不足 10% 或框太小 → 返回 `None`（= 没有外观信息）。
+- `color_sim()` = 直方图交集（0~1）；`color_accept()`；`color_blend()`（α 0.25 缓慢更新）。
+- `adopt_allowed(ref, cand, ref_age, hold_s 12, min_sim 0.45)`：
+  **指纹过期(>12 s)/缺失/候选取不到颜色 → 一律放行**（暗处不能不认人），
+  否则要求相似度 ≥ 0.45。
+- 接入 `person_detector`：目标每帧被看到就慢更新指纹（框面积 ≥1.5% 且分 ≥0.40 才算）；
+  认领前过门槛，不像就**不认**并打
+  `拒绝认领：衣服颜色不像（0.21 < 0.45）→ 停着继续找目标`（3 s 节流）；
+  远处小框放行。`/boxes` 多一个 `color_ref` 字段（有没有可用指纹），方便现场核对。
+- 参数（全可 `-p` 覆盖）：`color_gate True`、`color_min_sim 0.45`、`color_hold_s 12`、
+  `color_alpha 0.25`、`adopt_lone_min_s 3.0`、`lidar_adopt_blind_s 1.5`、`lidar_adopt_m_blind 0.45`
+
+**测试**
+- `tests/test_vision_color_id.py`（9 例：同色相似 / 异色拒绝 / 灰墙无指纹 / 归一化 /
+  框出界安全 / `adopt_allowed` 四条规则 / blend 只挪一点 / detector 3 s 闸与 `color_ref`）
+- `tests/test_follow_core.py::test_adopt_moving_track_only_takes_moving_nearby` 改成新规则
+  （有背书 0.3 s 就认；无背书 0.3 s **不认**、2.0 s 才认）
+- 相关子集 **157 passed**。
+
+**状态**：已提交，**未部署**（等用户批准：`person_detector.py` / `vision_boxes.py` /
+`follow_core.py` → 车端 src+build，重启 `fwr-vision`）。
+**未验证**：实车换色衣服/同色衣服的判别率；如果发现"目标自己都认不回来"，
+把 `color_min_sim` 降到 0.35 或 `color_gate false` 一键关掉。

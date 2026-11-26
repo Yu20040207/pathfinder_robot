@@ -52,9 +52,10 @@ from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CompressedImage
 from std_msgs.msg import String
 
-from fwr_bringup.vision_boxes import (assign_ids, filter_persons,
+from fwr_bringup.vision_boxes import (adopt_allowed, assign_ids, color_blend,
+                                     color_descriptor, filter_persons,
                                      parse_pose_output, parse_yolo_output,
-                                     pick_selected, to_payload)
+                                     color_sim, pick_selected, to_payload)
 
 MODEL_CANDIDATES = (
     'models/yolo11n.onnx',
@@ -107,6 +108,17 @@ class PersonDetector(Node):
         self.pose_kp_conf = float(p('pose_kp_conf', 0.40).value)
         self.pose_min_leg_kp = int(p('pose_min_leg_kp', 1).value)
         self.pose_bypass = float(p('pose_bypass_conf', 0.70).value)
+        # 衣服颜色指纹（2026-11-26 用户报「另一个人走过来，车跑去跟他」）：
+        # 认领新出现的人时要求颜色对得上；颜色信息缺失一律放行（暗处不能不认人）。
+        self.color_gate = bool(p('color_gate', True).value)
+        self.color_min_sim = float(p('color_min_sim', 0.45).value)
+        self.color_hold_s = float(p('color_hold_s', 12.0).value)
+        self.color_alpha = float(p('color_alpha', 0.25).value)
+        # 「画面里只剩一个人就认他」这条规则要**目标至少丢了这么久**才允许；
+        # 原来 0 s 就认 → 路人一进画面就被当成目标。
+        self.adopt_lone_min_s = float(p('adopt_lone_min_s', 3.0).value)
+        self._sel_color = None
+        self._sel_color_at = 0.0
         self.pose_path = str(p('pose_model', '').value) or self._find_model(
             POSE_CANDIDATES)
         self.pose_sess = None
@@ -198,6 +210,9 @@ class PersonDetector(Node):
         new_id = int(data.get('id', -1))
         self.sel_id = new_id
         self._sel_miss = 0.0
+        # 换人 = 换外观：旧的衣服颜色指纹必须作废，等新目标第一帧重建
+        self._sel_color = None
+        self._sel_color_at = 0.0
         if new_id < 0:
             self.get_logger().info('取消跟随目标')
         else:
@@ -216,6 +231,50 @@ class PersonDetector(Node):
             self._q.put_nowait(bytes(msg.data))
         except queue.Full:
             pass
+
+    # ------------------------------------------------------------ 衣服颜色指纹
+    def _update_sel_color(self, img, box) -> None:
+        """目标这一帧被看到 → 缓慢更新它的衣服颜色指纹（光照/距离会变）。"""
+        if not self.color_gate:
+            return
+        try:
+            hw = img.shape[:2]
+            area = float(box[2]) * float(box[3])
+            if area < 0.015 * hw[0] * hw[1] or area <= 0.0:
+                return                      # 框太小：颜色不可靠，别污染指纹
+            if len(box) > 4 and float(box[4]) < 0.40:
+                return                      # 分太低，可能根本不是人
+            desc = color_descriptor(img, box)
+            if desc is None:
+                return
+            self._sel_color = color_blend(self._sel_color, desc, self.color_alpha)
+            self._sel_color_at = time.monotonic()
+        except Exception as exc:            # noqa: BLE001 - 颜色出问题不许拖死检测
+            self.get_logger().warn('颜色指纹更新失败：%s' % exc,
+                                   throttle_duration_sec=30.0)
+
+    def _adopt_color_ok(self, img, box) -> bool:
+        """要不要把这个人接成目标：衣服颜色对不上就不接。"""
+        if not self.color_gate or self._sel_color is None:
+            return True
+        try:
+            hw = img.shape[:2]
+            if float(box[2]) * float(box[3]) < 0.015 * hw[0] * hw[1]:
+                return True       # 远处小框：颜色不可靠，别拿它判人（放行）
+            age = time.monotonic() - self._sel_color_at
+            cand = color_descriptor(img, box)
+            ok = adopt_allowed(self._sel_color, cand, age,
+                               self.color_hold_s, self.color_min_sim)
+            if not ok:
+                self.get_logger().info(
+                    '拒绝认领：衣服颜色不像（%.2f < %.2f）→ 停着继续找目标'
+                    % (color_sim(self._sel_color, cand), self.color_min_sim),
+                    throttle_duration_sec=3.0)
+            return ok
+        except Exception as exc:            # noqa: BLE001
+            self.get_logger().warn('颜色校验失败（放行）：%s' % exc,
+                                   throttle_duration_sec=30.0)
+            return True
 
     # ------------------------------------------------------------ 线程
     def _run(self) -> None:
@@ -244,12 +303,22 @@ class PersonDetector(Node):
                     self._sel_miss = 0.0
                     tracking = True
                     sel_box = hit[0]
+                    self._update_sel_color(img, hit[0])
                 else:
                     # ① id 被 assign_ids 换掉了：按"上次的位置"找最近的人接回来
                     new_id = pick_selected(ids, self._sel_box)
-                    if new_id is None and len(ids) == 1:
-                        # ② 画面里只剩一个人 → 就是他（最常见的单人跟随场景）
+                    if (new_id is None and len(ids) == 1
+                            and self._sel_miss >= self.adopt_lone_min_s):
+                        # ② 画面里只剩一个人 → 大概率就是他。
+                        #    ⚠️ 2026-11-26 加两道闸：目标**至少丢了 adopt_lone_min_s(3 s)**
+                        #    才允许，并且还要过衣服颜色（下面那步）。原来是 0 s 就认 →
+                        #    "另一个人朝车走来，画面里只剩他" → 车直接跟他走了。
                         new_id = ids[0][0]
+                    # ③ 外观门槛：新认的这个人衣服颜色必须像当前目标
+                    if new_id is not None:
+                        cand_box = next((b for pid, b in ids if pid == new_id), None)
+                        if cand_box is not None and not self._adopt_color_ok(img, cand_box):
+                            new_id = None
                     if new_id is not None:
                         if new_id != self.sel_id:
                             self.get_logger().info(
@@ -283,6 +352,9 @@ class PersonDetector(Node):
                     's': round(float(sel_box[4]) if len(sel_box) > 4 else 0.0, 3),
                     'stale': True})
             payload = {'w': w, 'h': h, 't': time.time(),
+                       'color_ref': bool(self._sel_color is not None
+                                         and (time.monotonic() - self._sel_color_at)
+                                         < self.color_hold_s),
                        'infer_ms': round(self._infer_ms, 1),
                        'persons': persons,
                        'sel': self.sel_id, 'tracking': tracking,

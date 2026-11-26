@@ -232,3 +232,116 @@ def to_payload(ids, img_w: int, img_h: int) -> list:
                     'h': round(float(b[3]) / img_h, 4),
                     's': round(float(b[4]) if len(b) > 4 else 0.0, 3)})
     return out
+
+# ---------------------------------------------------------------- 衣服颜色指纹
+# 2026-11-26 用户报「另一个人朝我走过来，车跑去跟他了」：id 靠几何贪心匹配，
+# 一换人就会把"最近的那个人"接上。颜色是最便宜的外观特征（人 2 m 内、
+# 光照不变时很稳），拿它当**第二道门槛**：认领的人衣服颜色对不上就不认。
+COLOR_BINS = 12          # 色相分 12 档（30° 一档）
+COLOR_S_MIN = 40         # 饱和度低于这个当"没颜色"（白/灰墙、地砖）不计票
+COLOR_V_MIN = 40         # 太暗的像素也不计票
+
+
+def _roi_band(box, h_frac=(0.20, 0.80)) -> tuple:
+    """取框中间那一段（跳过头部和脚）。
+
+    摄像头装得低时画面里只有腿，取整条腿；全身时避开头发/脸的肤色干扰。
+    """
+    x, y, w, h = float(box[0]), float(box[1]), float(box[2]), float(box[3])
+    y0 = int(max(0.0, y + h * h_frac[0]))
+    y1 = int(y + h * h_frac[1])
+    revive = 1 if w < 2 or h < 2 else 0
+    return int(max(0.0, x)), y0, int(x + w), y1, revive
+
+
+def color_descriptor(img, box, bins: int = COLOR_BINS):
+    """框内的"衣服颜色"直方图（HSV 色相直方图，L2 归一化）。
+
+    返回 ``numpy float32[bins]``；像素太少 / 全灰白时返回 ``None``
+    （宁可判"没有颜色信息"，也不要拿噪声当指纹）。
+    """
+    try:
+        import numpy as np
+        import cv2
+    except Exception:                       # pragma: no cover - 环境缺失时降级
+        return None
+    h_img, w_img = img.shape[:2]
+    x0, y0, x1, y1, bad = _roi_band(box)
+    if bad:
+        return None
+    x0, x1 = max(0, min(x0, w_img - 1)), max(0, min(x1, w_img))
+    y0, y1 = max(0, min(y0, h_img - 1)), max(0, min(y1, h_img))
+    if x1 - x0 < 4 or y1 - y0 < 4:
+        return None
+    roi = img[y0:y1, x0:x1]
+    if roi.size == 0:
+        return None
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    hh = hsv[:, :, 0].astype(np.int32) * bins // 180
+    ss = hsv[:, :, 1]
+    vv = hsv[:, :, 2]
+    mask = (ss >= COLOR_S_MIN) & (vv >= COLOR_V_MIN)
+    total = int(mask.sum())
+    if total < 0.10 * mask.size or total < 12:
+        return None
+    hist = np.bincount(hh[mask].ravel(), minlength=bins).astype(np.float32)
+    norm = float(np.linalg.norm(hist))
+    if norm <= 0.0:
+        return None
+    return hist / norm
+
+
+def color_sim(a, b) -> float:
+    """两个归一化直方图的**交集**（0~1，1 = 完全一样）。"""
+    if a is None or b is None:
+        return 0.0
+    try:
+        import numpy as np
+    except Exception:                       # pragma: no cover
+        return 0.0
+    a = np.asarray(a, dtype=np.float32)
+    b = np.asarray(b, dtype=np.float32)
+    if a.shape != b.shape or a.size == 0:
+        return 0.0
+    return float(np.minimum(a, b).sum())
+
+
+def color_accept(ref, cand, min_sim: float = 0.45) -> bool:
+    """颜色是否够像。**任一缺失就放行**（宁可认错人，也不能因为天黑不认人）。"""
+    if ref is None or cand is None or min_sim <= 0:
+        return True
+    return color_sim(ref, cand) >= float(min_sim)
+
+
+def color_blend(ref, new, alpha: float = 0.25):
+    """目标颜色缓慢更新（光照/距离变化），别一帧就换。"""
+    if new is None:
+        return ref
+    if ref is None:
+        return new
+    try:
+        import numpy as np
+    except Exception:                       # pragma: no cover
+        return ref
+    a = max(0.0, min(1.0, float(alpha)))
+    out = (1.0 - a) * np.asarray(ref, dtype=np.float32) + a * np.asarray(new, dtype=np.float32)
+    norm = float(np.linalg.norm(out))
+    return out / norm if norm > 0 else ref
+
+
+def adopt_allowed(ref, cand, ref_age_s: float, hold_s: float = 12.0,
+                  min_sim: float = 0.45) -> bool:
+    """要不要把"刚出现的这个人"接成目标（外观门槛）。
+
+    * `ref` 是**当前目标**的衣服颜色指纹，`ref_age_s` 是它最后一次更新的时间差；
+    * 超过 `hold_s`（12 s）没更新就过期：光照/角度可能已经变了，不再拦（放行）；
+    * 指纹缺失（天黑、纯灰白、框太小）一律放行 —— 宁可认错，也不要在暗处不认人；
+    * 否则要求 `color_sim >= min_sim`。
+    """
+    if ref is None or min_sim <= 0:
+        return True
+    if float(ref_age_s) > float(hold_s):
+        return True
+    if cand is None:
+        return True
+    return color_sim(ref, cand) >= float(min_sim)

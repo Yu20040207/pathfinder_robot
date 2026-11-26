@@ -641,9 +641,16 @@ def test_adopt_moving_track_only_takes_moving_nearby():
     """只有"正在走动 + 落在预测位置附近"的轨迹才能被认领；家具（静止）永远不行。"""
     from fwr_bringup.follow_core import adopt_moving_track
     pred = (2.00, 0.00)
+    # 有相机背书的走动轨迹：一直都在允许范围内（和以前一样）
+    moving_cam = {'id': 3, 'x': 2.15, 'y': 0.10, 'v': 0.8, 'cam': True,
+                  'static': False}
+    assert adopt_moving_track([moving_cam], pred, 0.3)['id'] == 3
+    # ⚠️ 2026-11-26 收严：**没有相机背书**的走动轨迹，必须"丢了 ≥1.5 s 且更贴近预测"
+    #（用户报「另一个人朝我走过来，车跑去跟他」→ 路人刚好从预测位置走过就被认领了）
     moving_near = {'id': 4, 'x': 2.15, 'y': 0.10, 'v': 0.8, 'cam': False,
                    'static': False}
-    assert adopt_moving_track([moving_near], pred, 0.3)['id'] == 4
+    assert adopt_moving_track([moving_near], pred, 0.3) is None
+    assert adopt_moving_track([moving_near], pred, 2.0)['id'] == 4
     # 静止轨迹（v=0）→ 不认
     still = {'id': 5, 'x': 2.10, 'y': 0.05, 'v': 0.0, 'cam': False, 'static': False}
     assert adopt_moving_track([still], pred, 0.3) is None

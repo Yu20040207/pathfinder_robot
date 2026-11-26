@@ -135,6 +135,11 @@ DEFAULTS = {
     'lidar_adopt_m': 0.80,      # 目标丢了按"预测位置"重新认领：基础半径（m）
     'lidar_adopt_mps': 0.60,    # ……每过 1 s 再放宽多少米（人在走）
     'lidar_adopt_vmin': 0.12,   # 认领时要求轨迹**正在走动**（m/s），家具达不到
+    # 2026-11-26 用户报「另一个人朝我走过来，车跑去跟他」：没有相机背书的轨迹，
+    # 认领门槛必须更严（丢了至少 1.5 s、横向位置更贴近预测），否则
+    # "刚好从预测位置走过"的路人就会被当成目标。
+    'lidar_adopt_blind_s': 1.5,   # 盲认领（无相机背书）要求目标已丢这么久
+    'lidar_adopt_m_blind': 0.45,  # ……且距预测位置不超过这么远（比有背书时紧一半）
     'lidar_pred_max_s': 2.0,    # 匀速预测最多外推多久（超过就不猜了）
     'lidar_static_drop_s': 2.0, # 续跟时目标"停了且没相机背书"多久就放弃（家具没有动静）
     'lidar_fresh_s': 0.5,       # 雷达轨迹多久没更新就算过期（10 Hz 扫描，0.5 s 够宽）
@@ -479,7 +484,13 @@ def adopt_moving_track(cands, pred, elapsed: float, p: dict | None = None):
       * 相机背书过的优先（同样的距离，选那条）。
     """
     q = DEFAULTS if p is None else p
-    gate = float(q['lidar_adopt_m']) + float(q['lidar_adopt_mps']) * max(0.0, float(elapsed))
+    elapsed = max(0.0, float(elapsed))
+    gate = float(q['lidar_adopt_m']) + float(q['lidar_adopt_mps']) * elapsed
+    # 盲认领（这条轨迹没有相机背书）另有一道更严的门：丢得够久 + 位置够贴。
+    # 否则"刚丢 0.2 s、路人刚好走过预测位置"就会被认成目标（2026-11-26 现场）。
+    blind_s = float(q.get('lidar_adopt_blind_s', 1.5))
+    blind_gate = float(q.get('lidar_adopt_m_blind', 0.45)) \
+        + float(q['lidar_adopt_mps']) * elapsed
     best, best_cost = None, 1e9
     for c in (cands or []):
         if c.get('static'):
@@ -490,6 +501,9 @@ def adopt_moving_track(cands, pred, elapsed: float, p: dict | None = None):
         d = math.hypot(float(c['x']) - float(pred[0]), float(c['y']) - float(pred[1]))
         if d > gate:
             continue
+        if not c.get('cam'):
+            if elapsed < blind_s or d > blind_gate:
+                continue          # 盲认领门槛不够：宁可原地找，也不跟路人
         cost = d - (0.35 if c.get('cam') else 0.0)
         if cost < best_cost:
             best, best_cost = c, cost
