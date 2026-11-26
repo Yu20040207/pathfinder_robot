@@ -13391,3 +13391,35 @@ gate_deg=18`；车上直接调 `on_persons()` 验证方位/距离估算；相关
   （打滑/闭环顶到占空比上限），要现场测；
 - 0.38 m/s 下的**刹车距离**、急转是否摆、`OVERSPEED_MMPS 700` 会不会在急转时误触发；
 - 手动模式上限也跟着变 0.40（手机摇杆仍被 `mqtt_bridge.max_linear_mps 0.15` 钳位）。
+
+### 2026-11-26 13:55 手动还是 0.3：手动速度有**三道闸**，之前只开了一道
+
+用户报：「手动模式测试的时候还是最快 0.3」。底盘已经 0.40（前一条），所以问题在别处。
+
+**三道闸（按信号流）**
+| # | 位置 | 改前 | 改后 |
+| --- | --- | --- | --- |
+| ① | 页面 `cloud/web/car.html` `MAX_LINEAR` / `MAX_ANGULAR` | 0.30 / 0.6 | **0.40 / 0.74** |
+| ② | 车端 `fwr-mqtt-bridge.service` `-p max_linear_mps:=` / `max_angular_rps:=` | **0.30** / 0.6 | **0.40 / 0.74** |
+| ③ | `base_bridge.manual_max_speed_mps` | 0.30 | 0.40（前一条已生效） |
+
+摇杆推满只发 ①的值，桥再钳到 ②，所以 ③ 提到 0.40 也白搭 —— 现场就是"改了参数还是 0.3"。
+
+**顺带修的仓库缺口**：`fwr-mqtt-bridge.service` **只存在车端、仓库里没有**（`deploy/systemd/` 里
+缺这一份）→ 现在补成 `deploy/systemd/fwr-mqtt-bridge.service`（0.40 / 0.74），
+以后能复现、能 review。
+
+**新增回归 `tests/test_manual_speed_chain.py`**（2 例）：钉死
+`页面 MAX_LINEAR/MAX_ANGULAR == 0.40/0.74`、`页面 ≤ 桥的钳位`、`页面 ≤ 底盘 manual_max_speed_mps`
+（`|ω| ≤ 0.75` 硬限）。以后改一处忘了另外两处会直接红。
+
+**部署（已获批）**
+- 车端：覆盖 `/etc/systemd/system/fwr-mqtt-bridge.service` + `daemon-reload` + 重启；
+  实测进程参数 `max_linear_mps:=0.40 max_angular_rps:=0.74`、服务 active。
+- 页面：scp 到 ECS `/opt/jc/web/car.html`；`http://127.0.0.1/car/` → **HTTP 200 / 218936 B**，
+  页面 md5 `3f86dfa5…` **与本地一致**，页面内 `MAX_LINEAR = 0.40, MAX_ANGULAR = 0.74`。
+
+**已验证**：三条闸数值一致（车上进程参数 + ECS 页面 md5/内容）、`test_manual_speed_chain.py` 通过、
+页面脚本 `node --check` 通过、页面相关测试 28 passed。
+**未验证**：手机摇杆推满是否真跑出 0.40（地面实测；注意急转时单轮包络会收线速度，
+摇杆同时推前后+左右时线速度会被 `manual_velocity` 的包络限制，这是正常的）。

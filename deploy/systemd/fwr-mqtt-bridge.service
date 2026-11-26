@@ -1,0 +1,21 @@
+[Unit]
+Description=FWR MQTT bridge (cloud control channel)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=manbaout
+Environment=ROS_LOG_DIR=/tmp/roslog
+Environment=FASTRTPS_DEFAULT_PROFILES_FILE=/home/manbaout/.config/fwr/fastdds_udp_only.xml
+Environment=HOME=/home/manbaout
+WorkingDirectory=/home/manbaout/Company_Project/Four-wheel-robot
+# max_linear_mps：手机摇杆满量程（页面 MAX_LINEAR）必须 ≤ 这个值，否则摇杆推满也只到这个数。
+# 2026-11-26：0.30 → 0.40，与底盘 manual_max_speed_mps 0.40 对齐（单轮 400 mm/s 协议上限）。
+# ⚠️ 这里不是底盘安全参数（底盘还有 manual_velocity 硬限兜底），但它是"手动速度的第二道闸"。
+ExecStart=/bin/bash -lc "source /opt/ros/humble/setup.bash && source ros2_ws/install/setup.bash && exec ros2 run fwr_bringup mqtt_bridge --ros-args -p host:=8.163.69.109 -p port:=1883 -p device_id:=car-001 -p max_linear_mps:=0.40 -p max_angular_rps:=0.74"
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

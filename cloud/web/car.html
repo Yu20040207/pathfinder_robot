@@ -824,7 +824,9 @@ if (location.port === '8080') {
 const API = (location.port && location.port !== '80')
   ? `${location.protocol}//${location.hostname}` : location.origin;
 const DEVICE = 'car-001';
-const MAX_LINEAR = 0.30, MAX_ANGULAR = 0.6;
+// 手动摇杆满量程。2026-11-26：底盘单轮上限 300→400 mm/s 后同步到 0.40
+// （车端 mqtt_bridge 的 max_linear_mps 也必须 ≥ 这个值，否则会被它再钳一次）。
+const MAX_LINEAR = 0.40, MAX_ANGULAR = 0.74;
 const $ = id => document.getElementById(id);
 
 let token = localStorage.getItem('jc_token') || '';
