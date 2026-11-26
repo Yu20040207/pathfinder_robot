@@ -14375,7 +14375,16 @@ build_system_prompt(now=None)  # SYSTEM_PROMPT + time_sentence()
   （有背书 0.3 s 就认；无背书 0.3 s **不认**、2.0 s 才认）
 - 相关子集 **157 passed**。
 
-**状态**：已提交，**未部署**（等用户批准：`person_detector.py` / `vision_boxes.py` /
-`follow_core.py` → 车端 src+build，重启 `fwr-vision`）。
+**状态**：已提交 `6b13731`，**已部署（2026-11-26 17:15）**：
+`person_detector.py`（`c1a0db77…`）/ `vision_boxes.py`（`f570140e…`）/ `follow_core.py`（`188ab835…`）
+→ 车端 **src + build**，两边 md5 一致，`py_compile` 通过；
+机器人上 `import fwr_bringup.person_detector` 实测 OK，`color_descriptor` / `adopt_allowed`
+都在，`DEFAULTS` 读到 `lidar_adopt_blind_s 1.5` / `lidar_adopt_m_blind 0.45`，
+且 `d.__file__` 指向 **build 副本**（证明实机跑的就是新代码）。
+⚠️ 部署时 `fwr-vision` / `fwr-follow` 都是 **inactive**（按需启动，开机不常驻），所以**没有
+主动启动**它们——用户下次进跟随模式时 `prep=1` 拉起即是新代码（CPU 不白烧）。
+**现场核对**：进跟随模式、选中目标并让他露一下，然后
+`curl -s 127.0.0.1:8081/boxes` 里应出现 **`"color_ref": true`**；
+换人时日志出现 `拒绝认领：衣服颜色不像（…）`。
 **未验证**：实车换色衣服/同色衣服的判别率；如果发现"目标自己都认不回来"，
 把 `color_min_sim` 降到 0.35 或 `color_gate false` 一键关掉。
