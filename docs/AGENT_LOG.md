@@ -13423,3 +13423,104 @@ gate_deg=18`；车上直接调 `on_persons()` 验证方位/距离估算；相关
 页面脚本 `node --check` 通过、页面相关测试 28 passed。
 **未验证**：手机摇杆推满是否真跑出 0.40（地面实测；注意急转时单轮包络会收线速度，
 摇杆同时推前后+左右时线速度会被 `manual_velocity` 的包络限制，这是正常的）。
+
+## 2026-11-26 11:40 · 接入豆包（火山引擎）语音合成：代码就绪，协议待验证
+
+### 会话目标
+用户选方案 B：要用豆包音色。本轮把火山引擎 provider 写进仓库并加探测工具，
+**但没有凭据，协议尚未在真实账号上验证**。
+
+### 先纠正的一件事
+用户问「这个模型现在是用的豆包吗」→ **不是**。当前全是本地离线：
+ASR = **SenseVoice**（阿里 FunAudioLLM 开源），TTS = **VITS zh-hf-fanchen-C**（社区模型）。
+豆包是火山引擎的云端服务，本地模型里没有；`aliyun` 那条是**阿里云 CosyVoice**，也不是豆包。
+
+### 仓库改动
+| 文件 | 改动 |
+| --- | --- |
+| `ros2_ws/src/fwr_voice/fwr_voice/tts.py` | **新增 `VolcengineTts`**（HTTP JSON 接口）+ `_post_json()` + `decode_tts_audio()`；imports 加 base64/io/json/urllib/uuid/wave |
+| `ros2_ws/src/fwr_voice/fwr_voice/node.py` | 新增参数 `tts_volc_voice_type`/`tts_volc_cluster`/`tts_volc_endpoint`/`tts_volc_encoding`/`tts_volc_appid_env`/`tts_volc_token_env`；`tts_provider:=volcengine` 分支，经 `FallbackTts` 自动回退本地 VITS |
+| `ros2_ws/src/fwr_voice/launch/voice.launch.py` | 新增 12 个 launch 参数（`tts_provider`、`tts_speaker_id`、`tts_speed`、`tts_cloud_*`、`tts_volc_*`）并接到节点 |
+| `tools/volc_tts_probe.py` | **新增**：独立探测脚本（不依赖 ROS），打印 HTTP 状态/返回码/音频时长并存 WAV，`--play` 可直接试听 |
+| `tests/test_voice_volcengine_tts.py` | **新增 13 例**：凭据缺失、payload 结构、`Bearer;` 分号鉴权、PCM/WAV 两种解码、HTTP 错误、非 3000 返回码、空音频、非 JSON、构造参数校验 |
+| `docs/voice/bring-up.md` | 新增 §9.5「豆包（火山引擎）音色」：缺什么、探测两步法、判读表、参数表 |
+
+### 设计要点
+- `VolcengineTts` 的传输层是**可注入**的（`transport=`），单测全部离线跑，不联网。
+- 鉴权用火山的历史写法 **`Authorization: Bearer;<token>`（分号不是空格）**。
+- 返回码只认 **`0` 和 `3000`** 为成功；其它把服务端 `message` 带进异常。
+- 音频解码支持 **裸 PCM16LE 单声道**（`--encoding pcm`）和 **带头的 WAV**（`--encoding wav`，
+  采样率取 WAV 头里的值）。PCM 的采样率靠参数（默认 24000），**这个是猜的，需现场核对**。
+- 云端失败 → `FallbackTts` 回退本地 VITS，日志 `豆包语音不可用，使用本地音色: <原因>`。
+
+### 已验证（命令 + 结果）
+1. `python -m py_compile` 三个改动文件 + 新脚本：全部 OK。
+2. `PYTHONPATH=ros2_ws/src/fwr_voice pytest -q tests/test_voice_volcengine_tts.py` → **13 passed**。
+3. `colcon build --packages-select fwr_voice --symlink-install` → **成功**（0.46 s）。
+4. `ros2 launch fwr_voice voice.launch.py --show-args` → 能看到 `tts_provider` /
+   `tts_speaker_id` / `tts_speed` / `tts_volc_voice_type`。
+5. 全量：`PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest -q tests` → **486 passed, 1 skipped**。
+6. 探测脚本的入参校验：无凭据 → `缺少凭据：请设置环境变量 …`；缺 `--voice-type` → argparse 报错。
+
+### ⚠️ 未验证（关键）
+- **火山引擎协议没在真实账号上跑过**。以下都是按公开 HTTP 接口形状写的，**可能不对**：
+  `Bearer;` 鉴权、`cluster=volcano_tts`、`audio.voice_type` 字段名、
+  `code` 的取值、PCM 采样率 24000、返回 `data` 是 base64。
+- **标准版 vs 大模型是两个接口**：大模型是 WebSocket 二进制帧，当前实现的是**标准版 HTTP**。
+  如果用户账号只开了大模型，`volc_tts_probe.py` 会报 404/401，需要另写 WS 版。
+- 豆包**延迟/费用/断网回退**都没测（没有凭据）。
+
+### 一个已知的环境限制
+`docs.volcengine.com` 从本机 **fetch failed**（`www.volcengine.com` 会 301 过去），
+gitee 搜索 API 返回空数组、GitHub 不通 → **拿不到官方文档和示例代码**，
+所以不能凭记忆硬写它的私有协议。需要用户提供控制台的示例代码或文档。
+
+### 未做的
+- 没有向用户索要凭据并要求贴到对话里：**建议用户自己 `export` 后在终端跑探测脚本**，
+  密钥不进聊天记录。
+- 本地 187 音色试听包仍在 `models/voice/audition/`（15 MB，`models/` 已 gitignore）。
+
+### 下一步
+1. 用户跑 `tools/volc_tts_probe.py`，把**返回码和 message**（不要贴 token）发回来；
+2. 按真实返回修协议（字段名/鉴权/采样率），补齐单测；
+3. 通了再测「云端 + 回退」在对话里的实际延迟；
+4. 之后回到原计划：`rooms.yaml` + `/room_goal`、`STOP` 真停车。
+
+### 2026-11-26 14:05 手动仍 0.3 的**真正**瓶颈：云端 `JC_MAX_LINEAR=0.30`（第四道闸）
+
+用户第二次报「还是最快 0.3，但左右转的时候比 0.3 快点」，并追加要求
+**「这些参数不要改到导航和建图模式」**。
+
+**根因（四道闸，之前只看了三道）**
+| # | 位置 | 值 | 说明 |
+| --- | --- | --- | --- |
+| ① | 页面 `MAX_LINEAR` | 0.40 | 已部署 |
+| ② | **云端 `jc-api` env `JC_MAX_LINEAR`** | **0.30** | `cloud/api/app.py` 第 639 行 `clamp(linear, MAX_LINEAR)`，**这才是卡的这层** |
+| ③ | 车端 `mqtt_bridge.max_linear_mps` | 0.40 | 已改 |
+| ④ | 底盘 `base_bridge.manual_max_speed_mps` | 0.40 | 已改 |
+
+云端默认是 **0.15**（`JC_MAX_LINEAR` 不设时），ECS 上被设成 **0.30** + `JC_MAX_ANGULAR=0.6`。
+**任何一条指令经过云端就被 `clamp` 到 0.30**，所以页面给 0.40、车端收 0.40 都没用。
+
+**"左右转时比 0.3 快" 是打滑噪声，不是真提速**：原地转向时轮子短时打滑空转，
+编码器读出的线速度会冲过 300 mm/s（AGENTS 里早有记录"实测可冲到 300+"），
+直线被 0.30 卡住、转向时看到 0.33~0.35 的尖峰 —— 看起来像"转向更快"。
+
+**改动**
+1. `deploy/ecs/jc-api-speed.conf`（**新增，之前云端速度参数只存在 ECS 上、没入库**）：
+   `[Service] Environment=JC_MAX_LINEAR=0.40` + `Environment=JC_MAX_ANGULAR=0.74`
+   （systemd drop-in 覆盖主单元的 `Environment=`）。
+2. **建图摇杆拆出来独立上限**（用户要求"不要改到建图/导航"）：
+   页面新增 `MAP_MAX_LINEAR = 0.30` / `MAP_MAX_ANGULAR = 0.60`，
+   `sendCmd(cx, cy, limV, limW)` 支持传上限；建图摇杆的 **3 处**发送点
+   （touchstart / mousedown / 50 ms 定时器）全部传 `MAP_MAX_*`。
+   ⚠️ 手动和建图共用 `sendCmd()`，**别再合并成一个常量**（合并就等于建图也给 0.40）。
+   导航模式不用摇杆（走 Nav2 目标），`real_nav2.yaml` 一个字没动。
+3. `tests/test_manual_speed_chain.py` 扩到 **3 例**：页面 ≤ 云端 ≤ 桥 ≤ 底盘；
+   建图摇杆保持 0.30/0.60 且三处发送都带上限（漏一处会红）；
+   ⚠️ 云端正则只认 `^Environment=` 行 —— 注释里有历史值 0.30，抓错会让测试永远红。
+4. `AGENTS.md` 新增「🎚 速度/转向参数按模式隔离」长期规则表（手动/建图/跟随/导航四行 + 四道闸）。
+
+**已验证**：`test_manual_speed_chain.py` 3 passed；页面内联 script `node --check` 通过；
+`sendCmd(mjx, mjy);` 旧写法 0 处残留（3 处都带 `MAP_MAX_*`）。
+**未验证**：手机摇杆满推是否真 0.40（要部署 ECS + 重启 jc-api 后实测）。

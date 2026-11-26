@@ -827,6 +827,10 @@ const DEVICE = 'car-001';
 // 手动摇杆满量程。2026-11-26：底盘单轮上限 300→400 mm/s 后同步到 0.40
 // （车端 mqtt_bridge 的 max_linear_mps 也必须 ≥ 这个值，否则会被它再钳一次）。
 const MAX_LINEAR = 0.40, MAX_ANGULAR = 0.74;
+// ⚠️ **建图模式的摇杆单独一套**，保持与原来一致（0.30 / 0.60）：
+// 用户 2026-11-26 明确要求「这些参数不要改到导航和建图模式」。
+// 手动和建图共用 `sendCmd()`，靠这里的两个不同常量区分，别合并成一个。
+const MAP_MAX_LINEAR = 0.30, MAP_MAX_ANGULAR = 0.60;
 const $ = id => document.getElementById(id);
 
 let token = localStorage.getItem('jc_token') || '';
@@ -1968,12 +1972,15 @@ function ensureManualArm() {
   return false;
 }
 
-function sendCmd(cx, cy) {
+function sendCmd(cx, cy, limV, limW) {
   const px = (typeof cx === 'number') ? cx : jx;
   const py = (typeof cy === 'number') ? cy : jy;
+  // limV/limW 只有建图摇杆会传（MAP_MAX_*）；手动模式走默认的手动满量程。
+  const vCap = (typeof limV === 'number') ? limV : MAX_LINEAR;
+  const wCap = (typeof limW === 'number') ? limW : MAX_ANGULAR;
   const speedScale = 1 - 0.6 * Math.abs(px);
-  const linear = +(py * MAX_LINEAR * speedScale).toFixed(3);
-  const angular = +(-px * MAX_ANGULAR).toFixed(3);
+  const linear = +(py * vCap * speedScale).toFixed(3);
+  const angular = +(-px * wCap).toFixed(3);
   if (!wsReady) { $('dbg').textContent = '未连接，指令未发送'; return; }
   try {
     ws.send(JSON.stringify({linear, angular, ttl_ms: 800}));
@@ -2012,7 +2019,8 @@ function bindMapJoystick() {
   if (!mapJoyEl || !mapKnobEl) return;
 mapJoyEl.addEventListener('touchstart', (e) => {
   e.preventDefault(); mapJoyActive = true; ensureManualArm();
-  const p = mapEventPoint(e); mapMoveKnob(p.x, p.y); sendCmd(mjx, mjy);
+  const p = mapEventPoint(e); mapMoveKnob(p.x, p.y);
+  sendCmd(mjx, mjy, MAP_MAX_LINEAR, MAP_MAX_ANGULAR);
 }, {passive: false});
 mapJoyEl.addEventListener('touchmove', (e) => {
   if (!mapJoyActive) return; e.preventDefault();
@@ -2022,7 +2030,8 @@ mapJoyEl.addEventListener('touchend', () => { mapResetKnob(); sendCmd(0, 0); });
 mapJoyEl.addEventListener('touchcancel', () => { mapResetKnob(); sendCmd(0, 0); });
 mapJoyEl.addEventListener('mousedown', (e) => {
   e.preventDefault(); mapJoyActive = true; ensureManualArm();
-  const p = mapEventPoint(e); mapMoveKnob(p.x, p.y); sendCmd(mjx, mjy);
+  const p = mapEventPoint(e); mapMoveKnob(p.x, p.y);
+  sendCmd(mjx, mjy, MAP_MAX_LINEAR, MAP_MAX_ANGULAR);
 });
 window.addEventListener('mousemove', (e) => {
   if (!mapJoyActive) return;
@@ -2035,7 +2044,7 @@ window.addEventListener('mouseup', () => {
 setInterval(() => {
   if (!(mapJoyActive || mjx || mjy)) return;
   ensureManualArm();
-  sendCmd(mjx, mjy);
+  sendCmd(mjx, mjy, MAP_MAX_LINEAR, MAP_MAX_ANGULAR);   // 建图摇杆：独立上限
 }, 50);
 }
 bindMapJoystick();

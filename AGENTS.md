@@ -216,6 +216,21 @@
 | `fwr-vision` / `fwr-follow` | disabled（按需） | 人体识别 / 跟随控制 |
 | `fwr-lidar-watchdog` | enabled（带 `--no-spawn`） | 只负责"发现活着但不出数据的雷达 → SIGKILL 让 fwr-base 的 respawn 重拉"；**不允许自己 `ros2 run sllidar_node`**（会和 fwr-base 抢串口、造出两个 publisher） |
 
+### 🎚 速度/转向参数**按模式隔离**（2026-11-26 用户要求，长期有效）
+
+改任何速度/转向参数前先核对这张表，**一个模式都不许连带改到别的模式**：
+
+| 模式 | 线速度上限 | 转向上限 | 参数在哪 |
+| --- | --- | --- | --- |
+| 手动 | **0.40 m/s** | **0.74 rad/s** | 页面 `MAX_LINEAR/MAX_ANGULAR` → 云端 `JC_MAX_LINEAR/ANGULAR` → 车端 `mqtt_bridge.max_linear_mps/max_angular_rps` → 底盘 `base_bridge.manual_max_speed_mps` |
+| 建图摇杆 | **0.30** | **0.60** | 页面 `MAP_MAX_LINEAR/MAP_MAX_ANGULAR`（**手动提速时不许跟着改**） |
+| 跟随 | **0.38** | **0.74** | `follow_core.DEFAULTS` 的 `vmax` / `max_wheel_mps` / `steer_wmax` / `wmax` / `lidar_wmax` |
+| 导航 | 0.15 | Nav2 自带 | `real_nav2.yaml`（**不要动**） |
+
+- 手动链是**四道闸**：页面 → 云端 `jc-api` env（drop-in `deploy/ecs/jc-api-speed.conf`）→ 车端 `mqtt_bridge` → 底盘 `manual_max_speed_mps`。
+  **任何一个比其它小，摇杆推满就只到最小那个**（2026-11-26 现场：页面/桥/底盘都 0.40 了，云端还是 0.30 → 结果最快 0.3）。
+- 回归：`tests/test_manual_speed_chain.py`（页面 ≤ 云端 ≤ 桥 ≤ 底盘、建图摇杆保持 0.30/0.60 且三处发送都带上限）。
+
 - 硬件节点在 `real_mapping.launch.py` 里用 `start_base` 门控（`_both()` 组合其它开关），
   **只有一处节点定义**，`real_base.launch.py` 只是 `start_slam:=false` 的薄包装。
 - 导航栈的 `scripts/run_navigation.sh` 在 `FWR_START_BASE=false`（`fwr-nav.service` 里设）
