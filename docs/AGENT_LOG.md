@@ -14241,3 +14241,37 @@ build_system_prompt(now=None)  # SYSTEM_PROMPT + time_sentence()
 下次进跟随模式即为新代码。
 **未验证**：实车掉头后是否还摆。若仍摆，下一步抓 `/follow/state` 的 `w`/`err` 序列 + 
 `journalctl -u fwr-follow` 看是 `facing` 还是雷达 `lidar_face` 在摆，再决定收 `yaw_kp` 或加大 `yaw_kd`。
+
+### 2026-11-26 16:15 "点开始跟随，车往前走一步就停"：心跳不能挂在轮询链上
+
+现场 `journalctl -u fwr-follow` 铁证（三次一模一样）：
+
+```
+16:09:57 开始跟随
+16:10:00 跟随心跳超时（页面没发 keepalive）→ 停车     ← 正好 3.000 s
+16:10:24 开始跟随 / 16:10:27 心跳超时 → 停车
+16:10:40 开始跟随 / 16:10:43 心跳超时 → 停车
+```
+
+车端 `heartbeat_timeout 3.0 s`（死手开关，**不动它**）。问题在页面侧：
+
+1. **心跳挂在串行轮询链末尾**：`followPollOnce → drawFollow → followStatePoll → followKeepalive`
+   是 `setInterval(..., 200)` + 一串 `await`。链上任何一处卡住/抛异常，心跳就**再也不发**。
+2. **`followFetch` 用的 `fetch` 默认永不超时** → 链路一卡（4G 抖动、iOS 后台恢复、
+   中继绕路）那个 `await` 能挂几十秒，心跳随之停摆。
+3. **`/followstate` 的 `stale:true`（2 s 没拿到状态）也会被当成"没在跟随"**
+   → `followOn=false` → 心跳自己在页面上被关掉，再也发不出去。
+
+**改动（只动页面 `cloud/web/car.html`，车端代码不动）**
+- 心跳改**独立 `setInterval(1000)`**：只看 `followOn && followWanted && !document.hidden`，
+  不再依赖轮询链；单次 2 s 超时（2 s < 车端 3 s 死手）。
+- `followFetch(path, timeoutMs=2500)` 加 `Promise.race` 超时，本地/中继两条路都兜住。
+- `drawFollow()` 两处调用包 `try/catch`，画框出错不许拖死心跳。
+- `/followstate` 复位 `followOn` 需要**连续两帧、非 `stale`、非 `no_node`**（`followOffCount >= 2`）。
+- 回归：`tests/test_page_follow_heartbeat.py`（5 例）+ 老测试
+  `test_page_remote_media.py::test_follow_mode_works_over_relay` 的签名断言改为
+  `function followFetch(path`（新增超时参数）；相关子集 117 passed。JS `node --check` 通过。
+
+**状态**：已提交，**页面未部署到 ECS**（等用户批准）。
+**若部署后仍"走一步就停"**：说明心跳到车端确实 >3 s（4G/中继慢），
+下一步把车端 `heartbeat_timeout` 提到 4.0（多 1 s 相当于多滑行约 0.38 m，须用户同意）。

@@ -103,7 +103,7 @@ def test_follow_mode_works_over_relay():
     body = text()
     assert 'function followRemote()' in body
     assert 'function followVideoURL()' in body
-    assert 'function followFetch(path)' in body
+    assert 'function followFetch(path' in body   # 2026-11-26 加了超时参数
     assert "?cam=main&profile=' + camProfile()" in body
     assert "api('/api/devices/' + DEVICE + '/vision' + path)" in body
     # 所有面板接口都不许再直连局域网

@@ -4348,6 +4348,7 @@ let followOn = false;            // 是否正在驱动车跟随（控制节点�
 let followBoxesDead = false;     // /boxes 请求本身失败（网络），≠ 识别没在跑
 let followStateData = null;      // /followstate 最新状态
 let followKeepAt = 0;            // 上次心跳时间
+let followOffCount = 0;          // 连续几帧状态明确说"没在跟随"（防误杀心跳）
 
 function followBase() {
   const m = followMedia || camMedia;
@@ -4375,12 +4376,25 @@ function followVideoURL() {
 }
 
 /* 跟随模式的面板接口：异地经 `/api/devices/<id>/vision/...` 由车端中继转发 */
-async function followFetch(path) {
-  if (followRemote()) {
-    return api('/api/devices/' + DEVICE + '/vision' + path);
+// ⚠️ 必须带超时（2026-11-26 踩到）：fetch 默认**永不超时**，链路一卡（4G 抖动、
+// iOS 后台恢复）这条 await 就一直挂着。心跳原来是挂在轮询链末尾的，链路一卡
+// 心跳就断了 → 车端 3 s 收不到 /follow/enable 自己停车 →
+// 现场表现「刚点开始跟随，车往前走一步就停下来」。
+async function followFetch(path, timeoutMs) {
+  const ms = timeoutMs || 2500;
+  const work = followRemote()
+    ? api('/api/devices/' + DEVICE + '/vision' + path)
+    : fetch(followBase() + path, { cache: 'no-store' })
+        .then((res) => res.json().catch(() => ({})));
+  let tid = 0;
+  const timeout = new Promise((_, reject) => {
+    tid = setTimeout(() => reject(new Error('timeout')), ms);
+  });
+  try {
+    return await Promise.race([work, timeout]);
+  } finally {
+    clearTimeout(tid);
   }
-  const res = await fetch(followBase() + path, { cache: 'no-store' });
-  return res.json().catch(() => ({}));
 }
 
 // 画面用 object-fit: contain，画布是全屏的 → 先算真正的图像矩形，框才不会被拉伸
@@ -4598,11 +4612,21 @@ async function followStatePoll() {
     followStateData = await followFetch('/followstate');
   } catch (e) { followStateData = { on: false, reason: 'no_node' }; }
   if (followStateData && followStateData.on === false && followOn) {
-    // 节点自己停了（心跳超时/目标丢失）：页面跟着复位，别显示"还在跟"
-    followOn = false;
+    // 节点自己停了（心跳超时/目标丢失）：页面跟着复位，别显示"还在跟"。
+    // ⚠️ 但 `stale`（2 s 没收到 /follow/state）和 `no_node` 不算数：
+    // 那只是"这一帧没拿到状态"，拿它关掉 followOn 会连带停掉心跳 → 车端 3 s 后停车
+    //（2026-11-26 "开始跟随只走一步"就是这么来的）。要连续两帧明确 false 才认。
+    const definite = !followStateData.stale && followStateData.reason !== 'no_node';
+    followOffCount = definite ? (followOffCount + 1) : 0;
+    if (followOffCount >= 2) {
+      followOn = false;
+      followOffCount = 0;
+    }
+  } else {
+    followOffCount = 0;
   }
   followKeepalive();
-  drawFollow();
+  try { drawFollow(); } catch (e) { /* 画框出错不许拖死心跳 */ }
 }
 
 async function followPollOnce() {
@@ -4623,7 +4647,7 @@ async function followPollOnce() {
     followBoxesDead = true;
     followData = { persons: [], sel: -1, tracking: false, stale: true };
   }
-  drawFollow();
+  try { drawFollow(); } catch (e) { /* 同上 */ }
   followStatePoll();
 }
 
@@ -4667,6 +4691,15 @@ if ($('followImg')) {
     if (followWanted) setTimeout(() => followVideoRestart('error'), 500);
   };
 }
+// 心跳**独立定时器**（2026-11-26）：以前只在轮询链末尾发，轮询里任何一个 await
+// 卡住就再也不发 → 车端 3 s 后自己停车（"点开始跟随只走一步"）。
+setInterval(() => {
+  if (!followOn || !followWanted || document.hidden) return;
+  if (Date.now() - followKeepAt < 900) return;
+  followKeepAt = Date.now();
+  followFetch('/follow?on=1', 2000).catch(() => {});
+}, 1000);
+
 setInterval(() => {
   if (!followWanted || document.hidden) return;
   const img = $('followImg');
