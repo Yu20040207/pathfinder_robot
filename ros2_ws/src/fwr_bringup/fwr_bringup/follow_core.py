@@ -749,6 +749,23 @@ def door_clear(front_lon, p: dict | None = None) -> bool:
     return front_lon < -(door_swept_radius(q) + q['door_clear_margin_m'])
 
 
+def reacq_cap(w: float, err: float, active: bool,
+              soft_wmax: float = 0.40, soft_ex: float = 0.45) -> float:
+    """重新认领目标后的"软对准"：框还在画面边缘时不许提前收力。
+
+    2026-11-26 用户报：人从旁边绕到车后，车掉头重新看到人之后**对准时左右摆**。
+    原因之一是刚认回来就在中线附近满速修：12 Hz 检测 + 83 ms EMA + `w_accel 3.0`
+    让它每次都比目标多转一点，来回打。这里在"重新看见人后的 ``reacq_soft_s`` 内、
+    误差已经不大（``|err| < soft_ex``）"时把 ω 限到 ``soft_wmax``，
+    边缘大误差仍按原来的限幅去追（掉头不能变慢）。
+    """
+    if not active:
+        return w
+    if abs(w) <= soft_wmax or abs(err) >= soft_ex:
+        return w
+    return math.copysign(soft_wmax, w)
+
+
 def steer(err: float, err_dot: float = 0.0, p: dict | None = None,
           w_lim: float | None = None) -> float:
     """把"画面偏差"换成角速度：**PD**（2026-11-21 晚修左右摆）。

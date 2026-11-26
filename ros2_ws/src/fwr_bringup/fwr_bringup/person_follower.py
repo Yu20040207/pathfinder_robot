@@ -37,7 +37,7 @@ from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import String
 
-from fwr_bringup.follow_core import (DEFAULTS, OscGuard, adopt_moving_track, bearing_ema, cam_bearing, decide, door_clear, door_metrics, door_swept_radius, flip_confirm, lidar_backed, lidar_drive_allowed, lidar_follow, lidar_search_cmd, limit_pair, passage_metrics, pick_lidar_track, predict_person, reacquire_track, scan_metrics)
+from fwr_bringup.follow_core import (DEFAULTS, OscGuard, adopt_moving_track, bearing_ema, cam_bearing, decide, door_clear, door_metrics, door_swept_radius, flip_confirm, lidar_backed, lidar_drive_allowed, lidar_follow, lidar_search_cmd, limit_pair, passage_metrics, pick_lidar_track, predict_person, reacquire_track, reacq_cap, scan_metrics)
 
 
 class PersonFollower(Node):
@@ -51,6 +51,10 @@ class PersonFollower(Node):
         # α=0.35 时滞后 ≈(1-α)/α=1.86 帧，8 Hz 下约 230 ms；α=0.5 只剩 1 帧 ≈83 ms。
         # 抖动的兜底仍在 `OscGuard`（观测到 ω 反复变号会自动收增益），别把它关掉。
         self.smooth_alpha = float(p('smooth_alpha', 0.50).value)   # 框的 EMA
+        # 重新认领后的"软对准"（2026-11-26 用户报：掉头重新看到人后左右摆）
+        self.reacq_soft_s = float(p('reacq_soft_s', 0.80).value)
+        self.reacq_wmax = float(p('reacq_wmax', 0.40).value)
+        self.reacq_soft_ex = float(p('reacq_soft_ex', 0.45).value)
         # 跟随专用参数（ROS 参数可覆盖，默认值见 follow_core.DEFAULTS）
         self.p = {k: type(v)(p(k, v).value) for k, v in DEFAULTS.items()}
         self.v_accel = float(p('v_accel', 0.60).value)      # m/s²
@@ -84,6 +88,8 @@ class PersonFollower(Node):
         self._prev_cx = None
         self._prev_cx_t = 0.0
         self.err_dot = 0.0
+        self._seen_prev = False      # 上一帧有没有框（判"重新认领"）
+        self._reacq_until = 0.0      # 软对准窗口截止时刻
         self._osc = OscGuard()      # 左右摆自动阻尼（见 follow_core.OscGuard）
         self.osc_gain = 1.0
         # 雷达方位滤波/滞回/换轨迹防抖（2026-11-26 用户报"雷达接管时左右摆很大"）
@@ -356,6 +362,10 @@ class PersonFollower(Node):
         if not self.enabled:
             if now < self._zero_until:      # 关闭后补发 2 s 零速度，确保停稳
                 self._publish(0.0, 0.0)
+            self._ema = {'h': None, 'cx': None}
+            self._seen_prev = False
+            self.err_dot = 0.0
+            self._prev_cx = None
             self._state('off', 0.0, 0.0, 0.0)
             return
 
@@ -365,6 +375,8 @@ class PersonFollower(Node):
             self._sel_prev = sel
             self._ema = {'h': None, 'cx': None}
             self._last_person = None
+            self._seen_prev = False      # 换人也要走一次"重新认领"的软对准
+            self._reacq_until = 0.0
             self._size_hold = False
             # 换人 = 换目标，雷达认领必须重来（否则会继续跟上一个被点名的人）
             self._lidar_id = -1
@@ -402,6 +414,16 @@ class PersonFollower(Node):
             person = dict(self._last_person)
 
         if person is not None:
+            # ⚠️ 重新认领（掉头/遮挡后再次看见人）：**必须清掉旧的平滑状态**。
+            # 2026-11-26 用户报"掉头重新识别到人之后左右摆"：旧 `_ema['cx']` 还是
+            # 掉头前那一侧的中心，新框在另一侧 → 平滑值要爬好几帧才到，这期间
+            # 误差方向是错的 → 车先往反方向转，再纠正 = 左摆右摆。
+            if not self._seen_prev:
+                self._ema['cx'] = None
+                self._ema['h'] = None
+                self.err_dot = 0.0
+                self._prev_cx = None
+                self._reacq_until = now + self.reacq_soft_s
             a = max(0.05, min(1.0, self.smooth_alpha))
             h_raw = float(person.get('h', 0.0))
             cx_raw = float(person['x']) + float(person['w']) / 2.0
@@ -572,6 +594,12 @@ class PersonFollower(Node):
             gate_exit=self._exit_gate, search=search_now,
             lost_side=self._last_side, err_dot=self.err_dot)
 
+        # 重新认领后的软对准：误差已不大就先别满速修（掉头那种大误差照旧满速追）
+        if (now < self._reacq_until and reason in ('facing', 'following')
+                and self._ema['cx'] is not None):
+            w = reacq_cap(w, float(self._ema['cx']) - 0.5, True,
+                          self.reacq_wmax, self.reacq_soft_ex)
+
         # —— 雷达续跟接管（2026-11-24）——
         # 只在**相机已经丢人**（target_lost/no_target/target_gone）时接管；
         # 门口出门（gate_exit）、原地找人（search）这些"安全相关"的状态不许被覆盖。
@@ -680,7 +708,10 @@ class PersonFollower(Node):
         # 左右摆自动阻尼：只在"跟着人走"的阶段生效（原地对准/找人要满速转，别收）。
         # 收的是**目标**角速度，再由下面的斜坡限幅平滑，所以不会跳变。
         if reason in ('following', 'obstacle_slow', 'lidar_follow', 'lidar_slow',
-                      'lidar_face', 'lidar_blind_hold'):
+                      'lidar_face', 'lidar_blind_hold',
+                      # 2026-11-26：原地对准（facing）也会摆，一并交给自动阻尼。
+                      # 它只"收力"，不会让车不转（最多收到 35%）。
+                      'facing'):
             self.osc_gain = self._osc.update(w, dt)
         else:
             self.osc_gain = self._osc.update(0.0, dt)
@@ -714,6 +745,7 @@ class PersonFollower(Node):
                 '指令已发但车没动：v 命令 %.3f m/s，里程计 %.3f m/s（查运动门/急停/底盘硬限）'
                 % (pv, self.odom_v), throttle_duration_sec=10.0)
 
+        self._seen_prev = person is not None
         self._state(reason, pv, pw, box_h)
 
     def destroy_node(self):
