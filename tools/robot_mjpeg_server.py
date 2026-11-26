@@ -67,7 +67,11 @@ FOLLOW_PUB = [None]
 FOLLOW_SVC: dict = {'cfg': None, 'at': 0.0, 'busy': False}
 FOLLOW_HEARTBEAT_LOST_S = 25.0     # 页面关掉/断网后多久停服务（页面 5 s 一次 prep 心跳）
 FOLLOW_LAST_CFG = [None]           # 上一次生效的服务状态（只在变化时打日志）
-FOLLOW_UNITS = ('fwr-vision', 'fwr-follow')
+# 跟随模式要一起起/停的服务。
+# ⚠️ `fwr-legtracker` 必须在这里：相机看不到人（人绕到车侧/车后）时由雷达接管续跟，
+# 雷达节点没跑的话 `/robot/lidar/persons` 没有发布者 → `person_follower` 的轨迹表是空的
+# → 人一走背后就只是停车，页面也永远不会显示"📡 雷达跟踪"（2026-11-26 用户报）。
+FOLLOW_UNITS = ('fwr-vision', 'fwr-follow', 'fwr-legtracker')
 
 
 def follow_service_target(on: bool, prep: bool, leave: bool) -> bool | None:

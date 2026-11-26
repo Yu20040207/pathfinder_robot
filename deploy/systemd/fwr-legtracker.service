@@ -1,0 +1,20 @@
+# /etc/systemd/system/fwr-legtracker.service
+[Unit]
+Description=Leg tracker (360-degree lidar person tracking for follow mode)
+# 只订阅话题，**不发速度**（有 AST 单测钉死）；跟随仍由 fwr-follow 决定
+After=network-online.target fwr-base.service fwr-camera.service
+Wants=network-online.target fwr-base.service
+
+[Service]
+Type=simple
+User=manbaout
+WorkingDirectory=/home/manbaout/Company_Project/Four-wheel-robot
+# 雷达腿跟踪：/scan_merged (10 Hz, 360°) + /odom → /robot/lidar/persons
+# 只在跟随模式里跑（fwr-media 的 /follow?prep=1 一起拉起，leave=1 一起停），
+# **不要 enable**：开机常驻没必要，还会和 fwr-base 抢 CPU。
+ExecStart=/bin/bash -lc "source /opt/ros/humble/setup.bash && source ros2_ws/install/setup.bash && exec ./.venv/bin/python -m fwr_bringup.leg_tracker"
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

@@ -30,6 +30,7 @@ import math
 import time
 
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
@@ -231,14 +232,18 @@ def main(args=None) -> None:
     node = LegTrackerNode()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         try:
             node.destroy_node()
         except Exception:                        # noqa: BLE001
             pass
-        rclpy.shutdown()
+        # ⚠️ SIGTERM 时 rclpy 的信号处理器已经 rcl_shutdown；再调一次会抛
+        # `RCLError: rcl_shutdown already called` → 退出码 1 → systemd 记 failed
+        # （2026-11-24 fwr-vision 每十几秒崩一次就是这个）。
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

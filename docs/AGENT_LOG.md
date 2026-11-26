@@ -12963,3 +12963,42 @@ sudo nmcli con up 4g
 **验证**：`tests/test_page_remote_media.py::test_follow_ui_refresh_corner_bigger_joystick_and_two_buttons`；
 页面测试 28 例（含相机切换、建图布局）全过；`node --check` 通过；
 页面 218739 B / md5 `f040eb85…` 与 80 端口一致。**未验证**：手机实际手感与按钮尺寸。
+
+### 2026-11-26 11:35 人走到车后「画面追不上 + 雷达也不跟」：腿跟踪节点从来没启动过
+
+用户报：「现在我从车面前走到后面的时候，画面追不上，而且雷达也没显示跟随」。
+
+**诊断（只读，已确认）**
+- `fwr-vision` / `fwr-follow` 都 active，`/person_detector`、`/person_follower` 在跑；
+- **`leg_tracker` 不在节点表里**，`/robot/lidar/persons` 没有发布者；
+- `/followstate` 里 `src:"cam"`、`lidar_id:-1` → 雷达融合链路整条是空的。
+- 根因：腿跟踪 P1 当时只做过"手动跑一次录 bag"，**从来没接进 systemd / 跟随模式的启停清单**
+  （`docs/AGENT_LOG.md` 2026-11-24 条目写的"未部署、未启动"就是这个）。
+  所以人一走背后：相机 0.8 s 丢人 → 没有雷达轨迹可接管 → 直接停车等人，
+  页面也就永远看不到「📡 雷达跟踪」。
+
+**改动**
+1. 新增 `deploy/systemd/fwr-legtracker.service`（`python -m fwr_bringup.leg_tracker`，
+   `Restart=always`，`After=fwr-base`）。**不要 enable**：只在跟随模式里按需跑。
+2. `tools/robot_mjpeg_server.py` 的 `FOLLOW_UNITS` 加上 `'fwr-legtracker'`
+   → `/follow?prep=1` 和 `leave=1` 会跟 vision/follow 一起起停。
+3. `leg_tracker.main()` 修掉**二次 `rclpy.shutdown()`**（与 `person_detector` 同一个坑，
+   SIGTERM 时 RCLError → 退出码 1 → systemd 记 failed → 每次停服务都留一条失败）。
+
+**部署（已获批）**：`leg_tracker.py` 同时落到 **src 与 build 两处**
+（实机 import 解析到 `ros2_ws/build/.../leg_tracker.py`，只改 src 不生效）、
+新单元 `daemon-reload`、`restart fwr-media`、手动 `start fwr-legtracker` 验证。
+
+**实测（已验证）**
+- `systemctl is-active fwr-legtracker` = active；日志
+  `雷达腿跟踪就绪（只发布、不发速度）：扫描 /scan_merged，腿宽 0.03~0.30 m，腿距 0.15~0.60 m…`；
+- `/robot/lidar/persons` **9.99 Hz**（11 帧窗口 std 2.5 ms）；
+- 每帧自检 `簇 40 个 | 最佳腿对 间距 0.15 m 距离 1.69 m | 轨迹 N`；
+  笔电环境里同时有 8~9 条"静止疑似家具"轨迹（未相机背书，标 `?cam`）→
+  **只有被相机点名过的那一条会被跟随**，家具不会招车（`pick_lidar_track` 里过滤 static）；
+- CPU **20.9%**（单个 python 进程，跟随模式期间才跑）。
+- **未验证**：真机"人从车前绕到车后 → 雷达接管转身"的完整闭环（需要用户现场走一遍）。
+
+**现场预期**：人先在车前站定、绿框锁定；绕到车后时提示行应变成
+「📡 雷达跟踪 · 距离 xx cm」，车原地转向跟人。雷达续跟窗口 `lidar_hold_s = 8 s`，
+超过 8 s 相机完全看不到就停车（安全边界，不是 bug）。

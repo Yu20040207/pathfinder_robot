@@ -144,3 +144,23 @@ def test_unit_file_exists_and_enables_restart():
     assert 'Restart=always' in body
     assert 'media_relay.py' in body
     assert 'HOME=/home/manbaout' in body, 'systemd 缺 HOME 会让节点起不来'
+
+
+def test_follow_services_include_leg_tracker():
+    """2026-11-26 用户报「人走到车后面画面追不上、雷达也没显示跟随」。
+
+    真因：`leg_tracker` 从来没被拉起过 —— `/robot/lidar/persons` 没有发布者，
+    `person_follower` 的轨迹表是空的，相机丢人后没有雷达可接管。
+    现在它跟视觉/跟随节点一起按需启停。
+    """
+    text = (ROOT / 'tools' / 'robot_mjpeg_server.py').read_text(encoding='utf-8')
+    assert "FOLLOW_UNITS = ('fwr-vision', 'fwr-follow', 'fwr-legtracker')" in text
+    unit = (ROOT / 'deploy' / 'systemd' / 'fwr-legtracker.service').read_text(encoding='utf-8')
+    assert 'python -m fwr_bringup.leg_tracker' in unit
+    assert 'Restart=always' in unit
+    # 腿跟踪只发观测、不发速度（AST 单测另外钉死），单元里也不许出现运动门
+    assert 'motion_enabled' not in unit
+    # main() 不许重复 shutdown（SIGTERM 时会 RCLError → systemd 记 failed）
+    src = (ROOT / 'ros2_ws' / 'src' / 'fwr_bringup' / 'fwr_bringup' / 'leg_tracker.py').read_text(encoding='utf-8')
+    assert 'ExternalShutdownException' in src
+    assert 'if rclpy.ok():' in src
