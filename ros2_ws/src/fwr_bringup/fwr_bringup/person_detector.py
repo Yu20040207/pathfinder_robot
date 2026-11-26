@@ -93,7 +93,10 @@ class PersonDetector(Node):
         # 0.10~0.27 之间跳（阈值 0.35 就在旁边）→ 光照一变就越线。默认提到 0.45。
         self.conf = float(p('conf', 0.45).value)
         self.iou = float(p('iou', 0.45).value)
-        self.detect_hz = float(p('detect_hz', 8.0).value)
+        # 2026-11-26 用户报"转弯有点跟不上"：跟转过头是延迟问题，不是转速不够
+        # （ω 已顶到 0.74 硬限）。检测 8 → 12 Hz，把"看到人转身"的延迟从 125 ms 降到 83 ms。
+        # 相机 15 fps 是上限，12 Hz 留了余量；推理 30~38 ms（含姿态校验）也放得下。
+        self.detect_hz = float(p('detect_hz', 12.0).value)
         self.person_class = int(p('person_class', 0).value)
 
         # 姿态二次校验（2026-11-26）：杂物会出现 0.9 分的"关键点"，但姿态框分只有 0.003，

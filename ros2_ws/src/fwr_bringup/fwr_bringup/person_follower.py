@@ -47,7 +47,10 @@ class PersonFollower(Node):
         # 20 Hz 与手动摇杆同频：10 Hz 更新对固件速度环来说太粗，车会一顿一顿
         self.follow_hz = float(p('follow_hz', 20.0).value)
         self.heartbeat_timeout = float(p('heartbeat_timeout', 3.0).value)
-        self.smooth_alpha = float(p('smooth_alpha', 0.35).value)   # 框的 EMA
+        # 框中心 EMA：0.35 → 0.5（2026-11-26，跟随转弯"跟不上"）。
+        # α=0.35 时滞后 ≈(1-α)/α=1.86 帧，8 Hz 下约 230 ms；α=0.5 只剩 1 帧 ≈83 ms。
+        # 抖动的兜底仍在 `OscGuard`（观测到 ω 反复变号会自动收增益），别把它关掉。
+        self.smooth_alpha = float(p('smooth_alpha', 0.50).value)   # 框的 EMA
         # 跟随专用参数（ROS 参数可覆盖，默认值见 follow_core.DEFAULTS）
         self.p = {k: type(v)(p(k, v).value) for k, v in DEFAULTS.items()}
         self.v_accel = float(p('v_accel', 0.60).value)      # m/s²
