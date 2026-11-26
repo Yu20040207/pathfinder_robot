@@ -14234,6 +14234,10 @@ build_system_prompt(now=None)  # SYSTEM_PROMPT + time_sentence()
   相关子集 `test_follow_core`+`test_person_detector`+`test_follow_reacquire`+
   `test_lidar_fusion`+`test_vision_pose_gate`+`test_base_decel` → **152 passed**。
 
-**状态**：已提交，**未部署**（等用户批准；`fwr-follow` 要在跑的进程里重启才生效）。
+**状态**：已提交 `6814ec3`，**已部署（2026-11-26 16:05）**：
+`follow_core.py` / `person_follower.py` → 车上 **src + build**，md5 三方一致
+（`fe68d9ea…` / `756dfad8…`），车上 build 副本 `py_compile` 通过、`def reacq_cap` 存在。
+部署时 `fwr-vision` / `fwr-follow` **都是 inactive**（用户已退出跟随模式）→ **无需重启**，
+下次进跟随模式即为新代码。
 **未验证**：实车掉头后是否还摆。若仍摆，下一步抓 `/follow/state` 的 `w`/`err` 序列 + 
 `journalctl -u fwr-follow` 看是 `facing` 还是雷达 `lidar_face` 在摆，再决定收 `yaw_kp` 或加大 `yaw_kd`。
