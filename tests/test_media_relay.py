@@ -57,6 +57,7 @@ def test_drops_garbage_before_first_marker():
     ({'cmd': 'play', 'ch': 0, 'profile': 'eco'}, ('play', 0, 'eco')),
     ({'cmd': 'play', 'ch': 1, 'profile': 'eco'}, ('play', 1, 'eco')),
     ({'cmd': 'ping'}, ('pong', -1, '')),
+    ({'cmd': 'proxy', 'id': '1', 'path': '/boxes'}, ('proxy', -1, '')),
     ({'cmd': 'bogus'}, ('ignore', -1, '')),
     ({'cmd': 'play', 'ch': 9}, ('ignore', -1, '')),
     ({'cmd': 'play', 'ch': 'x'}, ('ignore', -1, '')),
@@ -79,6 +80,17 @@ def test_slot_roundtrip(ch, profile, slot):
     """槽位号 = 通道 + 档位偏移；反解必须还原（云端按槽位分发帧）。"""
     assert relay.slot_of(ch, profile) == slot
     assert relay.channel_of(slot) == (ch, profile)
+
+
+def test_proxy_is_whitelisted():
+    """云端只能让车端打白名单里的本机接口（别做成任意 URL 转发）。
+    2026-11-26：跟随模式的 /boxes /select /follow 在 4G 上要经这里转发。"""
+    text = (ROOT / 'tools' / 'media_relay.py').read_text(encoding='utf-8')
+    assert 'PROXY_PATHS = (' in text
+    for want in ("'/boxes'", "'/select'", "'/follow'", "'/followstate'"):
+        assert want in text, f'白名单缺 {want}'
+    assert 'not path.startswith(PROXY_PATHS)' in text, '必须拒绝白名单外的路径'
+    assert 'async def _proxy(' in text
 
 
 def test_slot_rejects_garbage():

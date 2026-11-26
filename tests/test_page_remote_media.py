@@ -91,3 +91,25 @@ def test_page_refreshes_token_when_switching_camera():
     body = text()
     assert body.count('if (camViaRemote) camRefreshMedia().then(camReload);') == 1
     assert body.count('if (camViaRemote) camRefreshMedia().then(reload);') == 1
+
+
+def test_follow_mode_works_over_relay():
+    """2026-11-26 用户报「切到跟随模式画面是黑的」：跟随模式原来只认局域网地址。
+
+    现在视频走 `followVideoURL()`（异地 → 同源 `/api/...`），面板接口走
+    `followFetch()`（异地 → `/api/devices/<id>/vision/...`），并且**固定主摄**
+    （人体识别只跑 HP60C 那一路）。
+    """
+    body = text()
+    assert 'function followRemote()' in body
+    assert 'function followVideoURL()' in body
+    assert 'function followFetch(path)' in body
+    assert "?cam=main&profile=' + camProfile()" in body
+    assert "api('/api/devices/' + DEVICE + '/vision' + path)" in body
+    # 所有面板接口都不许再直连局域网
+    assert 'fetch(followBase() + ' in body        # 只允许 followFetch 内部这一处
+    assert body.count('fetch(followBase() + ') == 1
+    # 进跟随模式必须把中继信息一起存下来，否则 followRemote() 永远为假
+    assert 'followMedia = m;' in body and 'camRemote = m.remote || camRemote;' in body
+    # 视频挂载统一走 camMount（换新节点断旧长连接）
+    assert "camMount('followImg', followVideoURL(), true)" in body

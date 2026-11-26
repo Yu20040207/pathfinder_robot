@@ -30,11 +30,13 @@ import json
 import os
 import sqlite3
 import time
+import itertools
 from typing import Dict, Optional, Set
 
 import jwt
-from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import StreamingResponse
+from fastapi import (Depends, FastAPI, Header, HTTPException, Request,
+                     WebSocket, WebSocketDisconnect)
+from fastapi.responses import Response, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -77,6 +79,9 @@ MEDIA_PORT = os.environ.get('JC_MEDIA_PORT', '8081')
 # 车端媒体中继（异地看画面）：车主动拨出，云端按 device_id 路由
 MEDIA_TOKEN = os.environ.get('JC_MEDIA_TOKEN', '')
 MEDIA_MAX_CLIENTS = int(os.environ.get('JC_MEDIA_MAX_CLIENTS', '6'))
+MEDIA_PROXY_TIMEOUT = 2.5
+_PROXY_SEQ = itertools.count(1)
+
 MEDIA_STREAM_TTL = int(os.environ.get('JC_MEDIA_STREAM_TTL', '180'))
 
 # device_id -> {'ws': WebSocket|None, 'subs': {slot: set[Queue]}, 'frames': int, 'bytes': int}
@@ -309,7 +314,7 @@ def _require_owner(user_id: int, device_id: str) -> None:
 def _media_hub(device_id: str) -> dict:
     hub = MEDIA_HUBS.get(device_id)
     if hub is None:
-        hub = {'ws': None, 'subs': {}, 'frames': 0, 'bytes': 0}
+        hub = {'ws': None, 'subs': {}, 'frames': 0, 'bytes': 0, 'proxy': {}}
         MEDIA_HUBS[device_id] = hub
     return hub
 
@@ -317,6 +322,44 @@ def _media_hub(device_id: str) -> dict:
 def active_streams() -> int:
     return sum(len(queues) for hub in MEDIA_HUBS.values()
                for queues in hub['subs'].values())
+
+
+"""多机代理：跟随模式的 `/boxes` `/select` `/follow` 都打机器人 8081，
+手机在 4G 上连不到 → 云端用同一条中继 WS 把请求转下去（车端只放行白名单路径）。"""
+
+
+async def _relay_http(device_id: str, path: str) -> tuple[int, str]:
+    hub = MEDIA_HUBS.get(device_id) or {}
+    ws = hub.get('ws')
+    if ws is None:
+        raise HTTPException(503, '机器人不在线：先用手机连上机器人（云端中继）')
+    rid = str(next(_PROXY_SEQ))
+    fut = asyncio.get_running_loop().create_future()
+    hub.setdefault('proxy', {})[rid] = fut
+    try:
+        await ws.send_json({'cmd': 'proxy', 'id': rid, 'path': path})
+        msg = await asyncio.wait_for(fut, MEDIA_PROXY_TIMEOUT)
+    except asyncio.TimeoutError:
+        raise HTTPException(504, '机器人响应超时（可能是车端媒体服务在重启）')
+    except Exception:                        # noqa: BLE001
+        raise HTTPException(503, '车端连接刚刚断开，请刷新重试')
+    finally:
+        hub.get('proxy', {}).pop(rid, None)
+    return int(msg.get('status') or 502), str(msg.get('body') or '')
+
+
+@app.get('/api/devices/{device_id}/vision/{sub:path}')
+async def device_vision_proxy(device_id: str, sub: str, request: Request,
+                              authorization: str = Header(default='')):
+    """`/vision/boxes` `/vision/select` `/vision/follow` `/vision/followstate` 的异地转发。"""
+    user_id = current_user(authorization)
+    _require_owner(user_id, device_id)
+    if sub.split('?')[0] not in ('boxes', 'select', 'follow', 'followstate', 'healthz'):
+        raise HTTPException(404, '不支持的面板接口')
+    qs = request.url.query
+    status, body = await _relay_http(device_id, '/' + sub + (('?' + qs) if qs else ''))
+    return Response(content=body, status_code=status,
+                    media_type='application/json')
 
 
 @app.get('/api/media/health')
@@ -380,6 +423,10 @@ async def media_ws(ws: WebSocket, device_id: str, token: str = ''):
                     continue
                 if msg.get('type') == 'hello':
                     STATE_CACHE.setdefault(device_id, {})['media_relay'] = True
+                elif msg.get('type') == 'proxy':
+                    fut = hub.get('proxy', {}).pop(str(msg.get('id')), None)
+                    if fut is not None and not fut.done():
+                        fut.set_result(msg)
     except WebSocketDisconnect:
         pass
     finally:

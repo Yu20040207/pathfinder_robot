@@ -200,3 +200,17 @@ def test_stream_requests_eco_profile_from_robot():
     assert 'slot = media_slot(cam, profile)' in text
     assert "hub['subs'].setdefault(slot, set())" in text
     assert 'MEDIA_PROFILE_OFFSET = {' in text
+
+
+# ---------------------------------------------------------------- 面板接口代理（跟随模式异地）
+
+def test_vision_proxy_endpoint_exists():
+    """跟随模式的 `/boxes` `/select` `/follow` 都打机器人 8081，手机在 4G 连不到，
+    必须经中继转发（否则进跟随模式就黑屏/没框，2026-11-26 用户报）。"""
+    text = (ROOT / 'cloud' / 'api' / 'app.py').read_text(encoding='utf-8')
+    assert "@app.get('/api/devices/{device_id}/vision/{sub:path}')" in text
+    assert 'async def _relay_http(' in text
+    assert "'cmd': 'proxy'" in text
+    assert 'MEDIA_PROXY_TIMEOUT' in text
+    for name in ('boxes', 'select', 'follow', 'followstate'):
+        assert f"'{name}'" in text

@@ -80,6 +80,9 @@ def jpeg_frames(buf: bytearray) -> list[bytes]:
         del buf[:end + 2]
 
 
+#: 允许云端经中继代理的本机 HTTP 路径（前缀匹配）。**只加白名单，不要放开任意路径**
+PROXY_PATHS = ('/boxes', '/select', '/follow', '/followstate', '/healthz')
+
 #: 画质档 → 槽位偏移：`low`=高清档（480 宽），`eco`=弱网档（320 宽，手机 4G）
 PROFILE_SLOT = {'low': 0, 'eco': 2}
 
@@ -107,6 +110,10 @@ def control_action(msg: dict) -> tuple[str, int, str]:
     cmd = str(msg.get('cmd') or '')
     if cmd == 'ping':
         return 'pong', -1, ''
+    if cmd == 'proxy':
+        # 异地看跟随模式：页面的 `/boxes` `/select` `/follow` 都是打本机 8081 的，
+        # 手机在 4G 上根本连不到 → 云端用同一条 WS 把请求转下来（见 `_proxy`）。
+        return 'proxy', -1, ''
     if cmd not in ('play', 'stop'):
         return 'ignore', -1, ''
     try:
@@ -214,6 +221,36 @@ class MediaRelay:
                 self.frames_sent += 1
                 self.bytes_sent += len(frame)
 
+    # ---- 本机 HTTP 代理（异地页面要用的 /boxes /select /follow）----
+    async def _proxy(self, ws, session, msg: dict) -> None:
+        """把云端的 HTTP 请求打到本机 8081，再把结果原样回传。
+
+        ⚠️ 只允许白名单路径（前缀 `/boxes` `/select` `/follow` `/followstate` `/healthz`），
+        别做成"任意 URL 转发"——那等于给云端开了一个能打本机任意端口的洞。
+        """
+        rid = str(msg.get('id') or '')
+        path = str(msg.get('path') or '')
+        if not rid or not path.startswith('/'):
+            return
+        if not path.startswith(PROXY_PATHS):
+            return await self._proxy_reply(ws, rid, 403, '{"error":"path not allowed"}')
+        import aiohttp
+        url = self.local.rstrip('/') + path
+        try:
+            timeout = aiohttp.ClientTimeout(total=2.0)
+            async with session.get(url, timeout=timeout) as resp:
+                body = await resp.text()
+                await self._proxy_reply(ws, rid, resp.status, body)
+        except Exception as exc:              # noqa: BLE001
+            await self._proxy_reply(ws, rid, 502, json.dumps({'error': str(exc)}))
+
+    async def _proxy_reply(self, ws, rid: str, status: int, body: str) -> None:
+        try:
+            await ws.send_str(json.dumps({'type': 'proxy', 'id': rid,
+                                          'status': status, 'body': body}))
+        except Exception:                     # noqa: BLE001
+            pass
+
     # ---- 单次连接 ----
     async def _session_once(self, url: str) -> None:
         import aiohttp
@@ -240,6 +277,8 @@ class MediaRelay:
                             self.start_puller(http, slot_of(ch, profile))
                         elif action == 'stop':
                             self.stop_puller(slot_of(ch, profile))
+                        elif action == 'proxy':
+                            asyncio.create_task(self._proxy(ws, http, data))
                     elif msg.type in (aiohttp.WSMsgType.CLOSED,
                                       aiohttp.WSMsgType.ERROR):
                         break

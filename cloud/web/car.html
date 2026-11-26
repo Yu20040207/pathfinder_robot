@@ -4326,6 +4326,34 @@ function followBase() {
   return u.replace(/\/video(\?.*)?$/, '');
 }
 
+/* 2026-11-26 用户报「切到跟随模式画面是黑的」：跟随模式原来**只认局域网地址**
+   （`followMedia.url` = http://<lan_ip>:8081/video），手机在 4G 上根本连不到 →
+   画面全黑，`/boxes` `/select` `/follow` 也一样打不通。
+   现在跟随模式跟手动模式共用同一套判断：能直连就走局域网，异地走云端中继。 */
+function followRemote() {
+  return !!(camRemote && camRemote.url &&
+            (camViaRemote || !(camMedia && camMedia.url)));
+}
+
+/* 跟随画面**固定主摄**（人体识别只跑 HP60C 那一路，别跟着右上角的广角切换走） */
+function followVideoURL() {
+  if (followRemote()) {
+    return camRemote.url + '?cam=main&profile=' + camProfile() + '&t=' +
+      encodeURIComponent(camRemote.token || '');
+  }
+  const base = String((followMedia || camMedia || {}).url || '');
+  return base ? base + '?t=' + Date.now() : '';
+}
+
+/* 跟随模式的面板接口：异地经 `/api/devices/<id>/vision/...` 由车端中继转发 */
+async function followFetch(path) {
+  if (followRemote()) {
+    return api('/api/devices/' + DEVICE + '/vision' + path);
+  }
+  const res = await fetch(followBase() + path, { cache: 'no-store' });
+  return res.json().catch(() => ({}));
+}
+
 // 画面用 object-fit: contain，画布是全屏的 → 先算真正的图像矩形，框才不会被拉伸
 function followImgRect() {
   const st = $('followStage');
@@ -4440,7 +4468,7 @@ function drawFollow() {
 
 async function followSelect(id) {
   try {
-    await fetch(followBase() + '/select?id=' + id + '&t=' + Date.now(), { cache: 'no-store' });
+    await followFetch('/select?id=' + id);
     followSel = id;
     if (id < 0 && followOn) followStop(true);      // 取消选人 = 立即停止跟随
   } catch (e) { /* 网络抖动：保持原选择 */ }
@@ -4495,7 +4523,7 @@ async function followStart(retry) {
     return;
   }
   try {
-    await fetch(followBase() + '/follow?on=1&t=' + Date.now(), { cache: 'no-store' });
+    await followFetch('/follow?on=1');
     followOn = true;
     followKeepAt = Date.now();
     drawFollow();
@@ -4506,7 +4534,7 @@ async function followStart(retry) {
 
 async function followStop(alsoClear) {
   try {
-    await fetch(followBase() + '/follow?on=0&t=' + Date.now(), { cache: 'no-store' });
+    await followFetch('/follow?on=0');
   } catch (e) { /* 断网：节点自己有心跳超时保护 */ }
   followOn = false;
   if (alsoClear) followSel = -1;
@@ -4521,8 +4549,7 @@ function followPrep() {
   if (!followWanted) return;
   if (Date.now() - followPrepAt < 5000) return;
   followPrepAt = Date.now();
-  fetch(followBase() + '/follow?prep=1&t=' + Date.now(),
-        { cache: 'no-store' }).catch(() => {});
+  followFetch('/follow?prep=1').catch(() => {});
 }
 
 // 心跳：跟随期间每 1 s 发一次，节点 2 s 收不到就停车（页面关掉/断网自保）
@@ -4530,14 +4557,13 @@ function followKeepalive() {
   if (!followOn || !followWanted) return;
   if (Date.now() - followKeepAt < 900) return;
   followKeepAt = Date.now();
-  fetch(followBase() + '/follow?on=1&t=' + Date.now(), { cache: 'no-store' }).catch(() => {});
+  followFetch('/follow?on=1').catch(() => {});
 }
 
 async function followStatePoll() {
   if (!followWanted) return;
   try {
-    const r = await fetch(followBase() + '/followstate?t=' + Date.now(), { cache: 'no-store' });
-    followStateData = await r.json();
+    followStateData = await followFetch('/followstate');
   } catch (e) { followStateData = { on: false, reason: 'no_node' }; }
   if (followStateData && followStateData.on === false && followOn) {
     // 节点自己停了（心跳超时/目标丢失）：页面跟着复位，别显示"还在跟"
@@ -4551,8 +4577,7 @@ async function followPollOnce() {
   if (!followWanted) return;
   followPrep();              // 5 s 节流，兼作服务心跳
   try {
-    const r = await fetch(followBase() + '/boxes?t=' + Date.now(), { cache: 'no-store' });
-    followData = await r.json();
+    followData = await followFetch('/boxes');
     // 车端是"选中谁"的唯一权威：id 被重新认领（1→7）时页面必须跟着换，
     // 否则绿框永远对不上新 id，看起来像"目标丢了、要重新点"（2026-11-22 用户报）
     if (typeof followData.sel === 'number' &&
@@ -4593,7 +4618,7 @@ function followVideoRestart(reason) {
   setTimeout(() => {
     if (!followWanted || !followMedia) return;
     // ⚠️ 不能只清 src：WebKit 不会断掉旧的 MJPEG 长连接，攒满 6 条就黑屏
-    camMount('followImg', followMedia.url + '?t=' + Date.now(), true);
+    camMount('followImg', followVideoURL(), true);
   }, 60);
   if (followVideoFails >= 3) {
     followVideoFails = 0;
@@ -4635,15 +4660,20 @@ async function startFollow() {
   followEnteredAt = Date.now();
   followPrepAt = 0;          // 立即发一次 prep，把服务拉起来
   const img = $('followImg');
-  if (!followMedia) {
-    try {
-      followMedia = camMedia || await api('/api/devices/' + DEVICE + '/media');
-    } catch (e) {
-      $('followHint').textContent = '取不到摄像头地址：' + String(e.message || e);
-      return;
-    }
+  try {
+    // ⚠️ 必须把 `remote` 一起存下来：只存 `followMedia`（局域网地址）的话，
+    // `followRemote()` 拿不到中继地址 → 又退回局域网 URL → 4G 上黑屏。
+    const m = await api('/api/devices/' + DEVICE + '/media');
+    camMedia = m;
+    followMedia = m;
+    camRemote = m.remote || camRemote;
+    if (!m.url) camViaRemote = true;
+    if (followRemote()) await camRefreshMedia();   // 令牌 180 s 就过期，进模式先换新的
+  } catch (e) {
+    $('followHint').textContent = '取不到摄像头地址：' + String(e.message || e);
+    return;
   }
-  img.src = followMedia.url + '?t=' + Date.now();
+  camMount('followImg', followVideoURL(), true);   // 换新节点断旧长连接（见 camMount 黑屏事故）
   followPrep();              // 地址已拿到，马上拉服务
   $('followRefresh').classList.add('show');
   clearInterval(followPoll);
@@ -4659,8 +4689,7 @@ function stopFollow() {
   // 旧写法每次切后台/切模式都 stop 服务，页面再 prep 又拉起来 → 识别反复重启，
   // 手机端就跳到"人体识别没在跑"。
   try {
-    fetch(followBase() + '/follow?leave=1&t=' + Date.now(),
-          { cache: 'no-store', keepalive: true }).catch(() => {});
+    followFetch('/follow?leave=1').catch(() => {});
   } catch (e) {}
   try { fResetKnob(); } catch (e) { /* 页面加载早期还没绑定摇杆 */ }
   clearInterval(followPoll);
@@ -4749,7 +4778,7 @@ document.addEventListener('visibilitychange', () => {
 window.addEventListener('pagehide', () => {
   if (followOn) {
     try {
-      fetch(followBase() + '/follow?on=0', { cache: 'no-store', keepalive: true });
+      followFetch('/follow?on=0').catch(() => {});
     } catch (e) {}
   }
 });
@@ -4760,7 +4789,7 @@ $('followRefresh').onclick = (e) => {
   camMount('followImg', '', false);
   setTimeout(() => {
     if (followWanted && followMedia) {
-      camMount('followImg', followMedia.url + '?t=' + Date.now(), true);
+      camMount('followImg', followVideoURL(), true);
     }
   }, 80);
 };

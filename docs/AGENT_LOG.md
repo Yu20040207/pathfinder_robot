@@ -12893,3 +12893,34 @@ sudo nmcli con up 4g
   时按弱网处理，属"宁卡勿糊"的取舍）。
 - 回滚：页面左上角切「高清」即可；服务端 `--eco-width 0` 关掉弱网档；
   `--low-width 0` 关掉整个异地档。
+
+### 2026-11-26 10:40 跟随模式异地（4G）黑屏：画面 + 面板接口都接到中继
+
+用户报：「切换到跟随模式的时候，摄像头画面是黑的」。
+
+**根因（已验证）**：跟随模式是**另一套取图代码**，只认局域网地址——
+`startFollow()` 里 `followMedia.url` = `http://<lan_ip>:8081/video`，
+`/boxes` `/select` `/follow` `/followstate` 也都直连 `http://<lan_ip>:8081`。
+手机在 4G 上到这个地址**没有路由、又不立刻报错**，`<img>` 就永远空着（连 `onerror` 都不触发）
+→ 全黑、没有提示、也不会自动重连。手动模式走 `camSrcURL()`（会切中继）所以正常。
+
+**改动**
+1. 页面：`followVideoURL()`（异地 → 同源 `/api/devices/<id>/stream?cam=main&profile=…&t=`，
+   **固定主摄**，因为人体识别只跑 HP60C）；`followFetch(path)`（异地 →
+   `/api/devices/<id>/vision/...`）；进跟随模式时 `camMedia/camRemote/camViaRemote` 一起存下来
+   （只存 `followMedia` 的话 `followRemote()` 永远为假），并先换新观看令牌；挂载统一走 `camMount`。
+2. 车端 `tools/media_relay.py`：新增本机 HTTP 代理（`cmd=proxy` + `id`/`path`），
+   **白名单** `PROXY_PATHS = ('/boxes','/select','/follow','/followstate','/healthz')`，
+   白名单外直接 403；超时 2 s，失败回 502。**不要做成任意 URL 转发**（等于给云端开打本机端口的洞）。
+3. 云端 `cloud/api/app.py`：`GET /api/devices/{id}/vision/{sub:path}` 经中继 WS 转发，
+   `MEDIA_PROXY_TIMEOUT 2.5 s`，按 owner 鉴权，子路径白名单。
+
+**实测（已验证）**
+- 本机端到端：`面板代理 : 200 {"ok": true, "fake": true}`，中继延迟仍 1 ms，结果 PASS。
+- 线上（公网 IP，真车）：`/vision/healthz` **200 / 57 ms**、`/vision/boxes` **200 / 46 ms**
+  （返回 `{"persons":[],"sel":-1,"stale":true}`，因为视觉服务还没被 prep 拉起）、
+  `/vision/followstate` 200 / 44 ms、`/vision/select?id=-1` 200。
+- 页面 `car.html` 216695 字节 / md5 `3e6bc22a…`，80 端口一致。
+- **未验证**：手机 4G 上进跟随模式的真实观感（等用户试）。
+- 附带说明：异地跟随画面是 `eco` 档（320 宽 10 fps），人体框是**归一化坐标**，
+  分辨率变了框仍然对齐（别改成像素坐标）。

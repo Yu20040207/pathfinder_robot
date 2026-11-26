@@ -73,8 +73,14 @@ async def fake_mjpeg_server(port: int, fps: int = 15, size: tuple = (480, 360)):
                 break
             await asyncio.sleep(1.0 / use_fps)
 
+    async def healthz(request: web.Request):
+        # 跟随模式的面板接口（/boxes /select /follow /healthz）经中继转发，
+        # e2e 用这个端点验证"云端 → 中继 → 本机 8081"这条回程链路。
+        return web.json_response({'ok': True, 'fake': True, 'boxes': 0})
+
     app = web.Application()
     app.router.add_get('/video', video)
+    app.router.add_get('/healthz', healthz)
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()
     site = web.TCPSite(runner, '127.0.0.1', port)
@@ -180,7 +186,12 @@ async def main(read_kbps: float = 0.0, profile: str = 'low') -> int:
                   f'{total * 8 / span / 1e6:.2f} Mbps')
             final = (await http.get('/api/media/health')).json()
             print('结束统计 :', json.dumps(final['devices'].get(DEV), ensure_ascii=False))
-            ok = frames >= 12 and 0.2 <= total * 8 / span / 1e6 <= 4.0
+            # 面板接口代理（跟随模式异地要用）：必须能透到本机 8081
+            proxy = await http.get(f'/api/devices/{DEV}/vision/healthz', headers=hdr)
+            print('面板代理 :', proxy.status_code, proxy.text[:80])
+            proxy_ok = (proxy.status_code == 200 and
+                        bool((proxy.json() or {}).get('ok')))
+            ok = proxy_ok and frames >= 12 and 0.2 <= total * 8 / span / 1e6 <= 4.0
             print('结果     :', 'PASS' if ok else 'FAIL')
             return 0 if ok else 1
     finally:
