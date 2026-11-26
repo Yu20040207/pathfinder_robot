@@ -51,8 +51,14 @@ def parse_state_line(line: str) -> BaseState | None:
                      *speeds, bool(active), fault)
 
 
+# 单轮指令硬上限，必须与固件 `control.h` 的 `MAX_WHEEL_MMPS` **完全一致**
+# （2026-11-26 用户批准 300 → 400：跟随前进速度从 0.29 提到 0.38 m/s）。
+MAX_WHEEL_MMPS = 400.0
+
+
 def encode_wheel_speed(left_mm_s: float, right_mm_s: float) -> bytes:
-    if not all(math.isfinite(value) and abs(value) <= 300
+    if not all(math.isfinite(value) and abs(value) <= MAX_WHEEL_MMPS
                for value in (left_mm_s, right_mm_s)):
-        raise ValueError('wheel speed must be finite and within ±300 mm/s')
+        raise ValueError('wheel speed must be finite and within '
+                         f'±{MAX_WHEEL_MMPS:.0f} mm/s')
     return f'v {left_mm_s:.3f} {right_mm_s:.3f}\n'.encode('ascii')

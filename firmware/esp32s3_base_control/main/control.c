@@ -3,11 +3,11 @@
 #include <math.h>
 #include <string.h>
 
-// 原地转向时轮子会短时打滑空转，实测可冲到 300+ mm/s。指令上限仍是 300，
+// 原地转向时轮子会短时打滑空转，实测可冲到 300+ mm/s。指令上限见 MAX_WHEEL_MMPS，
 // 这里只把“超速锁存”的门槛放宽到 420 并延长窗口，避免正常转弯被误判。
 // 2026-10-29：塑料轮在地砖上打滑时，轮子空转瞬间可超过 420 mm/s，
 // 触发 fault 3（超速）导致导航一动就停。放宽到 700 mm/s / 0.4 s：
-// 仍能抓住编码器异常或真正失控（指令上限只有 300 mm/s）。
+// 仍能抓住编码器异常或真正失控（指令上限 MAX_WHEEL_MMPS）。
 #define OVERSPEED_MMPS 700.0f
 #define OVERSPEED_WINDOW_S .4f
 
@@ -80,7 +80,8 @@ void base_init(base_control_t *c, int64_t now, int32_t left, int32_t right) {
     c->counts[1] = right;
 }
 bool base_command(base_control_t *c, float left, float right, int64_t now) {
-    if (!isfinite(left) || !isfinite(right) || fabsf(left)>300 || fabsf(right)>300 || c->fault) {
+    if (!isfinite(left) || !isfinite(right) ||
+        fabsf(left)>MAX_WHEEL_MMPS || fabsf(right)>MAX_WHEEL_MMPS || c->fault) {
         base_stop(c);
         return false;
     }

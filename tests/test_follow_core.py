@@ -246,9 +246,12 @@ def test_limit_pair_caps_omega():
 
 
 def test_limit_pair_shrinks_v_to_fit_wheel_envelope():
-    """v=0.25 + ω=0.7 时单轮 0.25+0.092=0.342 > 0.30 → 必须收线速度，不能整帧被丢。"""
-    v, w = limit_pair(0.25, 0.70)
-    assert v < 0.25
+    """v=0.30 + ω=0.7 时单轮 0.30+0.117=0.417 > 0.38 包络 → 必须收线速度，不能整帧被丢。
+
+    2026-11-26：固件协议 300→400 后包络是 0.38（manual_max 0.40 留 2 cm/s 余量）。
+    """
+    v, w = limit_pair(0.30, 0.70)
+    assert v < 0.30
     wheel = abs(v) + abs(w) * DEFAULTS['track_m'] / 2.0
     assert wheel <= DEFAULTS['max_wheel_mps'] + 1e-9
 
@@ -430,8 +433,8 @@ def test_limited_pair_always_accepted_by_chassis():
     """limit_pair 出来的任何一条指令，底盘都必须接受（否则就是"显示在转但不动"）。"""
     from fwr_bringup.base_bridge_core import BaseBridgeCore, manual_velocity
     track = BaseBridgeCore().track_m
-    cap = 0.30                     # base_bridge 的 manual_max_speed_mps
-    for v in (0.0, 0.12, 0.25, 0.29, -0.12):
+    cap = 0.40                     # base_bridge 的 manual_max_speed_mps（2026-11-26 0.30→0.40）
+    for v in (0.0, 0.12, 0.25, 0.29, 0.38, -0.12):
         for w in (0.0, 0.1, 0.3, 0.45, 0.7, -0.7):
             lv, lw = limit_pair(v, w, P)
             assert manual_velocity(lv, lw, track, cap, True), (v, w, lv, lw)

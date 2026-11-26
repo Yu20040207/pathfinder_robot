@@ -40,7 +40,7 @@ DEFAULTS = {
     # —— 速度 / 转向（跟随专用，改完不影响导航）——
     # 上限由底盘硬限决定：manual_max_speed_mps 0.30 − |ω|·track/2 ⇒ 直行最多 0.29。
     # 2026-11-21 用户再说"太慢"：0.25 → 0.29（在不改底盘安全参数的前提下到顶）。
-    'vmax': 0.29,
+    'vmax': 0.38,         # 2026-11-26 固件协议 300→400 mm/s 后：0.29 → 0.38
     # ⚠️ 必须 < 0.75：base_bridge.manual_velocity() 硬限 |ω| ≤ 0.75，超了整帧被丢
     # （日志 Rejected out-of-range manual velocity）→ 页面显示"正在转向"但车一动不动。
     # 第二版曾设 0.9，实机 facing/转弯时全被拒（2026-11-21 实测确认）。
@@ -57,7 +57,7 @@ DEFAULTS = {
     # —— 走廊避障（车身半宽 0.215，留 5 mm）——
     # 单轮速度包络：base_bridge manual_max_speed_mps=0.30，超了同样整帧被丢。
     # 留 1 cm/s 余量，命令按 |v| + |ω|·track/2 ≤ max_wheel 收（保曲率，收线速度）。
-    'max_wheel_mps': 0.29,
+    'max_wheel_mps': 0.38,   # 单轮包络上限，比 manual_max_speed_mps 0.40 留 2 cm/s 余量
     # ⚠️ 必须等于 `BaseBridgeCore().track_m`（2026-11-11 换 WSDC2412D-V3 + 100 mm 轮后
     # 实测 = **0.317**，旧值 0.262 作废）。用旧值算出的单轮包络偏小 1.3 cm/s，
     # 底盘会判超限**整帧丢弃** → 页面显示"跟随中"车不动（2026-11-21 实机踩坑，
@@ -139,7 +139,7 @@ DEFAULTS = {
     'lidar_bearing_deadband': 0.05,   # ±3° 不转（雷达有抖动）
     'lidar_kp': 1.8,            # 方位误差 → 角速度
     'lidar_wmax': 0.74,         # 雷达接管时的转向上限（与跟框 steer_wmax 一致）
-    'lidar_vmax': 0.16,         # 雷达接管时的前进上限（没相机辅助，**再保守一档**）
+    'lidar_vmax': 0.20,         # 雷达接管时的前进上限（没相机辅助，仍比跟随慢一档）
 }
 
 

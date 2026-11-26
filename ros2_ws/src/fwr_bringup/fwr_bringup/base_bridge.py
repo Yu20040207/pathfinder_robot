@@ -123,7 +123,10 @@ class BaseBridgeNode(Node):
         self.declare_parameter('manual_rear_guard_enabled', False)
         # 手动模式的**单轮**速度上限。0.30 m/s 直行时单轮正好 300 mm/s，
         # 是固件 parse_velocity 的硬上限；再高固件会直接丢弃该帧。
-        self.declare_parameter('manual_max_speed_mps', 0.30)
+        # 2026-11-26 用户批准：0.30 → 0.40（跟随前进速度随之提到 0.38）。
+        # ⚠️ 这是**手动通道共用**的底盘安全参数：手动/倒车也一起变快，
+        # 手机摇杆另有 mqtt_bridge 的 max_linear_mps 0.15 钳位。
+        self.declare_parameter('manual_max_speed_mps', 0.40)
         # 手动模式是否要求雷达数据新鲜。默认 False：手动是有人看守的低速操作，
         # 雷达偶发 2 s 卡顿（本机已知硬件问题）不该把车掐停 —— 那正是
         # "按住 W 一卡一卡"的直接原因。自动/导航链路仍然强制要求雷达。

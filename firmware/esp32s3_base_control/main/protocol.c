@@ -1,4 +1,5 @@
 #include "protocol.h"
+#include "control.h"
 #include <math.h>
 #include <stdio.h>
 #include <ctype.h>
@@ -10,7 +11,8 @@ bool parse_velocity(const char *line, float *left, float *right) {
     int end = 0;
     if (sscanf(line, "v %f %f %n", left, right, &end)!=2 || end==0) return false;
     while (line[end] && isspace((unsigned char)line[end])) ++end;
-    return !line[end] && isfinite(*left) && isfinite(*right) && fabsf(*left)<=300 && fabsf(*right)<=300;
+    return !line[end] && isfinite(*left) && isfinite(*right)
+           && fabsf(*left)<=MAX_WHEEL_MMPS && fabsf(*right)<=MAX_WHEEL_MMPS;
 }
 bool parse_duty(const char *line, float *left, float *right) {
     int end = 0;

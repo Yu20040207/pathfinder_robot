@@ -13351,3 +13351,43 @@ gate_deg=18`；车上直接调 `on_persons()` 验证方位/距离估算；相关
 `stop_box_h=0.8 resume=0.76 go=0.72 / lidar_stop=1.28 / vmax=0.29`。
 **已验证**：相关套件 **194 passed**（含改写后的 3 个钉死用例）。
 **未验证**：现场 42°/s 转向的观感与是否摆动（OscGuard 会自动收增益）。
+
+### 2026-11-26 13:35 方案 A 落地：固件单轮上限 300 → 400 mm/s，跟随前进 0.29 → 0.38 m/s
+
+用户选 **A**：「前进再快一档」。A = 改固件协议上限 + 抬底盘 manual_max + 抬跟随 vmax。
+
+**改动（4 处，固件 + ROS 必须严格配套）**
+| 层 | 改前 | 改后 |
+| --- | --- | --- |
+| 固件 `control.h` 新增 `MAX_WHEEL_MMPS` | 300（散落在两处硬编码） | **400** |
+| 固件 `control.c::base_command` / `protocol.c::parse_velocity` | `>300` / `<=300` | 用 `MAX_WHEEL_MMPS` |
+| 固件 `main.c` 帮助文本 | `<=300` | `<=400` |
+| ROS `base_protocol.MAX_WHEEL_MMPS` | 300 | **400**（与固件常量**必须一字不差**，有单测比对 `control.h`） |
+| ROS `base_bridge.manual_max_speed_mps` | 0.30 | **0.40** |
+| 跟随 `vmax` / `max_wheel_mps` | 0.29 | **0.38** |
+| 跟随 `lidar_vmax`（雷达接管前进） | 0.16 | **0.20** |
+
+**烧录（已获批）**
+- 车上**没有 ESP-IDF** → 在开发机 `source ~/esp/esp-idf/export.sh && idf.py build`，
+  只把 `bootloader.bin` / `partition-table.bin` / `fwr_base_control.bin` 传到 `/tmp`，
+  再用**车上自带的 esptool 4.7.0**（`./.venv/bin/python -m esptool`）烧
+  `/dev/ttyACM0` 460800：
+  `0x0 bootloader / 0x8000 partition-table / 0x10000 fwr_base_control`。
+  结果 `Hash of data verified.` + `Hard resetting via RTS pin...`
+- ⚠️ 烧之前**必须先 `systemctl stop fwr-base`**（base_bridge 占着 `/dev/ttyACM0`，
+  不释放会 `Invalid head of packet`）；烧完 `start fwr-base`。
+
+**实机验证（已验证）**
+- `fwr-base` active，`/base_bridge`、`/dm_imu_l1`、`/ekf_filter_node`、两路雷达都在；
+- `/scan_merged` **10.00 Hz**（窗口 std 0.5 ms）、`/odom` 正常、`/base/fault` = **0**、
+  twist 全 0（车没动，符合预期）；
+- `ros2 param get /base_bridge manual_max_speed_mps` = **0.4**；
+- 车上 `follow_core.DEFAULTS`：`vmax 0.38 / max_wheel_mps 0.38 / steer_wmax 0.74`；
+- 测试：**197 passed**，新增 `tests/test_base_protocol_limit.py`
+  （ROS 上限 = 400、401 被拒、固件 `control.h` 常量与 ROS 一致）。
+
+**未验证**
+- **地面实际最高速**：台架（架空）外推 duty 0.95 ≈ 0.39 m/s，带载可能到不了 0.38
+  （打滑/闭环顶到占空比上限），要现场测；
+- 0.38 m/s 下的**刹车距离**、急转是否摆、`OVERSPEED_MMPS 700` 会不会在急转时误触发；
+- 手动模式上限也跟着变 0.40（手机摇杆仍被 `mqtt_bridge.max_linear_mps 0.15` 钳位）。

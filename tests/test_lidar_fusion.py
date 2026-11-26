@@ -141,11 +141,13 @@ def test_lidar_follow_blocked_side_stops_turning():
 
 
 def test_lidar_follow_speed_cap_below_chassis_limit():
-    # 单轮包络：|v| + |ω|·track/2 ≤ 0.30（base_bridge 硬限）
+    # 单轮包络：|v| + |ω|·track/2 ≤ max_wheel_mps（0.38，2026-11-26 前是 0.30）
     p = DEFAULTS
     for deg in (-25, -10, 0, 10, 25):
         v, w, _r = lidar_follow(math.radians(deg), 2.2, BIG, BIG, BIG, BIG)
-        assert abs(v) + abs(w) * p['track_m'] / 2.0 <= 0.30 + 1e-9
+        assert abs(v) + abs(w) * p['track_m'] / 2.0 <= p['max_wheel_mps'] + 1e-9
+        # 底盘硬限 0.40（manual_max_speed_mps）也必须满足
+        assert abs(v) + abs(w) * p['track_m'] / 2.0 <= 0.40 + 1e-9
 
 
 # ------------------------------------------------- 轨迹换号后按位置续认

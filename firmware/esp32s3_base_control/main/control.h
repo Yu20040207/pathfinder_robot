@@ -2,6 +2,12 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+// 单轮指令硬上限（mm/s）。2026-11-26 用户批准「前进再快一档」：300 → 400。
+// 台架实测 duty 0.95 时轮速 ≈390 mm/s（架空），所以 400 是"能要到、但不长期顶"的值。
+// ⚠️ ROS 侧 `base_protocol.encode_wheel_speed()` 的上限必须跟这个数字完全一致，
+// 否则超限帧在 ROS 侧就抛异常（比固件拒收更难查）。
+#define MAX_WHEEL_MMPS 400.0f
+
 enum { BASE_OK=0, BASE_STALL=1, BASE_DIRECTION=2, BASE_OVERSPEED=3,
        BASE_ENCODER=4, BASE_TIMING=5, BASE_TRACKING=6 };
 typedef struct {
