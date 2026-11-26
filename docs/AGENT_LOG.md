@@ -14388,3 +14388,15 @@ build_system_prompt(now=None)  # SYSTEM_PROMPT + time_sentence()
 换人时日志出现 `拒绝认领：衣服颜色不像（…）`。
 **未验证**：实车换色衣服/同色衣服的判别率；如果发现"目标自己都认不回来"，
 把 `color_min_sim` 降到 0.35 或 `color_gate false` 一键关掉。
+
+### 2026-11-26 17:25 速度条只留跟随模式（用户补充要求）
+
+用户：「刚刚这个显示手动模式里面不用显示，只显示在跟随模式就好」。
+
+- 删掉手动 `#camPane` 下方、导航 `#navCamPane` 下方那两条 `spdBar`，
+  以及 `openNavCam`/`closeNavCam` 里的显隐逻辑；
+- `updateSpdBar()` 只写跟随那条（`spdF` / `spdWF`），其余字段一并删除；
+- 回归测试 `tests/test_page_speed_bar.py` 改成钉死"**只有跟随一条**"
+  （手动块 DOM 里不许出现 `spdBar`、`#spdBarManual`/`#spdBarNav` 都不许加回来），
+  相关子集 **37 passed**；JS `node --check` 通过。
+- **状态**：已提交，**页面未部署**（等用户批准）。

@@ -727,7 +727,6 @@
         <div id="camErr" class="hidden"></div>
       </div>
     </div>
-    <div class="spdBar" id="spdBarManual"><span class="dim">速度</span><b id="spdM">--</b><span class="dim">转向</span><b id="spdWM">--</b></div>
 
     <div class="joyWrap"><div id="joy"><div id="knob"></div></div></div>
     <div class="hint" id="dbg">拖动绿色摇杆控制；松手自动停车</div>
@@ -770,7 +769,6 @@
       <button id="navCamSwap" title="切换摄像头" aria-label="切换摄像头">广角</button>
       <div id="navCamErr" class="hidden"></div>
     </div>
-    <div class="spdBar hidden" id="spdBarNav"><span class="dim">速度</span><b id="spdN">--</b><span class="dim">转向</span><b id="spdWN">--</b></div>
     <div id="zoomCtl">
       <button id="navCamBtn" title="摄像头画面" aria-label="摄像头">📷</button>
       <button id="relocBtn" title="重新定位（一键播种）">📍</button>
@@ -4250,7 +4248,6 @@ let navCamWanted = false;
 async function openNavCam() {
   navCamWanted = true;
   $('navCamPane').classList.remove('hidden');
-  if ($('spdBarNav')) $('spdBarNav').classList.remove('hidden');   // 速度条跟着画面
   // 打开时画面移到最上面，两行提示浮在画面上
   if ($('navView')) $('navView').classList.add('cam-open');
   if (typeof ensureNavCanvas === 'function') setTimeout(() => ensureNavCanvas(true), 60);
@@ -4296,7 +4293,6 @@ function closeNavCam() {
   navCamWanted = false;
   camMount('navCamImg', '', false, null);
   $('navCamPane').classList.add('hidden');
-  if ($('spdBarNav')) $('spdBarNav').classList.add('hidden');
   if ($('navView')) $('navView').classList.remove('cam-open');
   if (typeof ensureNavCanvas === 'function') setTimeout(() => ensureNavCanvas(true), 60);
   $('navCamBtn').classList.remove('on');
@@ -4395,16 +4391,14 @@ function followVideoURL() {
 // iOS 后台恢复）这条 await 就一直挂着。心跳原来是挂在轮询链末尾的，链路一卡
 // 心跳就断了 → 车端 3 s 收不到 /follow/enable 自己停车 →
 // 现场表现「刚点开始跟随，车往前走一步就停下来」。
-// 画面下方速度条：线速度用里程计实测（s.speed），转向用 s.yaw_rate。
-// 三个模式各自的条一起刷（只写文本，没有布局开销）。
+// 跟随画面下方的速度条：线速度用里程计实测（s.speed），转向用 s.yaw_rate。
+// 2026-11-26 用户明确：**只在跟随模式显示**，手动/导航不要（画面区域本来就紧）。
 function updateSpdBar(v, w) {
   const vs = (typeof v === 'number') ? Math.abs(v).toFixed(2) + ' m/s' : '--';
   const ws = (typeof w === 'number') ? (w >= 0 ? '' : '-') + Math.abs(w).toFixed(2) + ' rad/s' : '--';
-  for (const [idV, idW] of [['spdM', 'spdWM'], ['spdF', 'spdWF'], ['spdN', 'spdWN']]) {
-    const a = $(idV), b = $(idW);
-    if (a) a.textContent = vs;
-    if (b) b.textContent = ws;
-  }
+  const a = $('spdF'), b = $('spdWF');
+  if (a) a.textContent = vs;
+  if (b) b.textContent = ws;
 }
 
 async function followFetch(path, timeoutMs) {
