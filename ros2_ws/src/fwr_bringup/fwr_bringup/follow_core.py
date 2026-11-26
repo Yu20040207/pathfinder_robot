@@ -120,7 +120,13 @@ DEFAULTS = {
     'lidar_reacq_deg': 15.0,    # 重新认领：方位差上限（°）——放宽到 28° 会认到旁边的东西
     'lidar_reacq_dr': 0.60,     # 重新认领：距离差上限（m）——1.2 m 太宽，容易换成别的目标
     'lidar_max_speed': 2.0,     # 轨迹速度超过这个就**不认**（推车/甩动的门/被拖的椅子）
-    'lidar_search_s': 2.5,      # 雷达短暂丢失后，原地按最后方位找人的时长（s）
+    'lidar_search_s': 4.0,      # 雷达短暂丢失后，原地按最后方位找人的时长（s）
+    'lidar_hold_max_s': 30.0,   # 相机完全看不到的最长接管时间（防止跟着残影走一整天）
+    'lidar_adopt_m': 0.80,      # 目标丢了按"预测位置"重新认领：基础半径（m）
+    'lidar_adopt_mps': 0.60,    # ……每过 1 s 再放宽多少米（人在走）
+    'lidar_adopt_vmin': 0.12,   # 认领时要求轨迹**正在走动**（m/s），家具达不到
+    'lidar_pred_max_s': 2.0,    # 匀速预测最多外推多久（超过就不猜了）
+    'lidar_static_drop_s': 2.0, # 续跟时目标"停了且没相机背书"多久就放弃（家具没有动静）
     'lidar_fresh_s': 0.5,       # 雷达轨迹多久没更新就算过期（10 Hz 扫描，0.5 s 够宽）
     'lidar_assoc_deg': 18.0,    # 相机看到人时，用它对准雷达轨迹（方位差上限）
     'lidar_back_max_s': 2.0,    # 轨迹"相机背书"的有效期（超时就不许认领/续认）
@@ -399,6 +405,51 @@ def reacquire_track(cands, last_bearing, last_r, p=None, last_id=-1):
         if db > math.radians(p['lidar_reacq_deg']) or dr > p['lidar_reacq_dr']:
             continue
         cost = dr + 0.3 * db          # 距离更可信：偏差相近时挑近的
+        if cost < best_cost:
+            best, best_cost = c, cost
+    return best
+
+
+def predict_person(mem: dict, now: float, p: dict | None = None) -> tuple:
+    """把"人最后在 odom 系的位置 + 速度"按匀速外推到 ``now``。
+
+    `mem` = ``{'x','y','vx','vy','at'}``（odom 系）。外推上限 `lidar_pred_max_s`：
+    人站在那儿不动时速度≈0，外推等于原地；人一直走，最多外推 2 s（3 m 级别）就该找到新轨迹了。
+    """
+    q = DEFAULTS if p is None else p
+    if not mem:
+        return (0.0, 0.0)
+    dt = max(0.0, min(float(now) - float(mem.get('at') or 0.0),
+                      float(q['lidar_pred_max_s'])))
+    return (float(mem['x']) + float(mem.get('vx') or 0.0) * dt,
+            float(mem['y']) + float(mem.get('vy') or 0.0) * dt)
+
+
+def adopt_moving_track(cands, pred, elapsed: float, p: dict | None = None):
+    """相机看不到人、原轨迹又换号时，按"预测位置 + 正在走动"认领一条新轨迹。
+
+    为什么需要：`pick_lidar_track` 只认"相机新鲜背书"，人绕到车侧/车后就再也认不回来
+    —— 现场表现就是"跟丢之后我还在旁边走，它也认不出我"（2026-11-26 用户报）。
+
+    安全边界（缺一不可）：
+      * 必须是**在走动**的轨迹（`lidar_adopt_vmin ≤ v ≤ lidar_max_speed`）—— 椅子/货箱不动；
+      * 必须落在**预测位置**附近（半径 `lidar_adopt_m`，每过 1 s 再放宽 `lidar_adopt_mps`）；
+      * 静止轨迹、超速轨迹一律不要；
+      * 相机背书过的优先（同样的距离，选那条）。
+    """
+    q = DEFAULTS if p is None else p
+    gate = float(q['lidar_adopt_m']) + float(q['lidar_adopt_mps']) * max(0.0, float(elapsed))
+    best, best_cost = None, 1e9
+    for c in (cands or []):
+        if c.get('static'):
+            continue
+        v = float(c.get('v', 0.0))
+        if not (float(q['lidar_adopt_vmin']) <= v <= float(q['lidar_max_speed'])):
+            continue
+        d = math.hypot(float(c['x']) - float(pred[0]), float(c['y']) - float(pred[1]))
+        if d > gate:
+            continue
+        cost = d - (0.35 if c.get('cam') else 0.0)
         if cost < best_cost:
             best, best_cost = c, cost
     return best

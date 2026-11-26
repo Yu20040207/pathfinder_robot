@@ -209,11 +209,11 @@ def test_tracker_coasts_then_drops():
     out = tr_.step([], 0.7, None)
     assert len(out) == 1
     assert out[0]['misses'] >= 1
-    # 丢 1.6 s：还在（drop_after_s 2.0 s，给人换位置留余量）
-    out = tr_.step([], 1.9, None)
-    assert len(out) == 1
-    # 丢 2.4 s：删除
+    # 丢 2.6 s：还在（drop_after_s 3.0 s，给人擦过柱子/两腿合并留够滑行余量）
     out = tr_.step([], 2.6, None)
+    assert len(out) == 1
+    # 丢 3.4 s：删除
+    out = tr_.step([], 3.4, None)
     assert out == []
 
 

@@ -13155,3 +13155,156 @@ sudo nmcli con up 4g
 gate_deg=18`；车上直接调 `on_persons()` 验证方位/距离估算；相关套件 **191 passed**
 （follow_core / lidar_fusion / leg_track / person_detector / media_relay / service_toggle）。
 **未验证**：现场"人绕到车后仍能接管、且不再跟货箱"的完整闭环。
+
+## 2026-11-26 11:08 · 语音开发接入打通（开发机：声卡 + 模型 + 唤醒闭环）
+
+### 会话目标
+用户「开始」执行上一轮计划：开发机上先做语音开发。本轮完成第 1、2 步
+（设备参数化 + 装模型 + 打通唤醒闭环），并接入用户新插的 USB 扬声器。
+
+### 仓库改动
+| 文件 | 改动 |
+| --- | --- |
+| `ros2_ws/src/fwr_voice/fwr_voice/node.py` | 新增参数 `microphone_device` / `speaker_device`（默认空 = ALSA default）；`audio_device()` 归一化；设备透传给 `MicrophoneInput` / `SherpaVitsTts` / `DashscopeCosyVoiceTts` |
+| `ros2_ws/src/fwr_voice/fwr_voice/tts.py` | `_alsa_command(rate, device)`；`play_with_alsa(..., device=None)` / `_AlsaPcmSink(device)` / `DashscopeCosyVoiceTts(..., device)`；`SherpaVitsTts.speak` 传 `self.device` |
+| `ros2_ws/src/fwr_voice/launch/voice.launch.py` | **新增**：模型目录推断（`FWR_VOICE_MODELS` → 源码树 → `~/Company_Project/...`）、设备参数、`prefix` 到 `./.venv/bin/python`、可选 `start_demo_executor` |
+| `ros2_ws/src/fwr_voice/setup.py` | `data_files` 加 `share/fwr_voice/launch` |
+| `tests/test_voice_audio.py` | 适配 `play_with_alsa` 新签名 + 补 `voice.device = None` |
+| `tests/test_voice_tts_speaker.py` | monkeypatch lambda → `*args, **kwargs`（2 处） |
+| `docs/voice/bring-up.md` | **新增**：开发机接入交接文档（设备表、模型来源、性能、三条跑法、两个坑、测试配方） |
+
+**未改执行端**：`demo_executor` 仍只发 `/demo/cmd_vel`；说「停止」仍不会让车停。
+
+### 下载的模型（`models/` 已被 .gitignore 忽略，未进仓库）
+- `models/voice/sensevoice/`：`model.int8.onnx` **239 MB** + `tokens.txt` 316 KB
+- `models/voice/vits/`：`model.onnx` **121 MB** + `tokens.txt` 331 B + `lexicon.txt` 2.4 MB
+- `models/voice/test_wavs/zh.wav` 179 KB（16 kHz mono，5.6 s）
+- 来源走 **hf-mirror.com**（本机 `github.com` 不通，`modelscope` 302、`hf-mirror` 200）：
+  `csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17`、
+  `csukuangfj/vits-zh-hf-fanchen-C`（其 onnx 名为 `vits-zh-hf-fanchen-C.onnx`，本地存成 `model.onnx`）
+
+### 已验证（命令 + 结果）
+1. **ASR**：`WavFileInput('models/voice/test_wavs/zh.wav')` → `开饭时间早上9点至下午5点。`，
+   SenseVoice **167 ms**（首次含预热）。
+2. **TTS**：VITS 加载 392 ms；生成 3.48 s 音频用 **1606 ms**（RTF ≈ 0.46）；**187 个音色**、16 kHz。
+3. **唤醒闭环（端到端，经 launch）**：
+   ```
+   识别[sensevoice, 68 ms]: 小明同学。
+   输出[awake]: 我在，请说。
+   ```
+   30 s 后 `输出[asleep]: 我退下啦，有事再叫我。`（`wake_timeout_s` 生效）
+4. **`input_wav` 反查**：用 VITS 合成「小明同学」→ 喂回 SenseVoice 得 `小明同学。`（可稳定触发唤醒门）。
+5. **参数可见**：`ros2 param list /voice_node` 有 `microphone_device` / `speaker_device`，默认空串。
+6. **文本框到端到端**：发 `/robot/voice/text_input` = `停止` → 日志 `文本输入: 停止` / `输出[accepted]: 收到`。
+7. **全量测试**：`PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest -q tests`
+   → **465 passed, 1 skipped**（跳过 `test_cloud_media_relay.py`，缺 fastapi）。
+8. **声卡实测（开发机，2026-11-26 11:07 重扫）**：
+   - `card 0 NVidia` 只有 HDMI（播不出/录不到）
+   - `card 1 PCH ALC256` 内置，可播可录
+   - **`card 2 USB Audio Device`（Generalplus `1b3f:2008`）= 用户新插的外接声卡，可播可录**
+   - `aplay -q -D plughw:2,0 /tmp/tts_probe.wav` → rc=0
+   - `arecord -D plughw:2,0 ... -d 3` → 96000 B，RMS 187（环境噪声）
+
+### 两个新发现的环境坑（**长期有效**）
+1. ⚠️ **`ros2 launch` 默认用 `/usr/bin/python3`，看不到 `.venv` 里的 `sherpa_onnx`**
+   → 节点直接 `ModuleNotFoundError: No module named 'sherpa_onnx'` 退出码 1。
+   `voice.launch.py` 用 `prefix=<repo>/.venv/bin/python` 解决（和 systemd 单元
+   `./.venv/bin/python ...` 的写法一致，可用 `FWR_VOICE_PYTHON` 覆盖）。
+   副作用：launch 进程显示成 `python-1`，但 ROS 节点名仍是 `/voice_node`。
+2. ⚠️ **source 了 ROS 环境后 `pytest tests` 收集到 0 个用例**（连既有的
+   `test_follow_core.py` 也一样，**与语音改动无关**）。ROS 侧注入
+   `ament-lint` / `launch-testing` / `colcon-core` 的 pytest hook；逐个 `-p no:` 关掉仍复现。
+   可用配方：`PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest -q tests`。
+   纯 Python 用例也可完全不 source ROS：`PYTHONPATH=ros2_ws/src/fwr_voice ...`
+
+### 另一个值得记住的行为（不是 bug）
+设备名写错会**立刻报错**而不是静默走默认：`speaker_device:=plhw:1,0`（漏了 `g`）→
+`[voice_node]: TTS failure: RuntimeError`（`play_with_alsa` 的 aplay 返回非 0 就抛）。
+所以"没声音也没报错"要怀疑是走到了 `default` 而不是目标卡。
+
+### 未验证 / 遗留
+- **真实麦克风说话**未测（`microphone_enabled:=true` 起节点正常，但没人对着麦说「小明同学」）；
+  测过一次静音采集，ASR 返回 `。`（正常）。
+- 远场唤醒距离、EchoGuard 阈值**必须在主控上重测**（开发机是近场，且麦/喇叭同机壳，回声耦合更严重）。
+- `rooms.yaml` 不存在（`room_labels` 加载 0 个房间，`/room_goal` 只打 `unknown room`）。
+- `STOP` 仍未接真实执行端。
+- 主控两侧设备表：走 SSH 查过（`card0 ALC269VC` + `card1 5MP USB Camera`），但未在上面跑过语音。
+- pytest 收集异常的确切插件未定位到单个（只确认是 ROS 侧插件群，且关掉 Python 插件自动加载可绕过）。
+
+### 当前运行状态
+测试完毕，**无残留 voice 进程**（已按 PID 清理，未用 `pkill -f`——它会匹配到自己的 ssh/bash 命令行）。
+`models/` 下新增大文件，已在 .gitignore 覆盖范围内。
+
+### 下一步
+1. 让用户对着麦克风说「小明同学」，确认 `microphone_enabled:=true` 的真实唤醒
+2. `rooms.yaml` + 语音接 `/room_goal`（房间导航）
+3. `STOP` 接真实执行端（真能停车）
+4. 部署到主控：拷模型 + systemd 单元（`Environment=HOME=/home/manbaout`）
+5. XVF3000 到货 → P0 静态 DOA 标定
+
+### 补充（2026-11-26 11:14）：内置麦克风 + 外接喇叭 声学闭环实测通过
+
+用户当时**没往 USB 声卡插麦克风**，改用开发机内置麦（card1）。
+
+| 角色 | 设备 | 实测 |
+| --- | --- | --- |
+| 麦克风 | `plughw:1,0`（card1 PCH ALC256 内置） | 可录；**环境噪声 RMS ≈160** |
+| 扬声器 | `plughw:2,0`（card2 Generalplus USB 声卡） | `aplay` rc=0，有声音 |
+
+**声学回环测试**（我放 WAV 到外接喇叭，让内置麦去听，模拟"人说话"）：
+
+```
+识别[sensevoice, 51 ms]: 。                       ← arecord 启停瞬态（无害）
+识别[sensevoice, 69 ms]: 小明同学。                 ← 内置麦听清了喇叭放出来的唤醒词
+输出[awake]: 我在，请说。
+识别[sensevoice, 60 ms]: 。                       ← 喇叭播报被自己的麦听到（无唤醒词，被忽略）
+```
+
+结论：**内置麦 → 识别 → 唤醒门 → 播报 全链路在真实声学路径上成立**，不需要人配合就能自测。
+
+⚠️ 由此确认的物理事实：**麦克风和喇叭在同一台机器上，机器人会听到自己的 TTS**。
+当前处理是靠"没有唤醒词就忽略" + 播报期间 `stop_only`（只放行 STOP），够用但属于被动防御。
+真正上 XVF3000 后应改用阵列 AEC，或播报期间冻结 DOA。
+
+⚠️ VAD 阈值 `0.02`（≈ RMS 655）比环境噪声 160 高约 4 倍：**近距离说话能触发，远距离/小声可能触发不了**。
+现场调参就是这个数（`capture_until_silence(threshold=...)`，目前没暴露成 ROS 参数）。
+
+⚠️ 每次 `arecord` 启动有瞬态爆音，会让 VAD 误触发一次 → 产生一条 `识别[...]: 。`。
+22 s 内只出现 1 次，**没做代码修改**（改成丢弃前 0.3 s 的收益不抵改动风险）；
+如果以后换成会自动增益/周期性掉线的 USB 麦导致每轮都触发，再考虑加 `warmup_s`。
+
+### 2026-11-26 12:45 跟丢之后「人还在旁边走也不认」：加"人最后位置"记忆 + 按预测位置认领走动轨迹
+
+用户报：「现在雷达还是会跟丢，而且跟丢之后，我还在旁边走，也没重新识别到」。
+
+**根因**
+1. 续跟窗口是 `lidar_hold_s 8 s`，但这个 8 s 是从 **`_lidar_at`（相机最后一次认领）** 算的，
+   而且**追溯不动**：人一走到车侧/车后，相机再也给不了新认领 → 8 s 一到，雷达接管整体失效。
+2. 认领路径只有"相机背书"（`pick_lidar_track`）和"同位置紧门限续认"（15°/0.6 m）。
+   人绕到车后时相机看不到 → 永远不会产生新背书 → **认不回来**。
+3. `leg_tracker` 的 `drop_after_s` 只有 **2.0 s**：人擦过柱子/两腿合并/被挡一下就删轨迹，
+   轨迹没了就谈不上"续"。
+
+**改动**
+- `person_follower` 新增 **`_person_mem`**（人最后在 **odom 系**的位置 + 速度 + 时刻）和
+  **`_blind_since`**（相机最后一次看到人的时刻）。相机看到人时清零，看不到时只在第一帧记一次。
+- 新增 `follow_core.predict_person()`（匀速外推，最多 `lidar_pred_max_s 2 s`）和
+  **`follow_core.adopt_moving_track()`**：相机看不到人时，按"人**应该**在的位置"认领一条
+  **正在走动**的轨迹。安全边界：必须 `lidar_adopt_vmin 0.12 ~ lidar_max_speed 2.0 m/s`、
+  必须落在 `0.8 m + 0.6 m/s × 已过时间` 的预测半径内、`static` 一律不认、有相机背书的优先。
+- 续跟窗口改成三段：
+  ① `_person_mem` 8 s（`max(lidar_hold_s, lidar_search_s)`）内可以按预测认领；
+  ② 相机完全看不到的**总时长** ≤ **`lidar_hold_max_s 30 s`**（防止跟着残影走一整天）；
+  ③ 认领/续跟到的目标若 **`static` 且无相机背书超过 `lidar_static_drop_s 2 s`**
+     → 主动放弃（回落成停车/原地找）。家具没有动静，人站着等车只是短暂静止。
+- `leg_track.drop_after_s` **2.0 → 3.0 s**（滑行更久，抗遮挡/两腿合并）。
+
+**部署（已获批）**：四个文件落 src + build 两处，重启 `fwr-legtracker`；
+`fwr-follow`/`fwr-vision` 当时 inactive，下次进跟随模式即生效。
+
+**已验证**：车上 `adopt = 0.8 + 0.6 m/s`、`hold_max = 30 s`、`drop_s = 3.0`、
+`predict_person`/`adopt_moving_track` 都在；新增 3 个纯逻辑测试（预测外推上限、
+只认走动+附近、背书优先），相关套件 **194 passed**。
+**未验证**：现场"跟丢后人继续在车侧走，能被重新认领"的完整闭环；
+以及"推着走的推车"会不会被误认领（8 s 窗口内、必须走动、必须在预测位置上，
+三条同时满足才会认——理论上概率低，但没实测）。

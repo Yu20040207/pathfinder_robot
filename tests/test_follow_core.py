@@ -609,3 +609,47 @@ def test_lidar_search_cmd_only_turns():
     assert abs(w) <= DEFAULTS['lidar_wmax'] + 1e-9 and w < 0      # 目标在右 → 右转（负）
     assert lidar_search_cmd(DEFAULTS['lidar_bearing_deadband'] * 0.5)[:2] == (0.0, 0.0)
     assert lidar_search_cmd(None)[:2] == (0.0, 0.0)
+
+
+# ---------------------------------------------- 跟丢之后「人还在旁边走」要能认回来（2026-11-26）
+
+def test_predict_person_extrapolates_but_caps():
+    from fwr_bringup.follow_core import DEFAULTS, predict_person
+    mem = {'x': 1.0, 'y': 0.5, 'vx': 0.5, 'vy': 0.0, 'at': 10.0}
+    x, y = predict_person(mem, 11.0)
+    assert (x, y) == pytest.approx((1.5, 0.5))
+    # 外推最多 lidar_pred_max_s：人走很久了也不许无限放大
+    x2, _ = predict_person(mem, 10.0 + 10 * DEFAULTS['lidar_pred_max_s'])
+    assert x2 == pytest.approx(1.0 + 0.5 * DEFAULTS['lidar_pred_max_s'])
+    assert predict_person(None, 5.0) == (0.0, 0.0)
+
+
+def test_adopt_moving_track_only_takes_moving_nearby():
+    """只有"正在走动 + 落在预测位置附近"的轨迹才能被认领；家具（静止）永远不行。"""
+    from fwr_bringup.follow_core import adopt_moving_track
+    pred = (2.00, 0.00)
+    moving_near = {'id': 4, 'x': 2.15, 'y': 0.10, 'v': 0.8, 'cam': False,
+                   'static': False}
+    assert adopt_moving_track([moving_near], pred, 0.3)['id'] == 4
+    # 静止轨迹（v=0）→ 不认
+    still = {'id': 5, 'x': 2.10, 'y': 0.05, 'v': 0.0, 'cam': False, 'static': False}
+    assert adopt_moving_track([still], pred, 0.3) is None
+    # 标了 static 的家具 → 不认
+    furn = {'id': 6, 'x': 2.10, 'y': 0.05, 'v': 0.5, 'cam': False, 'static': True}
+    assert adopt_moving_track([furn], pred, 0.3) is None
+    # 离预测位置太远 → 不认（0.3 s 时门限 0.8+0.18=0.98 m，这里 1.6 m）
+    far = {'id': 7, 'x': 3.60, 'y': 0.00, 'v': 0.8, 'cam': False, 'static': False}
+    assert adopt_moving_track([far], pred, 0.3) is None
+    # 走太久门限会放宽（0.8+0.6*3 = 2.6 m > 1.6 m）
+    assert adopt_moving_track([far], pred, 3.0)['id'] == 7
+    # 超速（甩动的门/被拖的车）→ 不认
+    fast = {'id': 8, 'x': 2.05, 'y': 0.0, 'v': 3.0, 'cam': False, 'static': False}
+    assert adopt_moving_track([fast], pred, 0.3) is None
+
+
+def test_adopt_moving_track_prefers_camera_backed():
+    from fwr_bringup.follow_core import adopt_moving_track
+    pred = (2.0, 0.0)
+    plain = {'id': 1, 'x': 2.02, 'y': 0.0, 'v': 0.6, 'cam': False, 'static': False}
+    backed = {'id': 2, 'x': 2.25, 'y': 0.0, 'v': 0.6, 'cam': True, 'static': False}
+    assert adopt_moving_track([plain, backed], pred, 0.2)['id'] == 2
