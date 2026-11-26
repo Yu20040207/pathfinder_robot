@@ -13002,3 +13002,113 @@ sudo nmcli con up 4g
 **现场预期**：人先在车前站定、绿框锁定；绕到车后时提示行应变成
 「📡 雷达跟踪 · 距离 xx cm」，车原地转向跟人。雷达续跟窗口 `lidar_hold_s = 8 s`，
 超过 8 s 相机完全看不到就停车（安全边界，不是 bug）。
+
+## 2026-11-26 10:55 · 语音功能盘点 + 唤醒定向方案记录（未实现）
+
+### 会话目标
+用户问：查一下这个机器人的语音对话功能；后续想加声源识别麦克风（ReSpeaker XVF3000），
+唤醒后自动转向面对人再答话，之后说「过来」走到面前。另：先用普通麦克风/扬声器在
+开发机上开发语音，后面再部署到主控。
+
+### 仓库改动
+- **新增** `docs/hardware/voice-wake-align-proposal.md`：完整方案记录
+  （需求原文、现状盘点、XVF3000 决策理由、两个物理风险、三段架构、安全授权三方案、
+  P-1/P0/P1/P2 分阶段、开发机开发流程、待确认 5 项）
+- **未改任何代码**，未构建，未启动节点。
+
+### 语音功能现状（实测，两边都查了）
+开发机 + 主控（`fwr-n305.local`）一致：
+
+| 项 | 状态 |
+| --- | --- |
+| `fwr_voice` 包安装 | ✅ 两边都有 `install/.../lib/fwr_voice/{voice_node,voice_demo_executor}` |
+| systemd 单元 | ❌ **无**（`systemctl list-unit-files | grep -i voice` 空） |
+| ASR/TTS 模型 | ❌ **两边都没有**（`models/` 只有 `yolo11n.onnx` + face 两个） |
+| `FWR_LLM_API_KEY` | ❌ 未设 |
+| launch 文件 | ❌ 包内无 `launch/` |
+| 进程 | ❌ 未运行 |
+| 麦克风 | 开发机 card1 ALC256 ✅ / 主控 card0 ALC269VC + card1 5MP USB Camera ✅ |
+| 扬声器 | 开发机 card1 ALC256 Analog ✅ / 主控 card0 ALC269VC Analog ✅ |
+
+**执行端仍是模拟**：`demo_executor.py` 只发 `/demo/cmd_vel`，唯一订阅者是
+`fwr_navigation/voice_chassis_demo.py`（RViz 运动学底盘）→ 说「停止」不会真停车，
+说「去大厅」不接 Nav2，词表里根本没有「过来」。
+
+### 顺带查清的三件事
+1. **房间导航链路已存在但空转**：`room_labels.py`（launch 已起）订阅 `/room_goal`
+   → `navigate_to_pose`，但 **`rooms.yaml` 两边都不存在** → 加载 0 个房间。
+   且 `find_room()` 是精确字符串相等，无别名、无中文数字转换
+   → 写「2号房间」而说「二号房间」匹配失败。
+2. **音频设备无法配置**：`node.py:284` 是 `MicrophoneInput()` 无 device 参数，
+   `node.py` 也没有任何麦克风/扬声器 ROS 参数 → 只能吃 ALSA `default`。
+   开发机 `default` 采集实测可用（`arecord` 产出 32044 B），但播放可能落 HDMI 无声。
+   → 开发第一阶段要补 `microphone_device` / `speaker_device` 两个参数。
+3. **`sounddevice` 在开发机不可用**（PortAudio 缺失）→ 走 ALSA `arecord`/`aplay` 回退路径。
+   该回退必须保留可用。
+
+### 已验证（命令 + 结果）
+- `arecord -D default -f S16_LE -r 16000 -c 1 -d 1 /tmp/mic_test.wav` → 32044 B ✅
+- 开发机设备：`aplay -l` = card0 NVidia(仅 HDMI) + card1 PCH ALC256(Analog 可播可采)
+- 主控设备：`aplay -l`/`arecord -l` = card0 ALC269VC + card1 5MP USB Camera
+- 主控 `ps -ef | grep -c '[v]oice_node'` = **0**
+- `python -c "from fwr_voice.intent import parse_local; parse_local('停止',{}).request.task_type"` → `STOP`（模块正常）
+- 仓库文档：`docs/superpowers/plans/2026-10-09-voice-interaction.md` 目标原文含「**模拟**」
+
+### 未验证 / 遗留问题
+- ⚠️ **`tests/test_voice_*.py`（16 个）在本机 pytest 全部 `found no collectors` 后 skip**。
+  试过 `-c /dev/null`、`--import-mode=importlib`、从 `tests/` 目录内跑、`PYTHONPATH` 显式指到
+  `ros2_ws/src/fwr_voice`，均同样结果；模块本身 import 正常。**收集层根因未定位**。
+  历史 ledger 记的是 78/78 全绿（当时环境），不是本次验证结果。
+- 麦克风未采购，DOA 全部能力未验证。
+- 车上是否已装扬声器、装在哪，未确认。
+
+### 当前运行状态
+未启动任何语音相关进程；未构建；未改动代码。
+工作区原有 `cloud/api/app.py`、`tools/media_relay.py` 的未提交改动与本条无关。
+
+### 下一步（需用户决策）
+1. 授权模型选 A（面板先开门）/ B（语音二次确认）/ C（交互模式）—— 我建议 A+C
+2. 先做 **P-1**：STOP 真能停车 + 写 `rooms.yaml` + 语音接 `/room_goal`（半天~1天，低风险）
+3. 再补 `microphone_device`/`speaker_device` 参数 + 开发机装模型跑通 ASR/TTS
+4. XVF3000 到货后先做 **P0 静态标定**（0/90/180/270° × 1/3/5 m），判 90°/前后模糊
+
+### 2026-11-26 12:05 雷达接管修三处：别跟"动的家具"、别一换号就丢、短暂丢失原地找人
+
+用户报两件事：「有时候雷达跟踪会跟丢」+「雷达跟踪到的时候一直跟踪那团动的点」。
+
+**根因（读代码确认）**
+1. **跟错点**：`leg_tracker` 的 `birth_requires_cam` 默认 **False**，加上
+   `pick_lidar_track()` 只按**方位差**挑（不区分"这条轨迹有没有被相机确认过是人"）→
+   推车、被拖着走的椅子只要更靠近画面中线就会被认领，而且 `_lidar_id` 是黏住的 →
+   一路跟着那团动的点。
+2. **跟丢**：`reacquire_track()` 的门限是 **20°/0.90 m**。人按 1.2 m/s 走，0.5 s 就移动
+   0.6 m，一旦腿交叉/两腿合并让 `leg_tracker` 换号，这个门限常常够不着 → 判丢失。
+   另外静止轨迹一律不许续认，可人**站在车后等车**时腿是不动的，`leg_tracker` 3 s 后
+   会把它标 `static` → 直接被踢掉。
+3. 丢 0.3~1 s 就直接 `target_lost` 停车，而不是按最后方位找一下。
+
+**改动**
+- `leg_track`：`fwr-legtracker.service` 加 **`--ros-args -p birth_requires_cam:=true`**
+  → 只有**被相机确认过是人**的腿对才允许新生轨迹（相机正在看别处时直接不建）。
+  ⚠️ 相机服务没跑时 `cam_ok=None`（"没有背书信息"）仍允许建轨迹，这是原有语义；
+  跟随模式一定会拉起 `fwr-vision`，所以实际运行不受影响。
+- `person_follower.on_lidar()`：把 `cam`（相机背书）和 `v`（轨迹速度）带进 `_tracks`。
+- `pick_lidar_track()`：**相机背书的轨迹优先**；速度 > `lidar_max_speed 2.0 m/s` 的一律不认
+  （甩动的门、被拖的车）。
+- `reacquire_track()`：门限 **20°/0.90 m → 28°/1.20 m**；允许"**相机背书过的**静止轨迹"
+  （人站车后等车）；`cam=False` 的轨迹永远不认领；超速不认。
+- 新增 `follow_core.lidar_search_cmd()`：雷达轨迹短暂消失（换号/两腿合并/被挡）时
+  **原地只转（v 恒 0）** 按最后方位找人，`lidar_search_s 2.5 s`。
+  ⚠️ 时间基准用**新增的 `_lidar_seen`**（雷达最后一次真正在用目标的时刻），
+  不能用 `_lidar_at`（它只在"相机看到人并认领"时刷新，人一绕到车后就不动 →
+  搜索会在 2.5 s 后无故失效，而续跟窗口是 `lidar_hold_s 8 s`）。
+- `lidar_search` 加进 `hard_stop`（线速度立即归零，不许"边找边前冲"）。
+
+**部署（已获批）**：`follow_core.py` / `person_follower.py` 落 src + build 两处；
+腿跟踪单元 `daemon-reload` + 重启 `fwr-legtracker`。`fwr-follow` 当时 inactive，无需重启。
+
+**已验证**：`tests/test_follow_core.py` 新增 5 例（背书优先 / 超速拒绝 / 背书静止可续 /
+放宽门限可续 / 搜索只转）＋ 既有套件共 **149 passed**；`test_person_detector` 124 passed；
+车上 build 副本 `hasattr(lidar_search_cmd)=True`、`lidar_reacq_deg=28.0`、
+`systemctl show` 里能看到 `birth_requires_cam:=true`，`fwr-legtracker` active。
+**未验证**：现场人绕到车后 → 雷达接管/换号续跟/原地找人的实际表现。

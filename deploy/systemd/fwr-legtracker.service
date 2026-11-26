@@ -12,7 +12,11 @@ WorkingDirectory=/home/manbaout/Company_Project/Four-wheel-robot
 # 雷达腿跟踪：/scan_merged (10 Hz, 360°) + /odom → /robot/lidar/persons
 # 只在跟随模式里跑（fwr-media 的 /follow?prep=1 一起拉起，leave=1 一起停），
 # **不要 enable**：开机常驻没必要，还会和 fwr-base 抢 CPU。
-ExecStart=/bin/bash -lc "source /opt/ros/humble/setup.bash && source ros2_ws/install/setup.bash && exec ./.venv/bin/python -m fwr_bringup.leg_tracker"
+# ⚠️ `birth_requires_cam:=true`：**只有被相机确认过的腿对才允许新生轨迹**。
+# 关掉它时推车/椅子/被拖着走的东西都会自己生出轨迹，跟随会"一直跟着一团动的点"
+# （2026-11-26 用户报）。人绕到车后时用的是**已经在车前被相机点名过**的那条轨迹，
+# 所以不影响雷达接管。
+ExecStart=/bin/bash -lc "source /opt/ros/humble/setup.bash && source ros2_ws/install/setup.bash && exec ./.venv/bin/python -m fwr_bringup.leg_tracker --ros-args -p birth_requires_cam:=true"
 Restart=always
 RestartSec=3
 

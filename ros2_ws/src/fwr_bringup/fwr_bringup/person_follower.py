@@ -37,7 +37,7 @@ from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import String
 
-from fwr_bringup.follow_core import (DEFAULTS, OscGuard, cam_bearing, decide, door_clear, door_metrics, door_swept_radius, lidar_follow, limit_pair, passage_metrics, pick_lidar_track, reacquire_track, scan_metrics)
+from fwr_bringup.follow_core import (DEFAULTS, OscGuard, cam_bearing, decide, door_clear, door_metrics, door_swept_radius, lidar_follow, lidar_search_cmd, limit_pair, passage_metrics, pick_lidar_track, reacquire_track, scan_metrics)
 
 
 class PersonFollower(Node):
@@ -112,6 +112,10 @@ class PersonFollower(Node):
         self._lidar_close = False  # 雷达接管时因"太近"停过 → 等退到 resume 距离
         self._lidar_bearing = None  # 刚才认领/续跟那条轨迹的方位、距离
         self._lidar_r = None        # （换号时按这对值重新认领）
+        self._lidar_seen = 0.0      # 雷达**最后一次真正在用目标**的时刻。
+        # ⚠️ 别拿 `_lidar_at` 当这个用：它只在"相机看到人并认领"时刷新，
+        # 人一绕到车后就不动了 → 搜索窗口会在 2.5 s 后无故失效，
+        # 而实际续跟窗口是 lidar_hold_s 8 s（2026-11-26 修）。
         self.src = 'none'          # cam / lidar / none（本帧目标来源）
 
         self.cmd = self.create_publisher(Twist, '/cmd_vel_manual', 10)
@@ -176,7 +180,11 @@ class PersonFollower(Node):
             # （2026-11-24 漏了 → 第一次认领就 KeyError，节点整个退出）
             tracks[tid] = {'id': tid, 'x': dx, 'y': dy, 'r': r,
                            'bearing': bearing, 'at': now,
-                           'static': bool(tr.get('static'))}
+                           'static': bool(tr.get('static')),
+                           # 相机背书 + 速度：pick/reacquire 用它排除"动的家具"
+                           'cam': bool(tr.get('cam')),
+                           'v': float(math.hypot(float(tr.get('vx') or 0.0),
+                                                 float(tr.get('vy') or 0.0)))}
         self._tracks = tracks
         self._tracks_at = now
 
@@ -315,6 +323,7 @@ class PersonFollower(Node):
             self._lidar_id = -1
             self._lidar_bearing = None
             self._lidar_r = None
+            self._lidar_seen = 0.0
             self._lidar_close = False
         person = None
         for item in data.get('persons', []):
@@ -476,6 +485,7 @@ class PersonFollower(Node):
                     self._lidar_close = False
             elif r_now <= self.p['lidar_stop_m']:
                 self._lidar_close = True
+            self._lidar_seen = now
             self._lidar_bearing = float(lidar_target['bearing'])
             self._lidar_r = r_now
             v, w, reason = lidar_follow(
@@ -488,6 +498,20 @@ class PersonFollower(Node):
                 '相机丢人，雷达接管：方位 %+.0f°，距离 %.2f m（轨迹 #%d）'
                 % (math.degrees(float(lidar_target['bearing'])), r_now,
                    self._lidar_id), throttle_duration_sec=3.0)
+        elif (person is None and sel >= 0 and self._lidar_id >= 0
+              and self._lidar_bearing is not None
+              and (now - max(self._lidar_seen, self._lidar_at))
+                  <= self.p['lidar_search_s']
+              and reason in ('target_lost', 'no_target', 'target_gone')):
+            # 雷达轨迹刚断（换号/两腿合并/被挡）：**原地按最后方位找人**，别直接停车。
+            # 只转不走（v=0），扫到轨迹后下一帧就走正常的雷达接管。
+            v, w, reason = lidar_search_cmd(self._lidar_bearing, self.p)
+            if abs(w) > 1e-6:
+                box_h = box_h or 0.0
+                self.get_logger().info(
+                    '雷达轨迹短暂丢失，原地按最后方位找人（%.0f°）'
+                    % math.degrees(self._lidar_bearing),
+                    throttle_duration_sec=3.0)
         elif self.src == 'cam':
             self._lidar_close = False        # 相机看回来，雷达侧迟滞复位
 
@@ -497,7 +521,7 @@ class PersonFollower(Node):
         # 'search' 也是 v=0 但**要转**（每 tick 按方向给 w，别被归零）
         hard_stop = reason in ('obstacle_stop', 'target_lost', 'target_gone',
                               'too_close', 'no_target', 'rear_blocked', 'facing',
-                              'gate_align', 'search',
+                              'gate_align', 'search', 'lidar_search',
                               # 雷达接管时 v 必须为 0 的几种（还要转身，所以不进下面的
                               # 显式归零列表）
                               'lidar_face', 'lidar_close', 'lidar_far',

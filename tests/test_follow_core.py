@@ -531,3 +531,56 @@ def test_osc_guard_damps_when_oscillating_and_recovers():
     for i in range(120):
         g2.update(0.02 if i % 2 else -0.02, dt)
     assert g2.gain == pytest.approx(1.0)
+
+
+# ---------------------------------------------------------------- 雷达接管：别再跟着"动的家具"（2026-11-26）
+
+def test_pick_lidar_track_prefers_camera_backed():
+    """没被相机背书的轨迹（推车/被拖的椅子）不能抢走"人"。
+
+    用户 2026-11-26：「雷达跟踪到的时候一直跟踪那团动的点」——真因是认领时只看方位差，
+    动的家具只要更靠近画面中线就会被选中。
+    """
+    from fwr_bringup.follow_core import pick_lidar_track
+    cands = [
+        {'id': 1, 'bearing': 0.00, 'r': 1.6, 'cam': False, 'v': 0.6},   # 推车，正好在中线
+        {'id': 2, 'bearing': 0.18, 'r': 1.8, 'cam': True, 'v': 0.4},    # 人，偏右 10°
+    ]
+    got = pick_lidar_track(cands, bearing=0.0)
+    assert got['id'] == 2, '必须优先选相机背书的那条'
+
+
+def test_pick_lidar_track_rejects_fast_blob():
+    """速度超过 `lidar_max_speed` 的轨迹一律不认（甩动的门/被拖的车）。"""
+    from fwr_bringup.follow_core import pick_lidar_track
+    cands = [{'id': 3, 'bearing': 0.02, 'r': 1.5, 'cam': True, 'v': 3.2}]
+    assert pick_lidar_track(cands, bearing=0.0) is None
+
+
+def test_reacquire_allows_backed_static_but_not_unbacked():
+    """人站在车后等车时腿不动 → 轨迹被标 static。背书的要能续跟，没背书的不许。"""
+    from fwr_bringup.follow_core import reacquire_track
+    last_b, last_r = 0.10, 1.60
+    backed = [{'id': 9, 'bearing': 0.12, 'r': 1.62, 'cam': True, 'static': True, 'v': 0.0}]
+    assert reacquire_track(backed, last_b, last_r)['id'] == 9
+    unbacked = [{'id': 10, 'bearing': 0.12, 'r': 1.62, 'cam': False, 'static': True, 'v': 0.0}]
+    assert reacquire_track(unbacked, last_b, last_r) is None
+
+
+def test_reacquire_accepts_bigger_drift():
+    """门限从 20°/0.90 m 放宽到 28°/1.20 m：人走快一点（1.2 m/s）时也能续上。"""
+    from fwr_bringup.follow_core import reacquire_track
+    drift = [{'id': 11, 'bearing': 0.40, 'r': 2.55, 'cam': True, 'static': False, 'v': 1.1}]
+    assert reacquire_track(drift, 0.10, 1.50)['id'] == 11
+    far = [{'id': 12, 'bearing': 0.40, 'r': 3.10, 'cam': True, 'static': False, 'v': 1.1}]
+    assert reacquire_track(far, 0.10, 1.50) is None
+
+
+def test_lidar_search_cmd_only_turns():
+    """轨迹短暂丢失时**原地只转**（v 恒 0），并按 lidar_wmax 限幅。"""
+    from fwr_bringup.follow_core import DEFAULTS, lidar_search_cmd
+    v, w, reason = lidar_search_cmd(-0.40)
+    assert v == 0.0 and reason == 'lidar_search'
+    assert abs(w) <= DEFAULTS['lidar_wmax'] + 1e-9 and w < 0      # 目标在右 → 右转（负）
+    assert lidar_search_cmd(DEFAULTS['lidar_bearing_deadband'] * 0.5)[:2] == (0.0, 0.0)
+    assert lidar_search_cmd(None)[:2] == (0.0, 0.0)
