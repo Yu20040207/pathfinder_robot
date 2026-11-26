@@ -14272,6 +14272,11 @@ build_system_prompt(now=None)  # SYSTEM_PROMPT + time_sentence()
   `test_page_remote_media.py::test_follow_mode_works_over_relay` 的签名断言改为
   `function followFetch(path`（新增超时参数）；相关子集 117 passed。JS `node --check` 通过。
 
-**状态**：已提交，**页面未部署到 ECS**（等用户批准）。
+**状态**：已提交 `e70d65b`，**已部署到 ECS（2026-11-26 16:37）**：
+备份 `/opt/jc/web/car.html.bak.20261126-1637` → `cat >` 覆盖 → `chmod 644`。
+验证：ECS `/opt/jc/web/car.html` md5 `2a126e86…` 与本地一致；
+`http://127.0.0.1/car/` → **200 / 221436 B**，线上文件里
+`followFetch('/follow?on=1', 2000)` 与 `Promise.race` 各命中 1 次。
+⚠️ ECS 的 `scp` 被限权，只能走 `ssh 'cat >'`（老办法）。
 **若部署后仍"走一步就停"**：说明心跳到车端确实 >3 s（4G/中继慢），
 下一步把车端 `heartbeat_timeout` 提到 4.0（多 1 s 相当于多滑行约 0.38 m，须用户同意）。
