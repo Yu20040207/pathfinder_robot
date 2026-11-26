@@ -14126,3 +14126,41 @@ build_system_prompt(now=None)  # SYSTEM_PROMPT + time_sentence()
 **状态**：代码已改、测试过；**尚未部署到车上**（`fwr-follow` 当时是 inactive，
 `ros2 param set` 报 `Wait for service timed out / Node not found`）。
 服务下次起来时用的还是车上旧文件（0.12），**要先 scp `follow_core.py` 到 src+build 才生效**。
+
+### 2026-11-26 15:46 转弯"跟不上"：ω 已到底，改的是延迟（检测 12 Hz + EMA 0.5）
+
+用户：「现在转弯和原地转弯的速度有增加吗，有时候有点跟不上」。
+
+**先纠正事实**：转弯速度**今天 11:22 已经翻倍**（`9412250`，0.42 → 0.74 rad/s），
+现在 `steer_wmax` / `wmax` / `lidar_wmax` **都是 0.74**，底盘 `manual_velocity` 的
+`|ω| ≤ 0.75` 是硬限，**再高就整帧丢弃**（现场表现为"显示在转、其实不动"）。所以转速这条路走完了。
+
+**"跟不上"的真实原因是延迟链（实测数字）**
+| 环节 | 原值 | 贡献 |
+| --- | --- | --- |
+| 相机 | 15 fps | 67 ms |
+| 检测频率 | **8 Hz** | **125 ms（最慢）** |
+| 框中心 EMA | α 0.35 | **≈230 ms**（(1-α)/α=1.86 帧） |
+| 转向加速 | `w_accel 3.0` | 250 ms 到满速 |
+| 合计 | | **≈0.5 s 才满速转** |
+
+**改动（A+B，用户选）**
+- `person_detector.detect_hz` 默认 **8 → 12**（相机 15 fps 是上限；单帧含姿态 30~38 ms 放得下）。
+  实测：`infer_ms 32.2`、进程 CPU **47% → 53.5%**（比预估的 65% 低）。
+- `person_follower.smooth_alpha` 默认 **0.35 → 0.50**（EMA 滞后 1.86 帧 → 1 帧）。
+  抖动兜底仍是 `OscGuard`；嫌抖可回 0.40。
+- 合计延迟 **≈0.5 s → 0.28 s**。
+
+**验证**
+- 先在运行中的节点上 `ros2 param set`（不重启）：`detect_hz 12.0`、`smooth_alpha 0.5`，
+  回读确认、`/boxes` 正常（`infer_ms 32.2`、CPU 53.5%）。
+- 用户批准后部署文件：`person_detector.py` / `person_follower.py` → **src + build**，
+  md5 三方一致（`45cfd6a3…` / `2e87a1a8…`），车上 build 副本第 99 行 `detect_hz 12.0`、
+  第 53 行 `smooth_alpha 0.50`；服务**未重启**（`fwr-vision`/`fwr-follow` 保持 active）。
+- 单测：`test_person_detector.py` + `test_follow_core.py` + `test_vision_pose_gate.py` → **101 passed**。
+- 提交 `997c8d2` + 本文档提交。
+
+**未验证**：实际跟随手感（转弯是否还觉得跟不上、α=0.5 会不会抖）。
+**可调**：`ros2 param set /person_detector detect_hz 15`（相机上限）、
+`ros2 param set /person_follower smooth_alpha 0.4`（更稳）、
+`w_accel 3.0 → 4.5`（满速转 250→160 ms，更冲，未采纳）。

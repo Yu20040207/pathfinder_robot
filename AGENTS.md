@@ -585,6 +585,17 @@
   - 回归：`tests/test_vision_pose_gate.py`（11 例，含"杂物高分关键点但框分 0.003 必须拒"、
     "只露腿必须过"、"检测分 ≥0.70 放行"）。
 
+- ⏱ **转弯"跟不上"= 延迟，不是转速不够（2026-11-26 定版）**
+  - ω 已经到底盘硬限：跟框 `steer_wmax`、原地 `wmax`、雷达 `lidar_wmax` **全是 0.74**
+    （`manual_velocity` 的 `|ω| ≤ 0.75`，再高整帧丢弃）。**不要再往这个方向调**。
+  - 真正卡的是延迟链：相机 15 fps(67 ms) + **检测 8 Hz(125 ms)** + 框 EMA α=0.35(≈230 ms)
+    + `w_accel 3.0`(250 ms 到满速) ≈ **0.5 s**。
+  - 现在：`person_detector.detect_hz` 默认 **12**（延迟 83 ms，推理含姿态 30~38 ms，
+    CPU 47%→**53.5%**；相机 15 fps 是上限）；`person_follower.smooth_alpha` 默认 **0.50**
+    （EMA 滞后 1.86 帧→1 帧）。合计 ≈ **0.28 s**。
+  - ⚠️ `smooth_alpha` 抬高会让框中心抖一点，**兜底是 `OscGuard`**（ω 反复变号自动收转向增益），
+    别为了"顺滑"把 α 压回 0.35，也别把 OscGuard 去掉。觉得抖可回 0.40。
+
 **跟随控制（2026-11-21 第五版，走手动通道）**
 - 节点 **`person_follower`**（`person_follower.py` + 纯逻辑 `follow_core.py`，
   systemd **`fwr-follow.service`**）：订阅 `/robot/vision/persons`、`/scan_merged`、
