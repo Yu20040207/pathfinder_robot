@@ -610,7 +610,7 @@
 - **第三版行为（2026-11-21 用户提要求后加）**：
   1. **车头一直追着框**：目标偏离画面中线 > `face_ex 0.30` → **原地转向对准**（v=0，只转），
      人从车旁走过去时车头会跟着转，不会盲目前冲；
-  2. **太近就后退**：框高 ≥ `back_box_h 0.92`（人贴到车头）→ 后退 `back_vmax 0.12 m/s`，
+  2. **太近就后退**：框高 ≥ `back_box_h 0.92`（人贴到车头）→ 后退 `back_vmax 0.22 m/s`（2026-11-26 由 0.12 上调），
      退到 `back_release_box_h 0.85` 才停（迟滞），**边退边按框位置转向**；
   3. **后退也避障**：`scan_metrics` 同时算**车尾走廊**（同一 ±0.22 m 走廊，`lon<0`）。
      车尾 0.60 m 内开始减速后退，**0.30 m 内（`back_hard_m`）禁止后退**，改成
@@ -670,7 +670,7 @@
   `yaw_kd 0.9`、`v_accel 0.60`、`w_accel 3.0`、
   `corridor_m 0.22`、`front_hard_m 0.35`、`front_slow_m 0.60`、
   `side_clear_m 0.30`、`lost_stop 0.8`、`lost_abort 3.0`、
-  `face_ex 0.30`、`back_box_h 0.92`、`back_release_box_h 0.85`、`back_vmax 0.12`、
+  `face_ex 0.30`、`back_box_h 0.92`、`back_release_box_h 0.85`、`back_vmax 0.22`（2026-11-26 上调，随前进一起算单轮包络 0.287 < 0.29）、
   `back_hard_m 0.30`、`back_slow_m 0.60`、`follow_hz 20`、`smooth_alpha 0.35`、
   `max_wheel_mps 0.29`、`track_m 0.317`、`yaw_kd 0.9`、`steer_wmax 0.42`、
   `gate_look_m 1.10`、`gate_half_span_m 1.20`、`gate_min_gap_m 0.55`、`gate_wide_m 1.05`、

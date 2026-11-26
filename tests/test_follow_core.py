@@ -666,3 +666,21 @@ def test_adopt_moving_track_prefers_camera_backed():
     plain = {'id': 1, 'x': 2.02, 'y': 0.0, 'v': 0.6, 'cam': False, 'static': False}
     backed = {'id': 2, 'x': 2.25, 'y': 0.0, 'v': 0.6, 'cam': True, 'static': False}
     assert adopt_moving_track([plain, backed], pred, 0.2)['id'] == 2
+
+
+def test_backing_speed_fits_manual_wheel_envelope():
+    """后退速度 + 转向必须在底盘单轮包络内（否则整帧被丢 → "说在退、不动"）。
+
+    2026-11-26 用户把 `back_vmax` 从 0.12 提到 **0.22**：0.22 + steer_wmax·track/2
+    必须仍 ≤ max_wheel_mps（0.29），留 1 cm/s 余量。
+    """
+    v = -P['back_vmax'] * 1.0
+    v_lim, w_lim = limit_pair(v, P['steer_wmax'], P)
+    envelope = abs(v_lim) + abs(w_lim) * P['track_m'] / 2
+    assert envelope <= P['max_wheel_mps'] + 1e-6
+    assert abs(v_lim) >= P['back_vmax'] - 0.02     # 不许被削得太狠
+
+
+def test_back_vmax_is_022():
+    """钉死 2026-11-26 的定版值，防止顺手改回 0.12。"""
+    assert abs(P['back_vmax'] - 0.22) < 1e-9

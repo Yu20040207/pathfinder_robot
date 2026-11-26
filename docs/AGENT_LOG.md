@@ -14095,3 +14095,34 @@ build_system_prompt(now=None)  # SYSTEM_PROMPT + time_sentence()
 **未验证**：现场真人/杂物效果（需要用户实测一次：人站在低机位前应该照常出框；
 袋子/纸箱不该再出框）。可调：`-p conf:=0.5`、`-p pose_bypass_conf:=0.6`、
 `-p pose_min_leg_kp:=1`（当前）、`-p pose_enabled:=false` 可整条关掉。
+
+### 2026-11-26 15:40 跟随后退提速 0.12 → 0.22 m/s（用户：「后退的速度是不是限制了」）
+
+用户问得对：跟随模式后退**确实被限在 0.12 m/s**（`follow_core.DEFAULTS.back_vmax`），
+不到前进 0.38 的 1/3。用户选择提到 **0.22 m/s**。
+
+**整条倒车链（四道，改的只有第一道）**
+| 层 | 值 | 位置 |
+| --- | --- | --- |
+| 跟随后退速度 | **0.12 → 0.22** | `follow_core.DEFAULTS['back_vmax']` |
+| 车尾雷达走廊 | 0.60 m 内按比例降速、**0.30 m 内禁止后退只原地转** | `back_slow_m` / `back_hard_m` |
+| 车尾超声守卫 | 近障时**整帧丢弃** | `base_bridge._on_manual_velocity` + `/base/rear_blocked` |
+| 手动通道 | 0.40 m/s **正反向同值**（没有单独限制倒车） | `manual_max_speed_mps` |
+
+另外：手机摇杆倒车本来就能到 0.40；**导航倒车**另有 `base_bridge.max_reverse_mps = 0.12`（未动）；
+**雷达接管时（相机没看到人）完全不后退**（雷达分不出身后是人是物，保持原规则）。
+
+**安全核算**：前进 `vmax` 与后退共用单轮包络
+`|v| + |ω|·track/2 ≤ max_wheel_mps(0.29)`，后退按 `steer_wmax 0.42` 算
+= **0.22 + 0.42×0.317/2 = 0.287 ≤ 0.29**，仍不会被底盘整帧丢弃。
+车尾 0.30/0.60 m 两道保护没动，所以到 0.30 m 还是会硬拦（只是接近更快）。
+
+**改动**
+- `follow_core.py`：`back_vmax` 默认 0.22（带注释说明包络核算）。
+- `tests/test_follow_core.py`：新增 2 例——① 后退 + `steer_wmax` 必须仍在单轮包络内且 v 不被削掉；
+  ② 钉死 0.22，防止顺手改回 0.12。`test_follow_core.py` 共 **75 passed**。
+- `AGENTS.md`：参数快照里的两处 `back_vmax 0.12` 已改成 0.22。
+
+**状态**：代码已改、测试过；**尚未部署到车上**（`fwr-follow` 当时是 inactive，
+`ros2 param set` 报 `Wait for service timed out / Node not found`）。
+服务下次起来时用的还是车上旧文件（0.12），**要先 scp `follow_core.py` 到 src+build 才生效**。
