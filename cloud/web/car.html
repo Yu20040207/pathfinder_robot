@@ -225,6 +225,15 @@
             border: 1px solid #38bdf8; background: #0b1a24; color: #38bdf8;
             font-size: 22px; line-height: 1; }
   #camBtn.on { background: #103246; color: #7dd3fc; }
+  /* 画面正下方的当前速度条（2026-11-26 用户要求"在画面的下面显示当前速度"）。
+     直角、深底、细一行，不压画面、不抢摇杆位置。 */
+  .spdBar { flex: none; display: flex; align-items: center; justify-content: center;
+            gap: 10px; padding: 3px 8px; background: #0d1117;
+            color: #8ff0b7; font-size: 12px; font-variant-numeric: tabular-nums;
+            letter-spacing: .3px; white-space: nowrap; }
+  .spdBar.hidden { display: none; }
+  .spdBar b { font-weight: 600; color: #d6ffe8; }
+  .spdBar .dim { color: #5f7a6b; }
   /* 相机画面：直接嵌在摇杆上方，不另开页面 */
   #camPane { flex: none; margin: 4px 12px 0; border-radius: 12px; overflow: hidden;
              background: #000; border: 1px solid #1f2a36; }
@@ -718,6 +727,7 @@
         <div id="camErr" class="hidden"></div>
       </div>
     </div>
+    <div class="spdBar" id="spdBarManual"><span class="dim">速度</span><b id="spdM">--</b><span class="dim">转向</span><b id="spdWM">--</b></div>
 
     <div class="joyWrap"><div id="joy"><div id="knob"></div></div></div>
     <div class="hint" id="dbg">拖动绿色摇杆控制；松手自动停车</div>
@@ -736,6 +746,7 @@
       <canvas id="followCanvas"></canvas>
       <button id="followRefresh" title="刷新画面" aria-label="刷新画面">⟳</button>
     </div>
+    <div class="spdBar" id="spdBarFollow"><span class="dim">速度</span><b id="spdF">--</b><span class="dim">转向</span><b id="spdWF">--</b></div>
     <div id="followJoyWrap"><div id="followJoy"><div id="followKnob"></div></div></div>
     <div id="followBar">
       <button id="followGo" disabled>开始跟随</button>
@@ -759,6 +770,7 @@
       <button id="navCamSwap" title="切换摄像头" aria-label="切换摄像头">广角</button>
       <div id="navCamErr" class="hidden"></div>
     </div>
+    <div class="spdBar hidden" id="spdBarNav"><span class="dim">速度</span><b id="spdN">--</b><span class="dim">转向</span><b id="spdWN">--</b></div>
     <div id="zoomCtl">
       <button id="navCamBtn" title="摄像头画面" aria-label="摄像头">📷</button>
       <button id="relocBtn" title="重新定位（一键播种）">📍</button>
@@ -1619,6 +1631,7 @@ function updateStatus(s) {
   if (typeof s.speed === 'number') {
     $('spd').textContent = (s.speed >= 0 ? '' : '-') + Math.abs(s.speed).toFixed(2) + ' m/s';
   }
+  updateSpdBar(s.speed, s.yaw_rate);
   if (typeof s.percentage === 'number') {
     const pctTxt = Math.round(s.percentage * 100) + '%';
     $('pct').textContent = pctTxt;
@@ -4237,6 +4250,7 @@ let navCamWanted = false;
 async function openNavCam() {
   navCamWanted = true;
   $('navCamPane').classList.remove('hidden');
+  if ($('spdBarNav')) $('spdBarNav').classList.remove('hidden');   // 速度条跟着画面
   // 打开时画面移到最上面，两行提示浮在画面上
   if ($('navView')) $('navView').classList.add('cam-open');
   if (typeof ensureNavCanvas === 'function') setTimeout(() => ensureNavCanvas(true), 60);
@@ -4282,6 +4296,7 @@ function closeNavCam() {
   navCamWanted = false;
   camMount('navCamImg', '', false, null);
   $('navCamPane').classList.add('hidden');
+  if ($('spdBarNav')) $('spdBarNav').classList.add('hidden');
   if ($('navView')) $('navView').classList.remove('cam-open');
   if (typeof ensureNavCanvas === 'function') setTimeout(() => ensureNavCanvas(true), 60);
   $('navCamBtn').classList.remove('on');
@@ -4380,6 +4395,18 @@ function followVideoURL() {
 // iOS 后台恢复）这条 await 就一直挂着。心跳原来是挂在轮询链末尾的，链路一卡
 // 心跳就断了 → 车端 3 s 收不到 /follow/enable 自己停车 →
 // 现场表现「刚点开始跟随，车往前走一步就停下来」。
+// 画面下方速度条：线速度用里程计实测（s.speed），转向用 s.yaw_rate。
+// 三个模式各自的条一起刷（只写文本，没有布局开销）。
+function updateSpdBar(v, w) {
+  const vs = (typeof v === 'number') ? Math.abs(v).toFixed(2) + ' m/s' : '--';
+  const ws = (typeof w === 'number') ? (w >= 0 ? '' : '-') + Math.abs(w).toFixed(2) + ' rad/s' : '--';
+  for (const [idV, idW] of [['spdM', 'spdWM'], ['spdF', 'spdWF'], ['spdN', 'spdWN']]) {
+    const a = $(idV), b = $(idW);
+    if (a) a.textContent = vs;
+    if (b) b.textContent = ws;
+  }
+}
+
 async function followFetch(path, timeoutMs) {
   const ms = timeoutMs || 2500;
   const work = followRemote()

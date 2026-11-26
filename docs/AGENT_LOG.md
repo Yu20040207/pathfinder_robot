@@ -14321,3 +14321,17 @@ build_system_prompt(now=None)  # SYSTEM_PROMPT + time_sentence()
 **SIGTERM 停机时的老噪音**（rclpy 已 `rcl_shutdown` 后再 spin），
 与本次改动无关，退出码 1 只在"停止服务"时出现。
 **未验证**：实车对准是否还摆。验证判据：出现 `对准阻尼：指令 … → …` 日志行。
+
+### 2026-11-26 17:00 画面下方显示当前速度（页面）
+
+用户：「现在在画面的下面显示当前速度」。
+
+- 新增 `.spdBar`（直角深底 #0d1117、一行小字、`font-variant-numeric: tabular-nums`），
+  放在**画面下方**（不是压在画面上）：手动 `#camStage` 之后、跟随 `#followStage` 之后、
+  导航 `#navCamPane` 之后（默认 hidden，随 📷 开关）。
+- 数据用**已有的**上行字段：`speed`（里程计实测 m/s）+ `yaw_rate`（rad/s），
+  **不新增 MQTT 字段、不动车端**；`updateSpdBar()` 三个条一起刷。
+- 导航那块的速度条跟摄像头画面一起显隐（`openNavCam`/`closeNavCam`）。
+- 回归：`tests/test_page_speed_bar.py`（4 例：三处都在 / 在画面之后且非 absolute /
+  用已有字段 / 导航随画面开关）+ 页面相关子集 **39 passed**；JS `node --check` 通过。
+- **状态**：已提交，**页面未部署**。
