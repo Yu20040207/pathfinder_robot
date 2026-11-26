@@ -280,3 +280,25 @@ def test_flip_confirm_allows_smooth_drift():
     for k, b in enumerate((0.20, 0.32, 0.45, 0.58)):
         ok, last, flip = flip_confirm(last, flip, b, 34, 10.0 + 0.05 * k, 0.60, 0.30)
         assert ok is True
+
+
+# ---------------- 2026-11-26：雷达跟错人（盲跟不许一直往前开） ----------------
+
+def test_lidar_drive_only_allowed_while_blind_short():
+    """相机丢人后雷达最多盲开 2.5 s，之后只能原地转向（否则会一路追错人）。"""
+    from fwr_bringup.follow_core import lidar_drive_allowed
+    p = DEFAULTS
+    assert p['lidar_blind_drive_s'] == 2.5
+    assert lidar_drive_allowed(0.0) is True
+    assert lidar_drive_allowed(2.4) is True
+    assert lidar_drive_allowed(2.6) is False
+    assert lidar_drive_allowed(30.0) is False
+
+
+def test_lidar_backed_public_wrapper():
+    """`lidar_backed` 只认 1 s 内的相机背书（含 2 s 宽限）。"""
+    from fwr_bringup.follow_core import lidar_backed
+    assert lidar_backed({'cam': True}) is True
+    assert lidar_backed({'cam': False, 'cam_age_s': 1.0}) is True
+    assert lidar_backed({'cam': False, 'cam_age_s': 5.0}) is False
+    assert lidar_backed({}) is False

@@ -37,7 +37,7 @@ from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import String
 
-from fwr_bringup.follow_core import (DEFAULTS, OscGuard, adopt_moving_track, bearing_ema, cam_bearing, decide, door_clear, door_metrics, door_swept_radius, flip_confirm, lidar_follow, lidar_search_cmd, limit_pair, passage_metrics, pick_lidar_track, predict_person, reacquire_track, scan_metrics)
+from fwr_bringup.follow_core import (DEFAULTS, OscGuard, adopt_moving_track, bearing_ema, cam_bearing, decide, door_clear, door_metrics, door_swept_radius, flip_confirm, lidar_backed, lidar_drive_allowed, lidar_follow, lidar_search_cmd, limit_pair, passage_metrics, pick_lidar_track, predict_person, reacquire_track, scan_metrics)
 
 
 class PersonFollower(Node):
@@ -90,6 +90,7 @@ class PersonFollower(Node):
         self._lidar_face_hold = False
         self._lidar_last_ok = None   # (bearing, track_id) 上一次可信的方位
         self._lidar_flip = None      # (bearing, track_id, since) 突变候选
+        self._lidar_mem = None       # 雷达自己记的位置（不污染相机真值 _person_mem）
         # 门内丢人 → 先出门再找人（2026-11-21 用户要求）
         self._last_side = 0.0        # 最后一次看到人时，人在画面 +1 右 / -1 左
         self._exit_gate = False      # 正在"顶着丢人把门洞走完"
@@ -599,11 +600,14 @@ class PersonFollower(Node):
             elif abs(b_used) < self.p['lidar_face_exit_rad']:
                 self._lidar_face_hold = False
             if 'ox' in lidar_target:
-                self._person_mem = {'x': float(lidar_target['ox']),
-                                    'y': float(lidar_target['oy']),
-                                    'vx': float(lidar_target.get('vx') or 0.0),
-                                    'vy': float(lidar_target.get('vy') or 0.0),
-                                    'at': now}
+                # ⚠️ 别写进 `_person_mem`：那是**相机真值**，也是"按预测位置认领"的依据。
+                # 拿雷达（可能是错目标）的数据覆盖它，会一路自我强化到错的人身上
+                # （2026-11-26 用户报"雷达跟错人"）。雷达自己的记忆单独存。
+                self._lidar_mem = {'x': float(lidar_target['ox']),
+                                   'y': float(lidar_target['oy']),
+                                   'vx': float(lidar_target.get('vx') or 0.0),
+                                   'vy': float(lidar_target.get('vy') or 0.0),
+                                   'at': now}
             v, w, reason = lidar_follow(
                 b_used, r_now,
                 self.clear_hard, self.clear_slow, self.left, self.right,
@@ -612,10 +616,25 @@ class PersonFollower(Node):
                 face_hold=self._lidar_face_hold)
             self.src = 'lidar'
             box_h = box_h or 0.0
+            blind_age = ((now - self._blind_since) if self._blind_since else 0.0)
+            backed = lidar_backed(lidar_target, self.p)
+            if v > 0.0 and not lidar_drive_allowed(blind_age, self.p):
+                # 雷达分不清"这个人"和"前面那个人"：盲跟超时后只许原地转向找人，
+                # 不许再往前开（2026-11-26 用户报"人已经走过去了车还往前追"）。
+                v = 0.0
+                reason = 'lidar_blind_hold'
+                self.get_logger().info(
+                    '相机已丢 %.1f s，雷达只转不走（轨迹 #%d，%.2f m，%s）'
+                    % (blind_age, self._lidar_id, r_now,
+                       '相机背书' if backed else '无背书'),
+                    throttle_duration_sec=3.0)
             self.get_logger().info(
-                '相机丢人，雷达接管：方位 %+.0f°，距离 %.2f m（轨迹 #%d）'
-                % (math.degrees(float(lidar_target['bearing'])), r_now,
-                   self._lidar_id), throttle_duration_sec=3.0)
+                '雷达接管中 #%d 方位 %+.0f° 距离 %.2f m 轨迹速度 %.2f m/s '
+                '相机背书=%s 盲跟 %.1f s'
+                % (self._lidar_id, math.degrees(float(lidar_target['bearing'])),
+                   r_now, float(lidar_target.get('v') or 0.0),
+                   '是' if backed else '否', blind_age),
+                throttle_duration_sec=3.0)
         elif (person is None and sel >= 0 and self._lidar_id >= 0
               and self._lidar_bearing is not None
               and (now - max(self._lidar_seen, self._lidar_at))
@@ -649,7 +668,7 @@ class PersonFollower(Node):
                               # 雷达接管时 v 必须为 0 的几种（还要转身，所以不进下面的
                               # 显式归零列表）
                               'lidar_face', 'lidar_close', 'lidar_far',
-                              'side_blocked')
+                              'lidar_blind_hold', 'side_blocked')
         if hard_stop:
             self.v_cmd = 0.0
         else:
@@ -658,7 +677,7 @@ class PersonFollower(Node):
         # 左右摆自动阻尼：只在"跟着人走"的阶段生效（原地对准/找人要满速转，别收）。
         # 收的是**目标**角速度，再由下面的斜坡限幅平滑，所以不会跳变。
         if reason in ('following', 'obstacle_slow', 'lidar_follow', 'lidar_slow',
-                      'lidar_face'):
+                      'lidar_face', 'lidar_blind_hold'):
             self.osc_gain = self._osc.update(w, dt)
         else:
             self.osc_gain = self._osc.update(0.0, dt)

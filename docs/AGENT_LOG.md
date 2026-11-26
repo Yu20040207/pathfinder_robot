@@ -13696,3 +13696,354 @@ EMA 只走一半、突变首帧拒绝 0.3 s 后才认、平稳漂移不被误挡
 
 **未验证**：现场观感（31.5°/s 对准是否够快、0.3 s 确认窗口会不会显得"迟钝"）；
 如需更稳可把 `lidar_face_wmax` 降到 0.45，如需更快可提回 0.65。
+
+### 补充（2026-11-26 13:52）：`code=3001 load grant` 根因找到 + **方舟路线被彻底排除**
+
+**根因**：用户存进 `~/.volc_token` 的是**火山方舟的 API Key**（实测值形如 `ark-40…aca7`，46 字符），
+**不是豆包语音的 Access Token**。`tools/volc_cred_check.py` 一跑就暴露了：
+Token 前缀 `ark-` + 三种摆放方式（都带/只带头/只带体）全部 `load grant` 失败。
+
+**方舟（Ark）路线：有证据地排除，不是猜**（用上述**有效** Ark key 实测）：
+
+| 请求 | 结果 |
+| --- | --- |
+| `GET /api/v3/models` | **200**，返回 **55 个可用模型** → key 本身有效 |
+| 55 个模型的 domain | VideoGeneration / ImageGeneration / 3DGeneration / LLM / VLM / Embedding / Router |
+| **其中音频/语音模型** | **0 个**（没有 AudioGeneration，也没有 TTS） |
+| `POST /api/v3/audio/speech`（真实 key） | **404 空响应**（对照组 `chat/completions` 是 404 **带 JSON** `InvalidEndpointOrModel.NotFound`） |
+| `/api/v3/audio/generations`、`/audio/generate`、`/audio/tts`、`/api/v1/audio/speech` | 全部 **404 空响应** |
+
+**结论**：该账号的方舟**没有任何 TTS 能力**——「Doubao-音频生成-1.0」在开通管理里是**未开通**，
+所以不在模型列表里。方舟只有 `contents/generations`（视频/3D）和 `images/generations`。
+
+**重要技巧（以后可复用）**：`GET https://ark.cn-beijing.volces.com/api/v3/models`
+带 `Authorization: Bearer <ark-key>` 可以**列出该 key 实际可用的全部模型**，
+比逐个猜模型名快得多。且**空 404 = 路径不存在，带 JSON 的 404 = 路径存在但模型不可用**，
+这个区分很好用。
+
+**顺带修掉的健壮性问题**：`VolcengineTts.payload()` / `headers()` 原来读环境变量**没 strip**，
+而 `$(cat ~/.volc_token)` 很容易带尾随空白（用户文件实测 47 字节含换行、去空白 46）→ 已加 `.strip()`，
+13 个单测仍全过。
+
+**新增工具**：`tools/volc_cred_check.py` —— 凭据自查。只打印长度/首4/尾4（打码），
+检查空白/换行/中间空格，再用**三种摆放方式**打真实接口，把「token 错」和「音色错」一次分开。
+（`load grant` 与音色**无关**：换任何 voice_type 都是同一个错。）
+
+**下一步**：用户需从**豆包语音**控制台拿真正的 Access Token（**不以 `ark-` 开头**），
+替换 `~/.volc_token` 后跑 `volc_cred_check.py` 自查，通过后再试 `BV700_streaming` / `_bigtts` 音色。
+
+### 补充（2026-11-26 14:05）：换成 UUID 形态 token 后仍是 `load grant`（排除了一堆可能）
+
+用户把 `~/.volc_token` 换成 **UUID 形态**（`9e7d…d915`，36 位）——**格式是对的**（语音技术 Access Token 就是这个形状），
+但调用仍返回 `HTTP 401 code=3001 load grant: requested grant not found in SaaS storage`。
+
+**这一轮排掉的可能性（都有实测）**：
+1. **token 截断/空白** —— 已 `.strip()` 修正；文件 37 字节含换行、去空白 36，与 token 本体一致，不是截断。
+2. **cluster 不对** —— `volcano_tts` / `volcano_mega` / `volcano_tts_2` / `volcano_icl` 四种**报错完全相同**；
+   只有把 cluster 置空才变成 `Missing required: app.cluster`（说明 cluster 字段本身被接受）。
+3. **音色不对** —— 与音色无关，任何 voice_type 都是同一个 `load grant`。
+4. **凭据摆放方式** —— 都带/只带头/只带体三种全试；只有 token 为空时变成
+   `code=3031 accessToken cannot be empty`（说明服务端**确实读到了**我们发的 token）。
+
+**⚠️ 关键发现：服务端不区分"哪个错"**：
+| 组合 | 结果 |
+| --- | --- |
+| 真 appid + 真 token | `3001 load grant` |
+| 假 appid(999999999) + 真 token | `3001 load grant`（**一字不差**） |
+| 真 appid + 假 token(全零 UUID) | `3001 load grant`（**一字不差**） |
+→ 服务端在"查不到 grant"时**不告诉你缺的是 appid 还是 token**，所以没法靠改参数二分定位。
+
+**顺带确认的端点事实**：
+- `POST /api/v3/tts/unidirectional`（`X-Api-App-Id` / `X-Api-Access-Key` / `X-Api-Resource-Id`）
+  **真实存在**，同一 `load grant`，错误码是 `45000010`（v1 是 `3001`）。
+- `POST /api/v1/tts/ws_binary` **真实存在** —— 返回
+  `500 Cannot upgrade to websocket`（说明它就是 WS 端点，以后要用 WS 协议走这里）。
+
+**当前唯一卡点**：`(APP ID 1409423557, 该 token)` 在服务端查不到 grant。
+最可能是 **APP ID 与 Token 不成对**（豆包语音控制台可以有多个应用）。
+下一步需要用户提供「概览页」截图，确认 App ID 与 Access Token **在同一页成对显示**。
+
+**未改动代码**：本轮只做诊断，未改实现；`VolcengineTts` 仍是 HTTP v1 路径，待凭据通了再验。
+
+### ✅（2026-11-26 14:02）**豆包语音合成打通**：协议是 v3 单向下行，不是经典版
+
+**结论先行**：豆包 TTS 已真实可用，代码已接入 `tts_provider:=doubao`，
+实测合成 **2.71 s / 24 kHz / RMS 0.152**，并通过 `plughw:2,0` 播了出来。
+
+#### 真正能用的调用（实测原样，别再照经典版抄）
+
+```
+POST https://openspeech.bytedance.com/api/v3/tts/unidirectional
+Headers:
+  Content-Type: application/json
+  X-Api-Key: <豆包语音控制台「API Key 管理」里那串 UUID>
+  X-Api-Resource-Id: seed-tts-2.0
+Body:
+  {"user":{"uid":"fwr-voice"},
+   "req_params":{"text":"你好", "speaker":"saturn_zh_female_keainvsheng_tob",
+                 "audio_params":{"format":"pcm","sample_rate":24000}}}
+响应：**NDJSON 流**（一块一行）
+  {"code":0,"data":"<base64 PCM>"}   ← 多块，拼接即整段音频
+  {"code":20000000,"data":""}        ← 正常结束标记，不是错误
+```
+
+#### 为什么之前一直失败（三个错，各错一层）
+
+| 之前的做法 | 服务端回答 | 真实原因 |
+| --- | --- | --- |
+| `Authorization: Bearer;<token>` + body 放 `app.appid/app.token` | `3001 load grant` / `invalid auth token` | 这是**经典版**协议；豆包语音大模型改用 **`X-Api-Key`** 头 |
+| 经典协议 + 任意 cluster | 一律 `load grant`（且真假凭据报错**一字不差**） | 服务端不区分哪个错，只能靠换协议试 |
+| 大模型协议 + `*_bigtts` 音色 | `HTTP 200` 但 `code=55000000 resource ID is mismatched with speaker related resource` | `_bigtts` 属于别的资源；`seed-tts-2.0` 只认 **`saturn_*_tob`** |
+
+**关键判别**：`/api/v1/tts` 用 `X-Api-Key` 时返回
+`[resource_id=volc.tts.default] requested resource not granted` ——
+说明 **key 本身有效**，只是这个 key 没有经典版 `volc.tts.default` 的授权。
+换成 v3 + `seed-tts-2.0` 立刻 200，这是整件事的转折点。
+
+#### 资源 ID 与音色的对应（实测）
+
+| 资源 ID | 结果 |
+| --- | --- |
+| `seed-tts-2.0` | ✅ **可用**（语音合成 2.0 已开通） |
+| `seed-tts-1.0` | 403 `requested resource not granted` |
+| `seed-tts-3.0` | 403 `requested resource not granted`（3.0 未开通） |
+
+| 音色 | 结果 |
+| --- | --- |
+| `saturn_zh_female_keainvsheng_tob`（可爱女生） | ✅ 2.71 s |
+| `saturn_zh_male_shuanglangshaonian_tob`（爽朗少年） | ✅ 2.15~2.31 s |
+| `multi_female_vv_xi_v3_uranus_bigtts`（用户想选的 Vivi 3.0） | ✗ `55000000 mismatched`（属于 3.0） |
+| `zh_female_cancan_mars_bigtts` / 我瞎猜的 `saturn_*` 名 | ✗ 同上（音色名不能猜，必须从音色库复制） |
+
+#### 代码改动
+
+- **`tts.py` 新增 `SeedTts`**：`DEFAULT_ENDPOINT`（v3 unidirectional）、
+  `DEFAULT_RESOURCE_ID=seed-tts-2.0`、`END_CODE=20000000`；
+  `headers()` 只发 `X-Api-Key` + `X-Api-Resource-Id`（**故意不发 Authorization**，有单测钉死）；
+  `parse_stream()` 拆 NDJSON、把非 0 非结束码收进错误列表；
+  `speak()` 拼接多块 PCM 再播。凭据环境变量 **`FWR_VOLC_APIKEY`**。
+- **`node.py`** 新增 `tts_provider:=doubao` 分支 + 5 个参数：
+  `tts_seed_voice`（默认 `saturn_zh_female_keainvsheng_tob`）、`tts_seed_resource_id`、
+  `tts_seed_endpoint`、`tts_seed_encoding`、`tts_seed_apikey_env`。
+- **`launch/voice.launch.py`** 同步 4 个 launch 参数。
+- **`tests/test_voice_seed_tts.py`（新增 20 例）**：请求形状、`X-Api-Key`/资源头、
+  凭据缺失与 strip、NDJSON 多块拼接、结束码不算错、业务错误码（HTTP 200 也要抛）、
+  HTTP 403、空音频、`last_audio_started` 语义、构造校验。
+- **`tools/volc_voice_audition.py`** 改用 `SeedTts` 走真实协议，失败信息直接说明"音色不属于该资源"。
+
+#### 验证记录
+
+| 验证 | 结果 |
+| --- | --- |
+| `SeedTts` 直连真实服务 | ✅ 2.71 s / 24000 Hz |
+| 播放到 USB 喇叭 `plughw:2,0` | ✅ 两个音色都播完 |
+| `colcon build --packages-select fwr_voice` | ✅ |
+| `ros2 launch ... --show-args` | ✅ `tts_seed_*` 四个参数都注册了 |
+| **负向**：`tts_seed_apikey_env:=NO_SUCH_VAR` | ✅ 日志 `豆包 Seed-TTS 不可用，使用本地音色: RuntimeError`（证明分支真的走 `SeedTts`） |
+| **正向**：真实 key + `tts_provider:=doubao` | ✅ `输出[accepted]: 收到`，**0 次**回退本地 |
+| 全量单测 | ✅ **523 passed, 1 skipped** |
+
+#### 待办
+
+- 用户想要的 **Vivi 3.0 需要开通「语音合成 3.0」**（`seed-tts-3.0`），开通后改
+  `tts_seed_resource_id:=seed-tts-3.0` 即可，代码不用改。
+- 2.0 的完整音色列表必须以控制台「音色库」为准（**音色名不能猜**），
+  把 voice_type 填进 `tools/volc_voice_audition.py` 的清单即可批量试听。
+
+#### 音色 ID 不可推导（2026-11-26 14:10，两次穷举后确认）
+
+- 控制台「音色库」只显示**中文名**（Vivi 2.0 / 小何 2.0 / 云舟 2.0 / 小天 2.0 /
+  少年梓辛 2.0 / 魅力女友 2.0 / 刘飞 2.0 / Tina老师 2.0 / 清新女声 / 甜美小源 / Shiny），
+  **不直接显示 `voice_type`**，必须点卡片看详情。
+- 按这些名字的拼音组合试了 30 个 `saturn_zh_{female,male}_<pinyin>_tob`，
+  加上更早的 30 个通用猜测，**共 60 次全部 `mismatched`**，只有已确认的 2 个命中。
+- 也确认了**没有列音色的接口**：`/api/v3/tts/speakers`、`/voice_list`、`/list_voices`、
+  `/api/v3/voices`、`/api/v1/tts/speakers` 全部 404 `Endpoint does not exist`。
+- 结论：**音色 ID 只能从控制台卡片详情里抄**，不能猜、不能列。
+- 试听页已改成**自包含**（音频 base64 内嵌），因为相对路径在文件卡片里打不开，
+  浏览器表现为 `0:00 / 0:00` 点不动；另加 `--play --device plughw:2,0` 可直接播。
+
+#### `_moon_bigtts` 音色不可用（2026-11-26 14:12，用户实测 ID）
+
+用户从音色库拿到 `zh_female_tianmeixiaoyuan_moon_bigtts`（甜美小源），8 个资源 ID 全试：
+
+| 资源 ID | 结果 |
+| --- | --- |
+| `seed-tts-2.0` | HTTP 200 但 `code=55000000 mismatched`（声线与资源不匹配） |
+| `seed-tts-1.0` / `seed-tts-3.0` / `volc.service_type.10029` / `.10050` / `volc.megatts.default` / `volc.tts.default` / `volc.tts_async.default` | 全部 **403 `requested resource not granted`** |
+
+**结论**：该 key 只被授予 `seed-tts-2.0` 一个资源，而 `seed-tts-2.0` **只认 `saturn_*_tob`** 音色族。
+音色库里 `_moon_bigtts` / `_mars_bigtts` / `_uranus_bigtts` 这些是**老一代大模型**音色，
+需要 `volc.service_type.10029` 之类的资源，本账号未开通 → 拿不到。
+
+**累计猜测记录**：为找到 `saturn_*` 音色名，按控制台显示名拼音猜了 **70+ 个组合**
+（vivi / vv / weiwei / xiaohe / yunzhou / xiaotian / liufei / tinalaoshi / meilinvyu /
+shaonianzixin / qingxinnvsheng …，男女各一遍），**只有已确认的 2 个命中**。
+→ **音色 ID 无法从显示名推导，必须从控制台逐条复制。**
+
+### ✅ 定版（2026-11-26 14:20）：豆包音色锁定 `saturn_zh_female_keainvsheng_tob`
+
+用户决定：「saturn_zh_female_keainvsheng_tob 先用这个吧」。
+该音色已是 `tts_seed_voice` 的**默认值**（`node.py` + `launch/voice.launch.py` 两处），
+不需要额外传参。
+
+**为什么最终是它**（一句话）：账号只被授予 `seed-tts-2.0` 一个资源，
+而该资源**只认 `saturn_*_tob`** 音色族；`_moon_bigtts`（甜美小源等热门音色）、
+`_uranus_bigtts`（Vivi 3.0）分别属于未开通的旧代大模型和 3.0。
+
+**新增 `tools/run_voice.sh`**：一条命令起完整栈，免得每次手打一长串参数。
+
+```bash
+./tools/run_voice.sh          # 开麦（说「小明同学」唤醒）
+./tools/run_voice.sh --wav    # 不开麦，喂 test_wavs/zh.wav 冒烟
+./tools/run_voice.sh --local  # 退回本地 187 音色
+```
+
+设备默认 `mic=plughw:1,0`、`speaker=plughw:2,0`，可用 `FWR_MIC` / `FWR_SPK` 覆盖；
+没设 `FWR_VOLC_APIKEY` 时会自动读 `~/.volc_token`，两者都没有就**自动退回本地音色**并提示。
+⚠️ 脚本里 `source /opt/ros/humble/setup.bash` 前后必须 `set +u` / `set -u`：
+ROS 的 setup 会引用 `AMENT_TRACE_SETUP_FILES` 等未定义变量，`set -u` 下直接报错退出。
+
+**定版验证**（走 `run_voice.sh`）：
+- 冒烟 wav：`识别[sensevoice, 170 ms]: 开饭时间早上9点至下午5点。`（未唤醒 → 按设计不回复）
+- 发 `/robot/voice/text_input` = `停止` → `输出[accepted]: 收到`，
+  **`使用本地音色` 出现 0 次**（即真的走了豆包，没有回退）
+- 全量单测 523 passed / 1 skipped
+
+### ✅（2026-11-26 14:27）云端对话打通：`当前离线，暂时无法进行开放对话` 已解决
+
+**根因**：`cloud_base_url` 为空 + `FWR_LLM_API_KEY` 未设 → 节点走离线分支，
+任何输入都只回「当前离线，暂时无法进行开放对话」。
+
+**用的是什么**：火山方舟，模型 **`doubao-seed-2-0-lite-260428`**。
+
+**为什么是这个模型**（把账号里能调的模型逐个试了一遍）：
+| 模型 | 结果 |
+| --- | --- |
+| `doubao-seed-2-0-lite-260428` | ✅ **已激活，可用** |
+| `doubao-seed-2-1-lite-260915` / `-turbo-260628` / `-pro-260915` | 404 `ModelNotOpen`（账号未开通） |
+| `glm-5-3-flash-260828` | 404 `ModelNotOpen` |
+| `qwen3-8b` / `qwen3-14b` | 404 `InvalidEndpointOrModel.NotFound`（不在该 key 的目录里） |
+| `deepseek-v4-1-flash-261017` | 200 但 content 为空（思考型，内容在 `reasoning_content`） |
+
+⚠️ **方舟的模型列表（`GET /api/v3/models`）不等于"已开通"**：55 个模型全列出来，
+但只有 `doubao-seed-2-0-lite-260428` 真能调，其余报 `ModelNotOpen`。
+
+#### 修掉的两个真 bug（都在 `providers.py`）
+
+**① UTF-8 解码（致命，之前从没真正跑通过云端）**
+方舟的流式响应**不返回 charset**，`requests` 于是按 **latin-1** 解码，
+中文变成 `æ\x88\x91`；`iter_lines` 还会把多字节字符从中间劈开 →
+`json.loads` 报 `Unterminated string starting at: line 1 column 43`。
+改成 `iter_lines(decode_unicode=False)` + 自己 `raw.decode("utf-8", "replace")`。
+
+**② 思考型模型会先吐 2~3 秒"思考过程"**
+`doubao-seed-2-0-lite` 默认先输出 `reasoning_content`，内容要等思考完才来：
+实测**首字 3060 ms**。而 `enable_thinking: false`（通义那套写法）**方舟直接忽略**，
+仍然思考（2694 ms）。必须用方舟自己的开关 **`thinking: {"type":"disabled"}`** →
+**首字 0 ms、无 reasoning**。
+
+为此 `OpenAICompatibleProvider` 新增 `extra_payload` 参数（透传各厂商私有字段），
+节点新增 `cloud_extra_json` 参数 + **`FWR_CLOUD_EXTRA_JSON` 环境变量**。
+
+> ⚠️ **为什么走环境变量而不是 launch 参数**：`ros2 launch ... cloud_extra_json:='{"a":1}'`
+> 会被 launch 当 **YAML** 解析成 dict，直接报
+> `Allowed value types are bytes, bool, int... Got <class 'dict'>`。launch 参数只能传标量。
+
+#### 新增
+
+- `OpenAICompatibleProvider(..., extra_payload=...)`；`answer_stream` 请求体里 `**extra_payload`。
+- `node.py`：`cloud_extra_json` 参数（回落 `FWR_CLOUD_EXTRA_JSON`），解析失败给出明确报错。
+- `launch/voice.launch.py`：`cloud_extra_json` 参数（默认空）。
+- `tools/run_voice.sh`：自动读 `~/.ark_key` → `FWR_LLM_API_KEY`，
+  自动配 `cloud_base_url=https://ark.cn-beijing.volces.com/api/v3` +
+  `cloud_model=doubao-seed-2-0-lite-260428` + `FWR_CLOUD_EXTRA_JSON`；
+  没有 ark key 时打印「云端对话：关闭」。`FWR_CLOUD_OFF=1` 可强制离线。
+- `tests/test_voice_stream.py` +3 例：UTF-8 按字节解码、`extra_payload` 透传、
+  `reasoning_content` 不能被念出来。
+
+#### 实测（走 `./tools/run_voice.sh --wav`，真实方舟 + 豆包音色）
+
+```
+文本输入: 小明同学
+输出[reply]: 我在呢～有什么可以帮到你的吗？
+文本输入: 今天星期几？
+输出[reply]: 今天是星期三
+```
+- `使用本地音色` 出现 **0 次**（TTS 全程走豆包）
+- `TTS failure` **0 次**
+- 全量单测 **526 passed, 1 skipped**
+
+#### 已知局限
+
+**模型不知道当前日期/时间**（系统提示里没有时间信息），所以「今天星期几」这类问题
+会**编**一个答案（本次答"星期三"，实际 2026-11-26 是星期四）。
+要修的话得在 system prompt 里注入当前时间，或给个时间查询工具——本轮未做。
+
+### ✅（2026-11-26 14:29）给模型注入当前时间，「今天星期几」不再瞎编
+
+**问题**：模型不知道今天几号。先后两次实测自相矛盾——第一次**编**"今天是星期三"
+（2026-11-26 实际是**星期四**），用户再问又变成"我没办法获取时间，你看下手机"。
+
+**修法**：`providers.py` 里把角色提示词抽成常量 `SYSTEM_PROMPT`，新增
+
+```python
+time_sentence(now=None)   # "现在是 2026 年 11 月 26 日，星期四，14:28。"
+build_system_prompt(now=None)  # SYSTEM_PROMPT + time_sentence()
+```
+
+`answer_stream()` 每次请求**现算**（`datetime.now()`），所以长时间运行也不会停在启动时刻；
+`respond()` 的 JSON 指令也追加了同一句。`now` 参数只为可测，生产不传。
+
+**实测**（走 `./tools/run_voice.sh --wav`，真实方舟）：
+```
+文本输入: 今天几号，星期几？
+输出[reply]: 今天是2026年11月26日，星期四。
+```
+**单测** +2 例（`test_system_prompt_carries_current_datetime`、
+`test_answer_stream_sends_prompt_with_time`，后者断言"真发出去的请求体里带时间"，
+防止只改工具函数不改调用点）。全量 **528 passed, 1 skipped**。
+
+⚠️ 时区取的是**本机本地时间**（`datetime.now()`），跨时区部署要另说。
+
+### 2026-11-26 15:30 雷达"跟错人"：相机丢人后禁止长时间盲开
+
+用户：「现在雷达跟踪的时候会跟错，我已经在旁边走过去了，雷达跟踪还往前跟踪中」。
+
+**现场日志**（`journalctl -u fwr-follow`，07:00Z = 15:00 CST）：
+```
+相机丢人，雷达接管：方位 +25°，距离 2.60 m（轨迹 #22）
+相机丢人，雷达接管：方位  +1°，距离 2.55 m（轨迹 #22）
+相机丢人，雷达接管：方位  +3°，距离 1.89 m（轨迹 #22）
+```
+同一条 `#22` 连续 6 s 一路往前收，用户本人已经在车侧面 —— **车在追的不是人**。
+
+**根因**：`leg_tracker` 给人的背书只有 **1 s**（`cam_back_s`），但"续跟"这条支路
+（`self._tracks.get(self._lidar_id)`）**不查背书、不查方位/距离合理性**，
+只要 id 还在、轨迹没标 static，就能一直往前走，最长 `lidar_hold_max_s = 30 s`。
+雷达本身**分辨不出"这个人"和"前面那个人/推车"**，所以相机一丢人，
+车就对着 id 号一路盲开（现场 6 s、2.6 m→1.9 m 完全吻合）。
+
+**改动**
+1. `follow_core.lidar_drive_allowed(blind_age_s)` + 新参数 **`lidar_blind_drive_s = 2.5`**：
+   相机确认过之后最多盲开 **2.5 s**，超时 `v = 0`、`reason='lidar_blind_hold'`，
+   **只许原地转向找人**；相机一重新看到人（`_blind_since` 归零）立刻恢复前进。
+   `hard_stop` 名单加 `lidar_blind_hold`（v 必须为 0，但 w 照常给），`OscGuard` 覆盖它。
+2. `follow_core.lidar_backed(track)` 公开封装（原来只有私有 `_lidar_backed`）。
+3. **不再用雷达数据覆盖 `_person_mem`**（相机真值 + "按预测位置认领"的依据）：
+   雷达自己的位置记到新的 `_lidar_mem`。以前错目标会写进相机记忆 → 自我强化，
+   越跟越偏。
+4. 诊断日志（3 s 一条）：
+   `雷达接管中 #id 方位 +x° 距离 x.xx m 轨迹速度 x.xx m/s 相机背书=是/否 盲跟 x.x s`
+   —— 下次复现就能直接看出是"走动的路人"还是"静止的箱子/残影"。
+
+**回归**：`tests/test_lidar_fusion.py` +2 例（2.5 s 内允许、超时禁止；背书公开封装含 2 s 宽限），
+相关套件 **147 passed**。
+
+**部署（已获批）**：src + build 一致（md5 校验通过），`restart fwr-follow` active、
+启动后 0 异常。⚠️ 关服务时仍会打印一条老问题
+`RCLError: failed to initialize wait set ... rcl_shutdown()`（退出顺序，与本次改动无关）。
+
+**未验证**：现场是否还会追错（需要用户复现一次，看新的"雷达接管中"日志：
+若 `轨迹速度` 明显 >0.1 m/s 且 `相机背书=否`，说明是路过的另一个人，
+下一步要收紧相机背书门限 `cam_gate_deg 18°`/`lidar_assoc_deg 18°`）。

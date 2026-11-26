@@ -123,6 +123,12 @@ DEFAULTS = {
     'lidar_max_speed': 2.0,     # 轨迹速度超过这个就**不认**（推车/甩动的门/被拖的椅子）
     'lidar_search_s': 4.0,      # 雷达短暂丢失后，原地按最后方位找人的时长（s）
     'lidar_hold_max_s': 30.0,   # 相机完全看不到的最长接管时间（防止跟着残影走一整天）
+    # 2026-11-26 用户报"我已经在旁边走过去了，雷达跟踪还往前跟踪中"：
+    # 相机一丢人，雷达只认 id 就一路往前开，最长能开 `lidar_hold_max_s`。
+    # 雷达分辨不出"这个人"和"前面那个人/那个货"，所以规定：
+    # **相机确认过之后最多盲开 `lidar_blind_drive_s` 秒**，超时只许原地转向找人，
+    # 不许再往前开。相机一看到人（背书刷新）立刻恢复。
+    'lidar_blind_drive_s': 2.5,
     'lidar_adopt_m': 0.80,      # 目标丢了按"预测位置"重新认领：基础半径（m）
     'lidar_adopt_mps': 0.60,    # ……每过 1 s 再放宽多少米（人在走）
     'lidar_adopt_vmin': 0.12,   # 认领时要求轨迹**正在走动**（m/s），家具达不到
@@ -351,6 +357,23 @@ def _lidar_backed(c: dict, p: dict) -> bool:
     age = c.get('cam_age_s')
     lim = float(p.get('lidar_back_max_s', DEFAULTS['lidar_back_max_s']))
     return age is not None and float(age) <= lim
+
+
+def lidar_backed(track: dict, p: dict | None = None) -> bool:
+    """`_lidar_backed` 的公开版：这条轨迹"此刻还算不算相机确认过的人"。"""
+    return _lidar_backed(track or {}, dict(DEFAULTS if p is None else p))
+
+
+def lidar_drive_allowed(blind_age_s: float, p: dict | None = None) -> bool:
+    """相机丢人之后，雷达还能不能**往前开**。
+
+    2026-11-26 用户报"我已经在旁边走过去了，雷达跟踪还往前跟踪中"：
+    雷达只认 id，分辨不出"这个人"和"前面那个人/推车"，一路往前开最长 30 s。
+    现在只允许盲开 `lidar_blind_drive_s`（2.5 s），超时只能原地转向找人；
+    相机一旦重新看到人（背书刷新、`blind_age` 归零）立即恢复前进。
+    """
+    q = dict(DEFAULTS if p is None else p)
+    return float(blind_age_s) <= float(q['lidar_blind_drive_s'])
 
 
 def pick_lidar_track(cands, bearing: float, last_id: int = -1,
