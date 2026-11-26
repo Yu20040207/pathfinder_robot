@@ -30,6 +30,102 @@ def center_dist(a, b) -> float:
                           (a[1] + a[3] / 2) - (b[1] + b[3] / 2)))
 
 
+# COCO-17 关键点里"腿部"那几个：11/12 髋、13/14 膝、15/16 踝。
+# 2026-11-26 用户指出摄像头现在装在低处、靠近时只看得到腿 —— 姿态校验**不能要求肩部**。
+LEG_KEYPOINTS = (11, 12, 13, 14, 15, 16)
+
+
+def parse_pose_output(out, img_w: int, img_h: int, input_size: int,
+                      score_min: float = 0.05) -> list:
+    """YOLO-pose 输出 (1, 4+1+17*3, N) → [{box, score, kp}]（原图像素坐标）。
+
+    ``kp`` 是 17 个关键点置信度（0~1），坐标不再解析（只用来判"是不是人"）。
+    """
+    if out is None or len(out) == 0:
+        return []
+    arr = np.asarray(out)
+    pred = arr[0].T if arr.ndim == 3 else arr.T
+    if pred.shape[1] < 5 + 51:
+        return []
+    rows = []
+    sx = img_w / float(input_size)
+    sy = img_h / float(input_size)
+    for r in pred:
+        score = float(r[4])
+        if score < score_min:
+            continue
+        cx, cy, bw, bh = [float(v) for v in r[:4]]
+        rows.append({
+            'box': (max(0.0, (cx - bw / 2) * sx), max(0.0, (cy - bh / 2) * sy),
+                    bw * sx, bh * sy),
+            'score': score,
+            'kp': [float(v) for v in r[5 + 2::3]],
+        })
+    return rows
+
+
+def _iou(a, b) -> float:
+    ax, ay, aw, ah = a
+    bx, by, bw, bh = b
+    x1, y1 = max(ax, bx), max(ay, by)
+    x2, y2 = min(ax + aw, bx + bw), min(ay + ah, by + bh)
+    if x2 <= x1 or y2 <= y1:
+        return 0.0
+    inter = (x2 - x1) * (y2 - y1)
+    union = aw * ah + bw * bh - inter
+    return inter / union if union > 0 else 0.0
+
+
+def pose_confirms(box, pose_rows, pose_conf: float = 0.30,
+                  min_leg_kp: int = 1, kp_conf: float = 0.40,
+                  iou_thr: float = 0.30) -> bool:
+    """这个检测框是不是"真的人"——用姿态结果二次确认（腿友好）。
+
+    规则（2026-11-26 实测定版）：
+      1. 找一个和它重叠的姿态框（IoU ≥ ``iou_thr``）；
+      2. **姿态框分 ≥ ``pose_conf``** —— 这一条最关键：杂物（塑料袋）会出现
+         0.9 分的"关键点"，但**姿态框分只有 0.003**，只看关键点数会被骗；
+      3. 髋/膝/踝里至少 ``min_leg_kp`` 个可信（≥ ``kp_conf``）—— 低机位只看得到腿时
+         肩部本来就没有，所以**不要求上半身**。
+    """
+    best = None
+    for r in pose_rows or []:
+        iou = _iou(box, r['box'])
+        if iou >= iou_thr and (best is None or iou > best[0]):
+            best = (iou, r)
+    if best is None:
+        return False
+    r = best[1]
+    if float(r['score']) < float(pose_conf):
+        return False
+    kp = r['kp']
+    legs = sum(1 for i in LEG_KEYPOINTS if i < len(kp) and kp[i] >= kp_conf)
+    return legs >= int(min_leg_kp)
+
+
+def filter_persons(boxes, pose_rows, bypass_conf: float = 0.70,
+                   pose_conf: float = 0.30, min_leg_kp: int = 1,
+                   kp_conf: float = 0.40, iou_thr: float = 0.30) -> list:
+    """检测框 → 过一遍姿态校验。
+
+    * 检测分 ≥ ``bypass_conf`` 直接放行（真人高置信，不因姿态没跟上被丢）；
+    * 其余必须有姿态背书，否则丢掉（塑料袋/纸箱/椅背这种"长得像人"的杂物）。
+    ``pose_rows`` 为空（姿态模型没装/没跑）时**原样返回**，保持老行为。
+    """
+    if not pose_rows:
+        return list(boxes)
+    out = []
+    for b in boxes:
+        score = float(b[4]) if len(b) > 4 else 0.0
+        if score >= bypass_conf:
+            out.append(b)
+            continue
+        if pose_confirms(tuple(b[:4]), pose_rows, pose_conf, min_leg_kp,
+                         kp_conf, iou_thr):
+            out.append(b)
+    return out
+
+
 def parse_yolo_output(out, img_w: int, img_h: int, input_size: int,
                       conf: float, iou_thr: float = 0.45,
                       person_class: int = 0) -> list:

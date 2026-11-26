@@ -52,12 +52,17 @@ from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CompressedImage
 from std_msgs.msg import String
 
-from fwr_bringup.vision_boxes import (assign_ids, parse_yolo_output,
+from fwr_bringup.vision_boxes import (assign_ids, filter_persons,
+                                     parse_pose_output, parse_yolo_output,
                                      pick_selected, to_payload)
 
 MODEL_CANDIDATES = (
     'models/yolo11n.onnx',
     '/home/manbaout/Company_Project/Four-wheel-robot/models/yolo11n.onnx',
+)
+POSE_CANDIDATES = (
+    'models/yolo11n-pose.onnx',
+    '/home/manbaout/Company_Project/Four-wheel-robot/models/yolo11n-pose.onnx',
 )
 
 
@@ -84,18 +89,43 @@ class PersonDetector(Node):
         p = self.declare_parameter
         self.model_path = str(p('model_path', '').value) or self._find_model()
         self.input_size = int(p('input_size', 416).value)
-        self.conf = float(p('conf', 0.35).value)
+        # 2026-11-26 用户报"杂物有时被识别人"：实测蓝筐上的塑料收纳袋在
+        # 0.10~0.27 之间跳（阈值 0.35 就在旁边）→ 光照一变就越线。默认提到 0.45。
+        self.conf = float(p('conf', 0.45).value)
         self.iou = float(p('iou', 0.45).value)
         self.detect_hz = float(p('detect_hz', 8.0).value)
         self.person_class = int(p('person_class', 0).value)
+
+        # 姿态二次校验（2026-11-26）：杂物会出现 0.9 分的"关键点"，但姿态框分只有 0.003，
+        # 所以规则是"姿态框分 ≥ pose_conf 且 髋/膝/踝 ≥ min_leg_kp"（腿友好，不要求肩部）。
+        self.pose_enabled = bool(p('pose_enabled', True).value)
+        self.pose_conf = float(p('pose_conf', 0.30).value)
+        self.pose_input = int(p('pose_input', 480).value)
+        self.pose_kp_conf = float(p('pose_kp_conf', 0.40).value)
+        self.pose_min_leg_kp = int(p('pose_min_leg_kp', 1).value)
+        self.pose_bypass = float(p('pose_bypass_conf', 0.70).value)
+        self.pose_path = str(p('pose_model', '').value) or self._find_model(
+            POSE_CANDIDATES)
+        self.pose_sess = None
+        self.pose_ms = 0.0
+        if self.pose_enabled and self.pose_path and os.path.exists(self.pose_path):
+            try:
+                self.pose_sess = load_session(self.pose_path)
+                self.pose_name = self.pose_sess.get_inputs()[0].name
+            except Exception as exc:                       # noqa: BLE001
+                self.get_logger().warn('姿态模型加载失败（只跑检测）：%s' % exc)
+                self.pose_sess = None
 
         if not self.model_path or not os.path.exists(self.model_path):
             raise SystemExit('找不到 yolo11n.onnx（先下到 models/yolo11n.onnx）')
         self.sess = load_session(self.model_path)
         self.input_name = self.sess.get_inputs()[0].name
         self.get_logger().info(
-            '人体检测就绪：%s 输入 %d 阈值 %.2f 上限 %.1f Hz'
-            % (self.model_path, self.input_size, self.conf, self.detect_hz))
+            '人体检测就绪：%s 输入 %d 阈值 %.2f 上限 %.1f Hz；%s'
+            % (self.model_path, self.input_size, self.conf, self.detect_hz,
+               ('姿态校验 %s（框分≥%.2f，髋/膝/踝≥%d）'
+                % (self.pose_path, self.pose_conf, self.pose_min_leg_kp))
+               if self.pose_sess is not None else '姿态校验：未启用'))
 
         self.pub = self.create_publisher(String, '/robot/vision/persons', 10)
         self.create_subscription(String, '/robot/vision/select', self.on_select, 10)
@@ -119,10 +149,10 @@ class PersonDetector(Node):
 
     # ------------------------------------------------------------ 工具
     @staticmethod
-    def _find_model() -> str:
+    def _find_model(cands=MODEL_CANDIDATES) -> str:
         here = os.path.dirname(os.path.dirname(os.path.dirname(
             os.path.dirname(os.path.abspath(__file__)))))
-        for rel in MODEL_CANDIDATES:
+        for rel in cands:
             cand = rel if os.path.isabs(rel) else os.path.join(here, rel)
             if os.path.exists(cand):
                 return cand
@@ -135,9 +165,26 @@ class PersonDetector(Node):
                                      swapRB=True, crop=False)
         t0 = time.monotonic()
         out = self.sess.run(None, {self.input_name: blob})[0]
+        boxes = parse_yolo_output(out, w, h, self.input_size, self.conf,
+                                  self.iou, self.person_class)
+        if self.pose_sess is not None and boxes:
+            pose_rows = []
+            try:
+                pblob = cv2.dnn.blobFromImage(img, 1 / 255.0,
+                                              (self.pose_input, self.pose_input),
+                                              swapRB=True, crop=False)
+                tp = time.monotonic()
+                pout = self.pose_sess.run(None, {self.pose_name: pblob})[0]
+                self.pose_ms = (time.monotonic() - tp) * 1000.0
+                pose_rows = parse_pose_output(pout, w, h, self.pose_input)
+            except Exception as exc:                       # noqa: BLE001
+                self.get_logger().warn('姿态推理失败（本帧不做校验）：%s' % exc,
+                                       throttle_duration_sec=10.0)
+            boxes = filter_persons(boxes, pose_rows, self.pose_bypass,
+                                   self.pose_conf, self.pose_min_leg_kp,
+                                   self.pose_kp_conf)
         self._infer_ms = (time.monotonic() - t0) * 1000.0
-        return parse_yolo_output(out, w, h, self.input_size, self.conf,
-                                 self.iou, self.person_class)
+        return boxes
 
     # ------------------------------------------------------------ 回调
     def on_select(self, msg: String) -> None:
