@@ -136,8 +136,22 @@ DEFAULTS = {
     'lidar_resume_m': 1.55,     # 停过之后退到这么远才重新走（迟滞 35 cm）
     'lidar_far_m': 3.00,        # 超过这个距离只转不追（看不清是腿还是家具）
     'lidar_face_rad': 0.50,     # 目标偏离车头超过 29° → 原地转向对准，不前进
+    # 2026-11-26 用户报"雷达接管时左转右转对准幅度大，刷新后重新跟随就稳"：
+    # 定位到 `lidar_face` 支路是**纯 P 且增益 ×2**（3.6·b），只要进 face 就顶到 0.74 rad/s
+    # 满速转；20 Hz + w_accel 3.0 下刹不住 → 冲过头 → 反着修 → 左右摆。
+    # 相机那条路早有 PD + 滞回，雷达这条一直没做。现在补三件：
+    #   ① face 增益 2.0 → 1.15，且 face 期间限速到 lidar_face_wmax；
+    #   ② 阻尼项 lidar_kd·(方位变化率)：方位在收（趋近 0）时提前松力；
+    #   ③ 滞回：>lidar_face_rad 进 face，<lidar_face_exit_rad 才退出（防阈值抖动）。
+    'lidar_face_exit_rad': 0.38,  # 退出 face 的滞回阈值（<进门槛，防来回切）
+    'lidar_face_gain': 1.15,    # face 时的 P 增益倍数（原来硬编码 2.0）
+    'lidar_face_wmax': 0.55,    # face 期间转向上限（满速 0.74 会冲过头）
     'lidar_bearing_deadband': 0.05,   # ±3° 不转（雷达有抖动）
     'lidar_kp': 1.8,            # 方位误差 → 角速度
+    'lidar_kd': 0.25,           # 方位变化率 → 阻尼（按闭合方向减力）
+    'lidar_bearing_smooth': 0.5,      # 方位 EMA（雷达方位逐帧抖 2~5°）
+    'lidar_flip_reject_rad': 0.60,    # 换轨迹导致方位突变超过 34° → 先不信，等确认
+    'lidar_flip_confirm_s': 0.30,     # 突变要持续这么久才认
     'lidar_wmax': 0.74,         # 雷达接管时的转向上限（与跟框 steer_wmax 一致）
     'lidar_vmax': 0.20,         # 雷达接管时的前进上限（没相机辅助，仍比跟随慢一档）
 }
@@ -474,9 +488,67 @@ def lidar_search_cmd(bearing: float, p: dict | None = None):
     return 0.0, w, 'lidar_search'
 
 
+def bearing_ema(prev, raw: float, dt: float, alpha: float) -> tuple:
+    """雷达方位 EMA + 变化率（rad/s）。返回 ``(smoothed, rate)``。
+
+    雷达方位逐帧抖 2~5°，裸值直接进 PD 就是"抖着转"；变化率用于阻尼项
+    （车朝目标转时方位在减小 → rate<0 → 提前松力，见 `_lidar_pd`）。
+    """
+    raw = float(raw)
+    if prev is None:
+        return raw, 0.0
+    a = max(0.0, min(1.0, float(alpha)))
+    smoothed = a * raw + (1.0 - a) * float(prev)
+    rate = 0.0
+    if dt > 1e-3:
+        rate = max(-6.0, min(6.0, (smoothed - float(prev)) / float(dt)))
+    return smoothed, rate
+
+
+def flip_confirm(last_ok, flip, b: float, tid: int, now: float,
+                 reject_rad: float, confirm_s: float) -> tuple:
+    """换轨迹导致的方位突变要不要信。返回 ``(accept, last_ok, flip)``。
+
+    现场（2026-11-26 日志）：轨迹号在 #34 / #49 / #95 / #112 … 之间跳，
+    方位 +25° / -38° / +60° 跟着跳 —— 两条腿/两个人抢 id 时车就"左右各转一炮"。
+    规则：方位跳变超过 `reject_rad` 且轨迹号也变了 → 先不信；
+    同一个候选连续一致超过 `confirm_s` 才认（真换了目标也能跟上，只是慢 0.3 s）。
+    """
+    b = float(b)
+    tid = int(tid)
+    if last_ok is None:
+        return True, (b, tid), None
+    ok_b, ok_id = last_ok
+    if abs(b - ok_b) > float(reject_rad) and tid != int(ok_id):
+        if (flip is not None and abs(b - flip[0]) <= float(reject_rad)
+                and tid == int(flip[1])):
+            if now - flip[2] >= float(confirm_s):
+                return True, (b, tid), None
+            return False, last_ok, flip
+        return False, last_ok, (b, tid, now)
+    return True, (b, tid), None
+
+
+def _lidar_pd(err: float, rate: float, kp: float, kd: float) -> float:
+    """方位误差的 PD 输出（左正）。阻尼项**只许收力**，不许把转向反号。
+
+    雷达方位是"目标相对车头"的角度：车朝目标转时方位在**减小**（rate<0）。
+    所以 `kd*rate` 在趋近阶段是负向（提前松力），不会把车拽反 —— 但为了绝对安全，
+    阻尼量夹在 `±0.5·|kp·err|` 以内，最多抵消一半 P。
+    """
+    p_term = kp * float(err)
+    d_term = kd * float(rate)
+    limit = 0.5 * abs(p_term)
+    if limit > 0.0:
+        d_term = max(-limit, min(limit, d_term))
+    return p_term + d_term
+
+
 def lidar_follow(bearing: float, rng: float, clear_hard: float,
                  clear_slow: float, left_m: float, right_m: float,
-                 p: dict | None = None, close_hold: bool = False) -> tuple:
+                 p: dict | None = None, close_hold: bool = False,
+                 bearing_rate: float = 0.0,
+                 face_hold: bool = False) -> tuple:
     """相机丢人后的"雷达续跟"控制律，返回 ``(v, w, reason)``。
 
     和 ``decide`` 的区别：这里只有**方位 + 距离**，没有框高。
@@ -489,15 +561,22 @@ def lidar_follow(bearing: float, rng: float, clear_hard: float,
     """
     q = dict(DEFAULTS if p is None else p)
     b = float(bearing)
+    rate = float(bearing_rate)
     # 方位误差 → 角速度（左正，和雷达 y 轴一致；不要抄画框那条的负号）
     if abs(b) < q['lidar_bearing_deadband']:
         w = 0.0
     else:
-        w = max(-q['lidar_wmax'], min(q['lidar_wmax'], q['lidar_kp'] * b))
+        w = max(-q['lidar_wmax'], min(q['lidar_wmax'],
+                                      _lidar_pd(b, rate, q['lidar_kp'],
+                                                q['lidar_kd'])))
 
     # 1) 目标在车侧/车后：原地转身对准，不前进（差速车无法侧移）
-    if abs(b) > q['lidar_face_rad']:
-        w = max(-q['wmax'], min(q['wmax'], q['lidar_kp'] * 2.0 * b))
+    #    滞回：已经在对准时用更低的退出阈值，避免在 29° 附近来回切模式。
+    face_gate = q['lidar_face_exit_rad'] if face_hold else q['lidar_face_rad']
+    if abs(b) > face_gate:
+        w = max(-q['lidar_face_wmax'], min(q['lidar_face_wmax'],
+                _lidar_pd(b, rate, q['lidar_kp'] * q['lidar_face_gain'],
+                          q['lidar_kd'])))
         return 0.0, w, 'lidar_face'
 
     # 2) 车头走廊有障碍 → 停（不转也不走，先把障碍弄走）

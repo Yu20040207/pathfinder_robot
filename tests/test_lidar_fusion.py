@@ -210,3 +210,73 @@ def test_reacquire_keeps_standing_person_same_id():
     cands = [_tr(7, 0.0, 1.8, static=True)]
     got = reacquire_track(cands, 0.0, 1.8, last_id=7)
     assert got is not None and got['id'] == 7
+
+
+# ---------------- 2026-11-26：雷达接管"左右摆"（face 纯 P ×2 → PD + 滞回） ----------------
+
+def test_lidar_face_gain_is_damped_not_bang_bang():
+    """老写法 `lidar_kp*2.0*b` 一进 face 就顶满 0.74 rad/s，20 Hz 下必冲过头。
+
+    现场（2026-11-26 用户报"左转右转对准幅度大，刷新重新跟随就稳"）：
+    轨迹号 #34/#49/#95/#112 乱跳 + 方位 ±25~60°，face 支路就左右各甩一炮。
+    """
+    p = DEFAULTS
+    v, w, reason = lidar_follow(0.60, 2.2, 9, 9, 9, 9)
+    assert reason == 'lidar_face' and v == 0.0
+    assert abs(w) <= p['lidar_face_wmax'] + 1e-9 < p['wmax']
+
+
+def test_lidar_face_damping_reduces_turn_while_closing():
+    """方位在收（rate<0）时阻尼项提前松力。"""
+    p = DEFAULTS
+    b = 0.30                     # 低于 face 门槛 → 走正常跟随支路
+    _, w_free, _ = lidar_follow(b, 2.2, 9, 9, 9, 9)
+    _, w_damp, _ = lidar_follow(b, 2.2, 9, 9, 9, 9, bearing_rate=-2.0)
+    assert w_damp < w_free - 1e-6
+    # 阻尼只许收力：反向 rate 最多抵消一半 P，不会把转向翻号
+    _, w_open, _ = lidar_follow(b, 2.2, 9, 9, 9, 9, bearing_rate=+6.0)
+    assert w_open <= p['lidar_kp'] * b * 1.5
+
+
+def test_lidar_face_hysteresis():
+    """滞回：进 face 用 0.50 rad，已在 face 里要掉到 0.38 以下才退出。"""
+    p = DEFAULTS
+    assert abs(p['lidar_face_exit_rad']) < abs(p['lidar_face_rad'])
+    b = 0.42
+    _, w_normal, r_normal = lidar_follow(b, 2.2, 9, 9, 9, 9)
+    assert r_normal == 'lidar_follow'
+    _, w_hold, r_hold = lidar_follow(b, 2.2, 9, 9, 9, 9, face_hold=True)
+    assert r_hold == 'lidar_face'
+    assert abs(w_hold) <= p['lidar_face_wmax'] + 1e-9
+    # 掉到退出阈值以下 → 回到正常跟随
+    _, _, r_out = lidar_follow(0.30, 2.2, 9, 9, 9, 9, face_hold=True)
+    assert r_out != 'lidar_face'
+
+
+def test_bearing_ema_smooths_and_reports_rate():
+    from fwr_bringup.follow_core import bearing_ema
+    first, rate0 = bearing_ema(None, 0.20, 0.05, 0.5)
+    assert first == 0.20 and rate0 == 0.0
+    second, rate1 = bearing_ema(0.20, 0.60, 0.05, 0.5)
+    assert abs(second - 0.40) < 1e-9            # 只走一半
+    assert rate1 > 0.0                           # 方位在变大
+
+
+def test_flip_confirm_rejects_track_hopping():
+    """轨迹换号 + 方位突变 → 先不信；连续一致 0.3 s 才认。"""
+    from fwr_bringup.follow_core import flip_confirm
+    ok, last_ok, flip = flip_confirm((0.10, 34), None, 0.90, 49, 10.00, 0.60, 0.30)
+    assert ok is False and last_ok == (0.10, 34) and flip is not None
+    ok, last_ok, flip = flip_confirm(last_ok, flip, 0.90, 49, 10.10, 0.60, 0.30)
+    assert ok is False
+    ok, last_ok, flip = flip_confirm(last_ok, flip, 0.90, 49, 10.35, 0.60, 0.30)
+    assert ok is True and last_ok == (0.90, 49) and flip is None
+
+
+def test_flip_confirm_allows_smooth_drift():
+    """同一条轨迹慢慢转（方位连续变化）不能被当成突变挡掉。"""
+    from fwr_bringup.follow_core import flip_confirm
+    last, flip = (0.10, 34), None
+    for k, b in enumerate((0.20, 0.32, 0.45, 0.58)):
+        ok, last, flip = flip_confirm(last, flip, b, 34, 10.0 + 0.05 * k, 0.60, 0.30)
+        assert ok is True

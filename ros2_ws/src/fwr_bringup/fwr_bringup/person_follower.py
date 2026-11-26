@@ -37,7 +37,7 @@ from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import String
 
-from fwr_bringup.follow_core import (DEFAULTS, OscGuard, adopt_moving_track, cam_bearing, decide, door_clear, door_metrics, door_swept_radius, lidar_follow, lidar_search_cmd, limit_pair, passage_metrics, pick_lidar_track, predict_person, reacquire_track, scan_metrics)
+from fwr_bringup.follow_core import (DEFAULTS, OscGuard, adopt_moving_track, bearing_ema, cam_bearing, decide, door_clear, door_metrics, door_swept_radius, flip_confirm, lidar_follow, lidar_search_cmd, limit_pair, passage_metrics, pick_lidar_track, predict_person, reacquire_track, scan_metrics)
 
 
 class PersonFollower(Node):
@@ -83,6 +83,13 @@ class PersonFollower(Node):
         self.err_dot = 0.0
         self._osc = OscGuard()      # 左右摆自动阻尼（见 follow_core.OscGuard）
         self.osc_gain = 1.0
+        # 雷达方位滤波/滞回/换轨迹防抖（2026-11-26 用户报"雷达接管时左右摆很大"）
+        self._lidar_b_s = None       # 平滑后的方位（rad）
+        self._lidar_b_t = 0.0
+        self._lidar_rate = 0.0       # 方位变化率（rad/s，闭合为负）
+        self._lidar_face_hold = False
+        self._lidar_last_ok = None   # (bearing, track_id) 上一次可信的方位
+        self._lidar_flip = None      # (bearing, track_id, since) 突变候选
         # 门内丢人 → 先出门再找人（2026-11-21 用户要求）
         self._last_side = 0.0        # 最后一次看到人时，人在画面 +1 右 / -1 左
         self._exit_gate = False      # 正在"顶着丢人把门洞走完"
@@ -272,6 +279,29 @@ class PersonFollower(Node):
         msg.angular.z = float(w)
         self.cmd.publish(msg)
 
+    def _lidar_bearing_filter(self, b_raw: float, now: float) -> float:
+        """方位 EMA + 变化率（纯逻辑在 `follow_core.bearing_ema`）。"""
+        dt = now - self._lidar_b_t
+        smoothed, rate = bearing_ema(self._lidar_b_s, b_raw, dt,
+                                    float(self.p['lidar_bearing_smooth']))
+        if self._lidar_b_s is not None:
+            self._lidar_rate += 0.5 * (rate - self._lidar_rate)
+        else:
+            self._lidar_rate = rate
+        self._lidar_b_s = smoothed
+        self._lidar_b_t = now
+        return smoothed
+
+    def _lidar_bearing_trusted(self, b: float, tid: int, now: float) -> bool:
+        """换轨迹 + 方位突变要不要信（纯逻辑在 `follow_core.flip_confirm`）。"""
+        ok, last_ok, flip = flip_confirm(
+            self._lidar_last_ok, self._lidar_flip, b, tid, now,
+            float(self.p['lidar_flip_reject_rad']),
+            float(self.p['lidar_flip_confirm_s']))
+        self._lidar_last_ok = last_ok
+        self._lidar_flip = flip
+        return ok
+
     def _state(self, reason: str, v: float, w: float, box_h: float) -> None:
         fin = lambda x: None if math.isinf(x) else round(x, 2)   # noqa: E731
         payload = {'on': self.enabled, 'v': round(v, 3), 'w': round(w, 3),
@@ -295,6 +325,10 @@ class PersonFollower(Node):
                    'nomotion': bool(self.nomotion),
                    'err_dot': round(float(self.err_dot), 2),
                    'osc_gain': round(float(self.osc_gain), 2),
+                   'lidar_bearing_deg': (round(math.degrees(self._lidar_bearing), 1)
+                                         if self._lidar_bearing is not None else None),
+                   'lidar_rate_deg_s': round(math.degrees(self._lidar_rate), 1),
+                   'lidar_face': bool(self._lidar_face_hold),
                    'search_side': self._last_side,
                    'src': self.src, 'lidar_id': int(self._lidar_id),
                    'lidar_r': (round(self._tracks[self._lidar_id]['r'], 2)
@@ -546,8 +580,24 @@ class PersonFollower(Node):
             elif r_now <= self.p['lidar_stop_m']:
                 self._lidar_close = True
             self._lidar_seen = now
-            self._lidar_bearing = float(lidar_target['bearing'])
+            b_raw = float(lidar_target['bearing'])
+            if self._lidar_bearing_trusted(b_raw, int(lidar_target['id']), now):
+                b_used = self._lidar_bearing_filter(b_raw, now)
+            else:
+                # 突变还没确认：继续按上一次可信方位走（不跟着跳，也不急停）
+                b_used = (self._lidar_bearing if self._lidar_b_s is None
+                          else self._lidar_b_s)
+                self.get_logger().info(
+                    '雷达方位突变 %+.0f°（轨迹 #%d）→ 等确认，先按 %+.0f° 走'
+                    % (math.degrees(b_raw), int(lidar_target['id']),
+                       math.degrees(b_used)), throttle_duration_sec=2.0)
+            self._lidar_bearing = b_used
             self._lidar_r = r_now
+            # 滞回：先看是否该进 face，再看是否该退出（退出阈值更低）
+            if abs(b_used) > self.p['lidar_face_rad']:
+                self._lidar_face_hold = True
+            elif abs(b_used) < self.p['lidar_face_exit_rad']:
+                self._lidar_face_hold = False
             if 'ox' in lidar_target:
                 self._person_mem = {'x': float(lidar_target['ox']),
                                     'y': float(lidar_target['oy']),
@@ -555,9 +605,11 @@ class PersonFollower(Node):
                                     'vy': float(lidar_target.get('vy') or 0.0),
                                     'at': now}
             v, w, reason = lidar_follow(
-                float(lidar_target['bearing']), r_now,
+                b_used, r_now,
                 self.clear_hard, self.clear_slow, self.left, self.right,
-                self.p, close_hold=self._lidar_close)
+                self.p, close_hold=self._lidar_close,
+                bearing_rate=self._lidar_rate,
+                face_hold=self._lidar_face_hold)
             self.src = 'lidar'
             box_h = box_h or 0.0
             self.get_logger().info(
@@ -580,6 +632,12 @@ class PersonFollower(Node):
                     throttle_duration_sec=3.0)
         elif self.src == 'cam':
             self._lidar_close = False        # 相机看回来，雷达侧迟滞复位
+            self._lidar_face_hold = False
+            if self._lidar_b_s is not None and (now - self._lidar_seen) > 2.0:
+                self._lidar_b_s = None
+                self._lidar_rate = 0.0
+                self._lidar_last_ok = None
+                self._lidar_flip = None
 
         # 平滑：加速/减速都限幅（避免一帧跳变把车"顿"一下）；
         # 安全类原因（障碍/丢人/太近）立刻归零，不做斜坡。
@@ -599,7 +657,8 @@ class PersonFollower(Node):
             self.v_cmd += max(-dv, min(dv, v - self.v_cmd))
         # 左右摆自动阻尼：只在"跟着人走"的阶段生效（原地对准/找人要满速转，别收）。
         # 收的是**目标**角速度，再由下面的斜坡限幅平滑，所以不会跳变。
-        if reason in ('following', 'obstacle_slow', 'lidar_follow', 'lidar_slow'):
+        if reason in ('following', 'obstacle_slow', 'lidar_follow', 'lidar_slow',
+                      'lidar_face'):
             self.osc_gain = self._osc.update(w, dt)
         else:
             self.osc_gain = self._osc.update(0.0, dt)

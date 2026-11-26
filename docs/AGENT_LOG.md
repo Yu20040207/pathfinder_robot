@@ -13584,3 +13584,115 @@ gitee 搜索 API 返回空数组、GitHub 不通 → **拿不到官方文档和�
 
 **未验证**：现场手感（0.8 s 是否够柔和/是否滑行太远）、急停按钮仍是硬停、
 `manual_decel_mps2` 现场可在线调（`ros2 param set /base_bridge manual_decel_mps2 0.7`）。
+
+### 补充（2026-11-26 11:50）：火山方舟（Ark）可达性实测 + 用户选定音色
+
+**用户选定音色**：场景「陪聊」/ 名称 **Vivi 3.0** / `voice_type = multi_female_vv_xi_v3_uranus_bigtts`。
+后缀 `_bigtts` 说明它属于**语音合成大模型**（不是标准版 `BV700_streaming` 那一套）。
+
+**用户所在控制台**：截图是 `console.volcengine.com/ark/.../openManagement?tab=TTS`，
+即**火山方舟（Ark）**，不是语音技术控制台。Ark 只要 **API Key**，不需要 appid。
+左栏「API Key 管理」是 key 的位置；截图里各模型「推理额度」开关**全是关的**（未开通）。
+
+**网络可达性实测**（本机，无凭据）：
+- `POST https://ark.cn-beijing.volces.com/api/v3/audio/speech`
+  → **HTTP 401**，Ark 标准错误体
+  `{"error":{"code":"AuthenticationError","message":"the API key or AK/SK in the request is missing or invalid…"}}`
+- 带 `Authorization: Bearer invalid-key-for-probe` → 消息变成 `The API key format is incorrect`
+  （说明 Ark 会校验 key 的**格式**，真实 key 应是 UUID 形态）
+
+⚠️ **关键否证（我自己踩了又排掉）**：我一度以为 401 证明 `/audio/speech` 存在。
+用**瞎编路径** `/api/v3/definitely-not-real-xyz` 和 `/api/v3/chat/completions` 对照，
+**三条全部 401、消息一样** → **Ark 的鉴权中间件跑在路由之前**，
+所以 401 **不能**证明端点存在。要确认 `/audio/speech` 是否真实，必须有有效 key。
+
+**新增工具**：`tools/ark_tts_probe.py` —— 多候选端点探测（ark `/audio/speech` 两种字段名、
+openspeech v3 `seed-tts-1.0`、openspeech v1 `volcano_tts`），逐个打印真实状态码与服务端原话，
+拿到音频就存 WAV 并打印可抄进 launch 的参数；另有 `--url/--json/--auth` 可完全照抄控制台示例。
+已验证：`py_compile` 通过；无凭据时前两个候选真发出请求并打印 401 原文，后两个因缺 appid/token 跳过。
+
+**未验证**：有效 key 下的端点是否存在、字段名、采样率、`_bigtts` 音色能否被 Ark 接受。
+
+### 补充（2026-11-26 11:56）：**协议已实测确认**（openspeech v1），只差真 token
+
+**控制台归属澄清**：用户最终进的是「**豆包语音**」控制台
+（`console.volcengine.com/speech/new/setting/activate`），**不是火山方舟 Ark**。
+两者是不同产品线、不同凭据：
+- 豆包语音：**APP ID + Access Token**（左侧「API Key」菜单），接口 `openspeech.bytedance.com`
+- 方舟 Ark：仅 API Key，接口 `ark.cn-beijing.volces.com`
+- 用户之前问的两个 Ark key（`huoshan` / `LumiLamp-Voice`）**在豆包语音里用不了**。
+
+**从截图读到的开通状态（豆包语音 → 开通管理）**：
+| 服务 | 状态 | 额度 |
+| --- | --- | --- |
+| 音频生成 1.0 | 未开通 | — |
+| **语音合成 3.0**（Doubao-Seed-TTS-3.0） | **未开通** | — |
+| **语音合成 2.0** | ✅ **已开通** | 剩余 **18,539 / 20,000 字**，标准音色 **99 个** |
+| 声音复刻 2.0 / 音色槽位 | 未开通 | — |
+**APP ID = 1409423557**（截图「服务管理」页头）。
+
+**协议实测（无 token，本机直接打接口）** —— 这一轮把「猜」变成了「验」：
+
+| 请求 | 结果 |
+| --- | --- |
+| 瞎编路径 `/api/v1/definitely-not-real-xyz` | **HTTP 404 Not Found** |
+| 真实路径 `/api/v1/tts` + 完整结构 | **HTTP 401** `{"reqid":"probe","code":3001,"message":"load grant: requested grant not found in SaaS storage"}` |
+| `{}` 空请求体 | HTTP 400 `Missing required: app.appid`（**reqid 回显为空**） |
+| 只带 `request.reqid` | HTTP 400 `Missing required: app.appid`（**reqid 被原样回显**） |
+| `app`+`user`+`audio`+`request{reqid,text}`（**故意缺 operation**） | HTTP 400 `Missing required: request.operation` |
+
+**结论（三条都被证据支持）**：
+1. `/api/v1/tts` **路径真实存在**（瞎编路径是 404，不是同一个错误）；
+2. 服务端**真的解析了我们发的 JSON**——`reqid` 被原样回显，必填字段逐个校验
+   （`app.appid` → `request.operation`）。我 `VolcengineTts.payload()` 产出的结构
+   **正好含这些必填项**（`app{appid,token,cluster}` / `user{uid}` /
+   `audio{voice_type,encoding,speed_ratio}` / `request{reqid,text,text_type,operation}`）；
+3. 剩下唯一的错误是 **`code=3001 load grant`**，即 token 无效——**只差真凭据**。
+
+所以之前标为「未验证」的 `VolcengineTts`，**协议层面已经排除**，未验证的只剩
+「真 token 能否通过」「音色属于 2.0 还是 3.0」「PCM 采样率」三点。
+
+**⚠️ 音色归属风险**：用户选的 `multi_female_vv_xi_v3_uranus_bigtts`（Vivi 3.0）名字带 `v3`，
+而**语音合成 3.0 尚未开通**、已开通的是 2.0。可能报「音色不存在」→ 届时要么开通 3.0，
+要么从 2.0 的 99 个标准音色里另选。
+
+### 2026-11-26 11:56 跟随"左转右转对准幅度大"：雷达接管支路补 PD + 滞回 + 换轨迹防抖
+
+用户：「跟踪的时候有时候会像之前遇到的情况左转右转对准幅度大，但是刷新之后重新跟随又没有这个情况」。
+
+**为什么"刷新就好"**：刷新 = 重新点人 → 车端 `person_follower` 重启/重新选目标 →
+又回到**相机支路**（早就有 PD + 阻尼 + `OscGuard`）。等相机一丢人、切到**雷达接管**，
+老代码那条支路是**纯 P 且增益 ×2**，就立刻开始甩；再刷新只是又回到相机支路而已，
+雷达那边的问题一直在。实机日志佐证：`相机丢人，雷达接管：方位 -22°/-7°/+25°/-38°/+60°/-31°/-17°`，
+轨迹号在 `#34/#49/#95/#112/#124` 之间乱跳 → 两条腿/两个人抢 id。
+
+**根因（雷达 face 支路）**
+```c
+w = clamp(lidar_kp * 2.0 * bearing, ±wmax)   # 3.6·b，b>12° 就顶满 0.74 rad/s
+```
+20 Hz 控制 + `w_accel 3.0` 的斜坡下，0.74 rad/s 松手还要滑 0.25 s（≈10°）→ 冲过头 → 反着修
+→ 左右摆；而且 face 门槛是**硬阈值**，正好在 29° 附近抖时会反复切模式；再叠加轨迹号乱跳，
+方位正负翻 → "左右各甩一炮"。
+
+**改动**
+1. `follow_core._lidar_pd()`：方位 PD，`w = kp·b + kd·(方位变化率)`；阻尼只许收力
+   （夹在 `±0.5·|kp·b|`），不会把转向拽反。
+2. face 支路增益 `2.0 → lidar_face_gain 1.15`，且 face 期间限速 **`lidar_face_wmax 0.55`**（原吃满 0.74）。
+3. **滞回**：`>lidar_face_rad 0.50` 进 face、`<lidar_face_exit_rad 0.38` 才退（防 29° 附近来回切）。
+4. `follow_core.bearing_ema()` + `lidar_bearing_smooth 0.5`：方位 EMA，变化率进阻尼项。
+5. `follow_core.flip_confirm()`：**换轨迹 + 方位突变 > `lidar_flip_reject_rad 0.60`** 时先不信，
+   候选连续一致 **`lidar_flip_confirm_s 0.30 s`** 才认；未确认期间继续按上次可信方位走（不急停）。
+6. `OscGuard` 也管 `lidar_face`（左右各甩一炮时自动收力）。
+7. `/follow/state` 新增 `lidar_bearing_deg` / `lidar_rate_deg_s` / `lidar_face` 便于现场判断。
+
+**回归**：`tests/test_lidar_fusion.py` 新增 6 例（face 不再顶满、阻尼只收力、滞回到退出阈值、
+EMA 只走一半、突变首帧拒绝 0.3 s 后才认、平稳漂移不被误挡）；相关套件 **173 passed**。
+
+**部署（已获批）**：`follow_core.py` / `person_follower.py` → src + build，`restart fwr-follow`。
+⚠️ 第一次部署踩了个坑：`/follow/state` 里 `math.degrees(self._lidar_bearing)` 在**还没认领过
+雷达目标时 `_lidar_bearing` 是 None** → `TypeError: must be real number, not NoneType`，
+`tick` 每帧抛异常（服务反复重启）。已加 None 判断；重启后 0 异常，
+`lidar_bearing_deg: null`（未接管时）正常。
+
+**未验证**：现场观感（31.5°/s 对准是否够快、0.3 s 确认窗口会不会显得"迟钝"）；
+如需更稳可把 `lidar_face_wmax` 降到 0.45，如需更快可提回 0.65。
