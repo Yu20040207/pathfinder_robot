@@ -46,6 +46,11 @@ class BaseBridgeNode(Node):
         # 面板松手会立刻发一帧 0，所以松手照样马上停。
         # 之前 0.25 s：WiFi 偶发 300~600 ms 抖动就插 'x' 停车 → 现场"偶尔卡一下"。
         self.declare_parameter('manual_cmd_hold_s', 1.0)
+        # 2026-11-26 用户："停止时一下子停住，惯性太大"。
+        # 固件收到 `v 0 0` 会直接 base_stop()（PWM 归零），不减速；这里在 ROS 侧补
+        # 一条减速斜坡：0.50 m/s² → 0.40 m/s 停稳约 0.8 s、滑行约 0.16 m。
+        # 0 = 关闭（恢复"一帧停住"）。只作用于手动/跟随通道，导航（auto）保持立即停。
+        self.declare_parameter('manual_decel_mps2', 0.50)
         # 2026-11-12：掉头对准（frontier_explorer 的 prealign）需要原地转（PIVOT）。
         # 现在只有 frontier_explorer 会调 /turn_relative，且调用前已确认没有导航目标在跑。
         self.declare_parameter('allow_pivot', True)
@@ -63,6 +68,8 @@ class BaseBridgeNode(Node):
         self.declare_parameter('wheel_speed_scale', 1.0)
         self._device = str(self.get_parameter('device').value)
         self._core = BaseBridgeCore()
+        self._core.decel_mm_s2 = 1000.0 * max(
+            0.0, float(self.get_parameter('manual_decel_mps2').value))
         self._permit = RecoveryPermitCore()
         self._explore_mode = 'stopped'
         self._auto_armed = False
@@ -783,6 +790,11 @@ class BaseBridgeNode(Node):
             self._core.halt()
             self._manual_yaw_rate.reset()
             self._command_source = None
+        # 导航通道不做减速斜坡（collision_monitor / Nav2 要求"说停就停"）；
+        # 手动、跟随走斜坡（用户 2026-11-26 要求软停）。
+        self._core.decel_enabled = (self._command_source != 'auto')
+        self._core.decel_mm_s2 = 1000.0 * max(
+            0.0, float(self.get_parameter('manual_decel_mps2').value))
         self._open_if_needed(now)
         if (self._fd is not None and self._core.fault and
                 not self._auto_armed and self._safe_cmd_zero and

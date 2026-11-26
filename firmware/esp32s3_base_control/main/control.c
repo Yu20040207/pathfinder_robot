@@ -309,7 +309,12 @@ void base_tick(base_control_t *c, int64_t now, int32_t left, int32_t right,
         // Coast through zero before reversing the electrical direction.
         if (goal*c->setpoint[i]<0 || (fabsf(c->setpoint[i])<.01f && goal*c->measured[i]<0 && fabsf(c->measured[i])>15))
             goal = 0;
-        c->setpoint[i] = approach(c->setpoint[i], goal, 150.0f*dt);
+        // 减速用更陡的斜率，好让 ROS 侧的减速斜坡成为限速方（见 control.h 注释）。
+        {
+            const float rate = fabsf(goal) < fabsf(c->setpoint[i])
+                ? DECEL_MMPS2 : ACCEL_MMPS2;
+            c->setpoint[i] = approach(c->setpoint[i], goal, rate*dt);
+        }
         if (goal==0 && c->target[i]!=0) {
             // Hold motor power at zero while the previous direction rolls
             // down. Keep the new direction's startup pulse armed.

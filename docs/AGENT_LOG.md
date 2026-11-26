@@ -13543,3 +13543,44 @@ gitee 搜索 API 返回空数组、GitHub 不通 → **拿不到官方文档和�
 
 **未验证**：手机满推的实际车速（需用户实测）。若仍看到 0.30，说明手机拿的是旧页面
 （`Cache-Control: no-store` 已确认存在，普通刷新应能拿到新页）。
+
+### 2026-11-26 14:40 软停（减速斜坡）：从"撞停"改成 0.8 s 停稳
+
+用户：「停止的时候加上一个加速度来缓慢停止，现在是一下子停住惯性太大」，
+并问「现在这个速度是硬件上限了吗」。
+
+**先答速度**：0.40 m/s 是**协议上限**（单轮 400 mm/s），台架外推 duty 0.95 ≈ 390 mm/s
+→ 软件侧无余量，再快只能换电机/减速比/轮径/电压。
+
+**撞停根因（固件）**：`control.c::base_command()` 里
+`if (left==0 && right==0) { base_stop(c); }` → 零指令**PWM 立即归零**，
+`setpoint` 斜率（150 mm/s²）根本不参与。另外 150 mm/s² 本身就偏慢
+（0.4→0 要 2.7 s、滑行 0.54 m），两头都不可用。
+
+**改动（两层）**
+1. `base_bridge_core.py`：新增纯函数 `slew_wheel(cur, target, budget)` + `BaseBridgeCore._slew()`
+   - `decel_mm_s2`（0 = 老行为）、`decel_enabled`、`_ramp/_ramp_at`；
+   - 加速不限（固件 150 mm/s² 本来就有斜率），**减速**每帧最多 `decel*dt`；
+   - 换向必须先过零（不跨帧翻符号）；降到 0 才发 `x`；
+   - `halt()` 清 `_ramp` → 故障/急停/门控仍是硬停。
+2. `base_bridge.py`：参数 **`manual_decel_mps2` = 0.50**（0 = 关）；`_tick` 每帧同步
+   `_core.decel_enabled = (self._command_source != 'auto')` —— **导航通道不走斜坡**。
+3. 固件 `control.h` 拆 `ACCEL_MMPS2 150` / `DECEL_MMPS2 600`，`control.c` 按
+   `|goal| < |setpoint|` 选斜率；`x`/故障/超速/失速仍立即归零。
+
+**实测换算**：0.40 m/s ÷ 0.50 m/s² = **0.8 s 停稳**，滑行 ≈ **0.16 m**。
+（+ 指令 hold：手机松手 → mqtt deadman 0.5 s 发零 → 斜坡 0.8 s）
+
+**烧录 + 部署（已获批）**
+- 停 `fwr-base` → esptool 烧 `/dev/ttyACM0`（`Hash of data verified.`）→ `start fwr-base`；
+- `base_bridge_core.py` / `base_bridge.py` 落 src + build；
+- 实测：`fwr-base` active、`manual_decel_mps2 = 0.5`、`manual_max_speed_mps = 0.4`、
+  `/base/fault` = 0、`/scan_merged` **10.00 Hz**、`/base_bridge` 单实例；
+  journal 只有空闲态 `disarm tick-sensors → halt`（门控没开，正常）。
+
+**测试**：新增 `tests/test_base_decel.py` **10 例**（预算限速、加速不限、换向过零、
+300 mm/s ÷ 500 = 0.6 s、0.40 停稳 0.8 s、`decel_mm_s2=0` 恢复瞬间停、导航 `decel_enabled=False`
+立刻 `x`、`halt()` 清斜坡、斜坡不超 400、故障立即 `x`）；相关套件 **170 passed**。
+
+**未验证**：现场手感（0.8 s 是否够柔和/是否滑行太远）、急停按钮仍是硬停、
+`manual_decel_mps2` 现场可在线调（`ros2 param set /base_bridge manual_decel_mps2 0.7`）。

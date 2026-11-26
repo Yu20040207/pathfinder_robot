@@ -102,6 +102,32 @@ def forward_only_velocity(v_mps: float, omega_rps: float, track_m: float,
     return max(abs(left_mps), abs(right_mps)) <= max_wheel_mps + 1e-9
 
 
+def slew_wheel(cur_mm_s: float, target_mm_s: float, budget_mm_s: float) -> float:
+    """把单轮速度朝目标收，**减速**每帧最多变 `budget_mm_s`（mm/s）。
+
+    2026-11-26 用户报"停止时一下子停住、惯性太大"：
+    固件 `base_command` 收到 `v 0 0` 会直接 `base_stop()`（PWM 立即归零），
+    150 mm/s² 的 setpoint 斜率根本不参与 —— 所以停是"撞停"。
+
+    这里在 ROS 侧补一条**减速斜坡**（加速仍交给固件，它本来就有斜率）：
+    - `|target| >= |cur|` 或同号增大 → 直接给目标（加速不在这里限，固件限）；
+    - 换向（异号）→ 先减到 0，下一帧再从 0 往新方向（绝不跨帧翻符号）；
+    - 减速 → 每帧最多掉 `budget_mm_s`，误差进预算就落到目标。
+    """
+    cur = float(cur_mm_s)
+    tgt = float(target_mm_s)
+    budget = max(0.0, float(budget_mm_s))
+    if cur * tgt < 0:                       # 换向：先回零
+        if abs(cur) <= budget:
+            return 0.0
+        return cur - math.copysign(budget, cur)
+    if abs(tgt) >= abs(cur):                # 加速 / 同向放大
+        return tgt
+    if abs(cur) - abs(tgt) <= budget:       # 这一帧就能到位
+        return tgt
+    return cur - math.copysign(budget, cur)
+
+
 def manual_velocity(v_mps: float, omega_rps: float, track_m: float,
                     max_linear_mps: float = .2,
                     allow_mixed: bool = False) -> bool:
@@ -230,7 +256,7 @@ class BaseBridgeCore:
     # 轮距：2026-11-12 卷尺实测 317 mm；修好固件 pivot 后旋转标定
     # 轮里程计/IMU = 1.174 × 0.271 ≈ 0.318 m，与卷尺一致，取 0.317。
     def __init__(self, track_m: float = .317, circumference_m: float = .314159,
-                 counts_per_rev: int = 6400) -> None:
+                 counts_per_rev: int = 6400, decel_mm_s2: float = 0.0) -> None:
         self.track_m = track_m
         self.counts_per_rev = counts_per_rev
         self.odom = WheelOdometry(circumference_m, track_m, counts_per_rev)
@@ -247,6 +273,11 @@ class BaseBridgeCore:
         self._turn_owner = False
         self.last_refuse_reason = None
         self._fault_clear_pending = False
+        # 减速斜坡（2026-11-26）：0 = 关（老行为，收到 0 立刻 'x'）
+        self.decel_mm_s2 = float(decel_mm_s2)
+        self.decel_enabled = True
+        self._ramp = None          # 上一帧真正下发的单轮速度 (left, right) mm/s
+        self._ramp_at = None
 
     def connect(self, now_s: float) -> None:
         self.connected = True
@@ -346,6 +377,8 @@ class BaseBridgeCore:
         self.last_refuse_reason = None
         self._target = None
         self._last_cmd_at = None
+        self._ramp = None
+        self._ramp_at = None
 
     def request_fault_clear(self, now_s: float) -> bool:
         """Keep output stopped until the ESP reports a fresh fault-free state."""
@@ -399,13 +432,37 @@ class BaseBridgeCore:
             self._last_counts = (state.left_count, state.right_count)
             self._last_esp_us = state.esp_us
         ready = self.ready(now_s)
+        fresh = (self._target is not None and self._last_cmd_at is not None
+                 and 0 <= now_s - self._last_cmd_at <= self._cmd_hold_s)
+        desired = (float(self._target[0]), float(self._target[1])) if fresh else (0.0, 0.0)
+        emit = None
         if not self.connected:
             command = b''
-        elif (self.connected and self.verified and self.fault == 0 and
-              self._target is not None and self._last_cmd_at is not None
-              and 0 <= now_s - self._last_cmd_at <= self._cmd_hold_s):
-            command = encode_wheel_speed(*self._target)
-        else:
+        elif not (self.verified and self.fault == 0):
             command = b'x'
+        else:
+            if (self.decel_mm_s2 > 0 and self.decel_enabled):
+                emit = self._slew(desired, now_s)
+            elif fresh:
+                emit = desired
+                self._ramp = desired
+                self._ramp_at = now_s
+            command = b'x' if emit is None else encode_wheel_speed(*emit)
         return BridgeOutput(command, sample, tuple(self._wheel_positions), ready,
                             self.fault)
+
+    def _slew(self, desired, now_s):
+        """按 decel_mm_s2 把上一帧速度朝 desired 收；到零返回 None（发 'x'）。"""
+        if self._ramp is None:
+            self._ramp = tuple(desired)
+            self._ramp_at = now_s
+            return None if self._ramp == (0.0, 0.0) else self._ramp
+        dt = 0.0 if self._ramp_at is None else max(0.0, min(now_s - self._ramp_at, 0.10))
+        budget = self.decel_mm_s2 * dt
+        left = slew_wheel(self._ramp[0], desired[0], budget)
+        right = slew_wheel(self._ramp[1], desired[1], budget)
+        self._ramp = (left, right)
+        self._ramp_at = now_s
+        if left == 0.0 and right == 0.0:
+            return None
+        return self._ramp

@@ -8,6 +8,16 @@
 // 否则超限帧在 ROS 侧就抛异常（比固件拒收更难查）。
 #define MAX_WHEEL_MMPS 400.0f
 
+// 速度环 setpoint 斜率（mm/s²）。2026-11-26 拆成加速/减速两条：
+// 用户报「停止时一下子停住、惯性太大」。原来 `v 0 0` 走 `base_stop()` 把 PWM
+// 直接归零（斜率根本不参与），所以是"撞停"；现在零指令由 ROS 侧 `BaseBridgeCore`
+// 用减速斜坡代替（0.40 m/s ÷ 0.50 m/s² ≈ 0.8 s），固件这边只负责**跟随**斜坡。
+// 原来单一 150 太慢（0.4→0 要 2.7 s、滑行 0.54 m），会把 ROS 的斜坡顶回去；
+// 现在减速给 600（≥ ROS 的 500，斜坡由 ROS 决定），加速仍 150（起步平顺）。
+// ⚠️ `x`（base_stop）、故障、超速、失速仍是**立即归零**，不走这两条斜率。
+#define ACCEL_MMPS2 150.0f
+#define DECEL_MMPS2 600.0f
+
 enum { BASE_OK=0, BASE_STALL=1, BASE_DIRECTION=2, BASE_OVERSPEED=3,
        BASE_ENCODER=4, BASE_TIMING=5, BASE_TRACKING=6 };
 typedef struct {

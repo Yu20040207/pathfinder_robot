@@ -231,6 +231,18 @@
   **任何一个比其它小，摇杆推满就只到最小那个**（2026-11-26 现场：页面/桥/底盘都 0.40 了，云端还是 0.30 → 结果最快 0.3）。
 - 回归：`tests/test_manual_speed_chain.py`（页面 ≤ 云端 ≤ 桥 ≤ 底盘、建图摇杆保持 0.30/0.60 且三处发送都带上限）。
 
+- 🛑 **停止要"软停"（2026-11-26 用户要求，已实机部署）**：固件 `base_command()` 里
+  `if (left==0 && right==0) base_stop(c);` → 零指令**直接归零 PWM**，所以原来停是"撞停"。
+  现在两层配合：
+  1. ROS `BaseBridgeCore._slew()`：指令过期/归零时按 `base_bridge.manual_decel_mps2`
+     （默认 **0.50 m/s²**，0 = 关）逐帧减速，降到 0 才发 `x`；换向必须先过零；
+     **导航（`_command_source=='auto'`）`decel_enabled=False`，保持说停就停**；
+     故障/急停/门控/传感器未就绪走 `halt()` → 立即 `x`，不减速。
+  2. 固件 `ACCEL_MMPS2 150` / `DECEL_MMPS2 600`（原来单一 150）：减速更陡，
+     让 ROS 的斜坡成为限速方；否则 0.4→0 要 2.7 s、滑行 0.54 m。
+  实测 0.40 m/s → **0.8 s 停稳、滑行约 0.16 m**。回归 `tests/test_base_decel.py`（10 例）。
+  `x` 永远是最快的硬停（急停/死手链路就是它）。
+
 - 硬件节点在 `real_mapping.launch.py` 里用 `start_base` 门控（`_both()` 组合其它开关），
   **只有一处节点定义**，`real_base.launch.py` 只是 `start_slam:=false` 的薄包装。
 - 导航栈的 `scripts/run_navigation.sh` 在 `FWR_START_BASE=false`（`fwr-nav.service` 里设）
