@@ -117,12 +117,13 @@ DEFAULTS = {
     # 2026-11-24：`leg_tracker` 的 id 在实流里不稳（腿交叉/两腿合并/家具干扰都会重生），
     # 相机看不到时 id 一换就等于"目标丢了" → 现场就是"雷达跟着跟着突然断开"。
     # 换号后按"刚才那个位置"重新认领（只用下面这两个门限，别放宽）。
-    'lidar_reacq_deg': 28.0,    # 重新认领：方位差上限（°）——20° 对 1.2 m/s 走路太紧
-    'lidar_reacq_dr': 1.20,     # 重新认领：距离差上限（m）——0.9 在"人走快一点"时就不够
+    'lidar_reacq_deg': 15.0,    # 重新认领：方位差上限（°）——放宽到 28° 会认到旁边的东西
+    'lidar_reacq_dr': 0.60,     # 重新认领：距离差上限（m）——1.2 m 太宽，容易换成别的目标
     'lidar_max_speed': 2.0,     # 轨迹速度超过这个就**不认**（推车/甩动的门/被拖的椅子）
     'lidar_search_s': 2.5,      # 雷达短暂丢失后，原地按最后方位找人的时长（s）
     'lidar_fresh_s': 0.5,       # 雷达轨迹多久没更新就算过期（10 Hz 扫描，0.5 s 够宽）
-    'lidar_assoc_deg': 25.0,    # 相机看到人时，用它对准雷达轨迹（方位差上限）
+    'lidar_assoc_deg': 18.0,    # 相机看到人时，用它对准雷达轨迹（方位差上限）
+    'lidar_back_max_s': 2.0,    # 轨迹"相机背书"的有效期（超时就不许认领/续认）
     'cam_hfov_deg': 70.0,       # 相机水平视场（HP60C 实测约 70°），框中心 → 方位角
     'lidar_stop_m': 1.20,       # 雷达目标近到这个距离 → 停（相当于"框 85%"）
     'lidar_resume_m': 1.55,     # 停过之后退到这么远才重新走（迟滞 35 cm）
@@ -131,7 +132,7 @@ DEFAULTS = {
     'lidar_bearing_deadband': 0.05,   # ±3° 不转（雷达有抖动）
     'lidar_kp': 1.8,            # 方位误差 → 角速度
     'lidar_wmax': 0.42,         # 雷达接管时的转向上限（与跟框 steer_wmax 一致）
-    'lidar_vmax': 0.22,         # 雷达接管时的前进上限（没相机辅助，保守一点）
+    'lidar_vmax': 0.16,         # 雷达接管时的前进上限（没相机辅助，**再保守一档**）
 }
 
 
@@ -317,6 +318,20 @@ def cam_bearing(cx: float, p: dict | None = None) -> float:
     return -(float(cx) - 0.5) * 2.0 * half
 
 
+def _lidar_backed(c: dict, p: dict) -> bool:
+    """这条雷达轨迹"此刻还算不算相机确认过的人"。
+
+    `cam` 是 leg_tracker 发的**新鲜背书**（1 s 内被相机确认）；`cam_age_s` 用来给
+    "刚丢一瞬间"留一点余量（人站住不动、相机刚丢 1~2 s）。其余一律不认，
+    否则货箱/椅子被永久当成的人（2026-11-26 现场）。
+    """
+    if c.get('cam'):
+        return True
+    age = c.get('cam_age_s')
+    lim = float(p.get('lidar_back_max_s', DEFAULTS['lidar_back_max_s']))
+    return age is not None and float(age) <= lim
+
+
 def pick_lidar_track(cands, bearing: float, last_id: int = -1,
                      p: dict | None = None):
     """在雷达轨迹里挑出"相机看到的这个人"。
@@ -333,16 +348,16 @@ def pick_lidar_track(cands, bearing: float, last_id: int = -1,
     q = dict(DEFAULTS if p is None else p)
     gate = math.radians(float(q['lidar_assoc_deg']))
     ok = [c for c in (cands or [])
-          if 0.4 <= float(c.get('r', 0.0)) <= 4.0
+          if 0.6 <= float(c.get('r', 0.0)) <= 3.5
           and abs(float(c.get('bearing', 0.0)) - bearing) <= gate
-          and float(c.get('v', 0.0)) <= float(q['lidar_max_speed'])]
+          and float(c.get('v', 0.0)) <= float(q['lidar_max_speed'])
+          and not c.get('static')
+          and _lidar_backed(c, q)]
     if not ok:
         return None
-    # 相机背书的轨迹优先：`leg_tracker` 的 `cam` 表示"这一帧它被相机确认是人"。
-    # 没有背书的轨迹可能是推车/椅子/被拖着走的东西 —— 只有实在没有背书时才退而求其次，
-    # 否则就会出现"雷达一直跟着一团动的点"（2026-11-26 用户报）。
-    backed = [c for c in ok if c.get('cam')]
-    pool = backed or ok
+    # **只认相机背书过的轨迹**：以前"没有背书的也退而求其次"，结果货箱/推车被认领后
+    # 就一路跟着它（2026-11-26 现场截图：画面里只有货箱，提示"雷达接管中，正朝你过去"）。
+    pool = ok
     for c in pool:
         if int(c.get('id', -1)) == int(last_id):
             return c
@@ -373,12 +388,10 @@ def reacquire_track(cands, last_bearing, last_r, p=None, last_id=-1):
             return c
     best, best_cost = None, 1e9
     for c in (cands or []):
-        # 静止轨迹只允许"相机背书过"的：人站在车后等车时 leg_tracker 会把它标 static，
-        # 旧写法一律跳过 → 现场就是"人绕到背后站着，车跟着跟着就丢了"（2026-11-26 用户报）。
-        if c.get('static') and not c.get('cam'):
-            continue
-        if not c.get('cam', True):
-            continue                      # 从没被相机确认过的轨迹不许认领
+        if c.get('static'):
+            continue                      # 静止的一律不续认（人站住等车会靠"原地找人"扫回来）
+        if not _lidar_backed(c, p):
+            continue                      # 没被相机确认过的轨迹永远不许认领
         if float(c.get('v', 0.0)) > float(p['lidar_max_speed']):
             continue
         db = abs(float(c['bearing']) - float(last_bearing))

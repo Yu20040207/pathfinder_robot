@@ -535,19 +535,31 @@ def test_osc_guard_damps_when_oscillating_and_recovers():
 
 # ---------------------------------------------------------------- 雷达接管：别再跟着"动的家具"（2026-11-26）
 
-def test_pick_lidar_track_prefers_camera_backed():
-    """没被相机背书的轨迹（推车/被拖的椅子）不能抢走"人"。
+def test_pick_lidar_track_requires_camera_backing():
+    """**只认相机新鲜背书的轨迹**，没背书的一律不认（不许"退而求其次"）。
 
-    用户 2026-11-26：「雷达跟踪到的时候一直跟踪那团动的点」——真因是认领时只看方位差，
-    动的家具只要更靠近画面中线就会被选中。
+    2026-11-26 现场图片：画面里只有货箱/船壳，提示却写着「雷达接管中，正朝你过去」
+    —— 货箱曾被永久标成"相机背书"，于是被当成人一路跟过去。
     """
     from fwr_bringup.follow_core import pick_lidar_track
+    # 推车正好在中线、人被挤到偏右：以前会选推车，现在直接 None（宁可不跟）
     cands = [
-        {'id': 1, 'bearing': 0.00, 'r': 1.6, 'cam': False, 'v': 0.6},   # 推车，正好在中线
-        {'id': 2, 'bearing': 0.18, 'r': 1.8, 'cam': True, 'v': 0.4},    # 人，偏右 10°
+        {'id': 1, 'bearing': 0.00, 'r': 1.6, 'cam': False, 'v': 0.6},
+        {'id': 2, 'bearing': 0.30, 'r': 1.8, 'cam': False, 'v': 0.4},
     ]
-    got = pick_lidar_track(cands, bearing=0.0)
-    assert got['id'] == 2, '必须优先选相机背书的那条'
+    assert pick_lidar_track(cands, bearing=0.0) is None
+    # 加上真背书的人 → 选人
+    cands.append({'id': 3, 'bearing': 0.12, 'r': 1.7, 'cam': True, 'cam_age_s': 0.1,
+                  'static': False, 'v': 0.4})
+    assert pick_lidar_track(cands, bearing=0.0)['id'] == 3
+    # 背书过期（cam_age_s 超 2 s）也不认
+    assert pick_lidar_track([{'id': 4, 'bearing': 0.0, 'r': 1.6, 'cam': False,
+                              'cam_age_s': 5.0, 'static': False, 'v': 0.3}],
+                            bearing=0.0) is None
+    # 静止轨迹（家具）永远不认
+    assert pick_lidar_track([{'id': 5, 'bearing': 0.0, 'r': 1.6, 'cam': True,
+                              'cam_age_s': 0.0, 'static': True, 'v': 0.0}],
+                            bearing=0.0) is None
 
 
 def test_pick_lidar_track_rejects_fast_blob():
@@ -557,22 +569,35 @@ def test_pick_lidar_track_rejects_fast_blob():
     assert pick_lidar_track(cands, bearing=0.0) is None
 
 
-def test_reacquire_allows_backed_static_but_not_unbacked():
-    """人站在车后等车时腿不动 → 轨迹被标 static。背书的要能续跟，没背书的不许。"""
+def test_reacquire_rejects_static_and_unbacked():
+    """续认一律不许换成静止物或没背书的轨迹。
+
+    ⚠️ 2026-11-26 的教训：放宽"背书过的静止轨迹"后，人车旁边那堆货箱/船壳
+    （曾被误背书）被续认接手，车直接朝它开过去。宁可**原地转着找人**，
+    也不许把目标换成一件家具。
+    """
     from fwr_bringup.follow_core import reacquire_track
     last_b, last_r = 0.10, 1.60
-    backed = [{'id': 9, 'bearing': 0.12, 'r': 1.62, 'cam': True, 'static': True, 'v': 0.0}]
-    assert reacquire_track(backed, last_b, last_r)['id'] == 9
-    unbacked = [{'id': 10, 'bearing': 0.12, 'r': 1.62, 'cam': False, 'static': True, 'v': 0.0}]
+    backed_static = [{'id': 9, 'bearing': 0.12, 'r': 1.62, 'cam': True,
+                      'cam_age_s': 0.1, 'static': True, 'v': 0.0}]
+    assert reacquire_track(backed_static, last_b, last_r) is None
+    unbacked = [{'id': 10, 'bearing': 0.12, 'r': 1.62, 'cam': False,
+                 'cam_age_s': None, 'static': False, 'v': 0.2}]
     assert reacquire_track(unbacked, last_b, last_r) is None
+    # 正在走动、背书新鲜 → 可以续
+    walking = [{'id': 11, 'bearing': 0.12, 'r': 1.62, 'cam': True,
+                'cam_age_s': 0.2, 'static': False, 'v': 0.9}]
+    assert reacquire_track(walking, last_b, last_r)['id'] == 11
 
 
-def test_reacquire_accepts_bigger_drift():
-    """门限从 20°/0.90 m 放宽到 28°/1.20 m：人走快一点（1.2 m/s）时也能续上。"""
+def test_reacquire_gate_is_tight():
+    """续认门限 **15°/0.60 m**：放宽到 28°/1.2 m 会认到旁边的东西（实测栽过）。"""
     from fwr_bringup.follow_core import reacquire_track
-    drift = [{'id': 11, 'bearing': 0.40, 'r': 2.55, 'cam': True, 'static': False, 'v': 1.1}]
-    assert reacquire_track(drift, 0.10, 1.50)['id'] == 11
-    far = [{'id': 12, 'bearing': 0.40, 'r': 3.10, 'cam': True, 'static': False, 'v': 1.1}]
+    near = [{'id': 11, 'bearing': 0.22, 'r': 1.95, 'cam': True,
+             'cam_age_s': 0.1, 'static': False, 'v': 1.0}]     # 12.6° / 0.45 m
+    assert reacquire_track(near, 0.10, 1.50)['id'] == 11
+    far = [{'id': 12, 'bearing': 0.22, 'r': 2.60, 'cam': True,
+            'cam_age_s': 0.1, 'static': False, 'v': 1.1}]      # 1.1 m → 太远
     assert reacquire_track(far, 0.10, 1.50) is None
 
 

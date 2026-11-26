@@ -90,8 +90,9 @@ DEFAULTS = {
     # 还进了 300 s 黑名单 → 人彻底消失）。有相机才有资格说"没人，是家具"。
     'static_drop_requires_cam': True,
     # —— 相机身份门控 ——
-    'cam_gate_deg': 35.0,
-    'cam_gate_range_m': 1.0,
+    'cam_gate_deg': 18.0,       # 相机方位门限（°）：35° 会把"人旁边的一切"都背书掉
+    'cam_gate_range_m': 1.0,    # 距离门限（m）：按框高估出的距离对不上就不背书
+    'cam_back_s': 1.0,          # 背书**有效期**：超过这么久没再被相机确认就不算"人"
     # P1（采集数据）阶段为 False：相机没看到也允许建轨迹，方便看全；
     # 接入 P2 融合后建议改 True —— 新目标必须有相机背书，否则一律当家具。
     'birth_requires_cam': False,
@@ -478,9 +479,19 @@ class Track:
     hits: int = 1
     misses: int = 0
     moved: float = 0.0        # 累计路程（诊断用）
-    cam_seen: bool = False
+    cam_seen: bool = False      # 出生时/任何时刻被相机确认过（用于"静止家具"判定）
+    cam_at: float = 0.0         # **最后一次**被相机确认的时刻（背书有效期靠它）
     x0: float = 0.0           # 出生位置
     y0: float = 0.0
+
+    def cam_fresh(self, now: float, hold_s: float = 1.0) -> bool:
+        """此刻还算不算"相机正在确认的这个人"。
+
+        ⚠️ 原来的 `cam_seen` 是**一票永久**：只要曾经和人同方位出现过一次
+        （35° 门限 + 方位恒为 0 的 bug 让它几乎必然发生），椅子/货箱就会被永久
+        当成"相机背书过的人"，跟随于是奔着那团东西去（2026-11-26 现场截图）。
+        """
+        return bool(self.cam_at) and (now - self.cam_at) <= hold_s
 
     @property
     def net_move(self) -> float:
@@ -499,12 +510,14 @@ class Track:
 
     def to_dict(self, now: float) -> dict:
         age = max(0.0, now - self.born_at)
-        static = (not self.cam_seen and age > 3.0
-                  and self.net_move < 0.15)
+        fresh = self.cam_fresh(now)
+        static = (not fresh and age > 3.0 and self.net_move < 0.15)
         return {'id': self.id, 'x': round(self.kf.x, 3), 'y': round(self.kf.y, 3),
                 'vx': round(self.kf.vx, 3), 'vy': round(self.kf.vy, 3),
                 'age_s': round(age, 2), 'misses': self.misses,
-                'cam': self.cam_seen, 'static': static}
+                'cam': fresh, 'cam_age_s': (round(now - self.cam_at, 2)
+                                            if self.cam_at else None),
+                'static': static}
 
 
 class LegTracker:
@@ -580,7 +593,7 @@ class LegTracker:
         cam_present = cam is not None
         keep: List[Track] = []
         for tr in self.tracks:
-            static_junk = (not tr.cam_seen
+            static_junk = (not tr.cam_fresh(now)
                            and (not p['static_drop_requires_cam'] or cam_present)
                            and (now - tr.born_at) > p['static_drop_s']
                            and tr.net_move < p['static_move_m'])
@@ -610,6 +623,7 @@ class LegTracker:
         tr.misses = 0
         if self._cam_ok(pr.bearing, cam) and self._cam_range_ok(pr.r, cam):
             tr.cam_seen = True
+            tr.cam_at = now
 
     def _feed_pending(self, pairs: Sequence[Pair], now: float,
                       cam: Optional[dict]) -> None:
@@ -691,6 +705,7 @@ class LegTracker:
             id=self._next_id,
             kf=Kalman2D(pr.x, pr.y, now, p['q_accel'], p['meas_sigma_r']),
             born_at=now, last_seen=now, cam_seen=cam_seen,
+            cam_at=(now if cam_seen else 0.0),
             x0=pr.x, y0=pr.y))
         self._next_id += 1
 

@@ -75,6 +75,7 @@ class LegTrackerNode(Node):
         self._odom_at = 0.0
         self._warned_no_odom = 0.0
         self.cam_bearing: float | None = None
+        self.cam_range: float | None = None   # 按框高估的距离（只给背书门限用）
         self._cam_at = 0.0
         self._last_clusters = 0
         self._last_pairs = 0
@@ -111,18 +112,34 @@ class LegTrackerNode(Node):
             return
         sel = int(data.get('sel', -1))
         bearing = None
+        cam_range = None
+        img_w = float(data.get('w') or 640.0)
+        img_h = float(data.get('h') or 480.0)
         for person in data.get('persons', []):
             try:
                 if int(person.get('id', -2)) != sel:
                     continue
-                box = person.get('box') or {}
-                cx = float(box.get('x', 0.5)) + float(box.get('w', 0.0)) / 2.0
+                # ⚠️ `person_detector` 发的是**顶层** x/y/w/h（旧代码读 `person['box']`，
+                # 永远取不到 → cx 恒为 0.5 → 方位角恒为 0 → 车正前方 ±35° 的所有腿对
+                # 都被"相机背书"，2026-11-26 现场就是跟着货箱跑）。
+                box = person.get('box') or person
+                x = float(box.get('x', 0.5))
+                w = float(box.get('w', 0.0))
+                h = float(box.get('h', 0.0))
+                cx = x + w / 2.0
                 bearing = -(cx - 0.5) * math.radians(self.cam_hfov_deg)
+                # 用框高粗略估距离（人高 1.7 m）：只当**门限**用，不参与控制
+                if h >= 0.05:
+                    fx = (img_w / 2.0) / math.tan(math.radians(self.cam_hfov_deg) / 2.0)
+                    est = fx * 1.7 / (h * img_h)
+                    if 0.3 <= est <= 6.0:
+                        cam_range = est
             except (TypeError, ValueError):
                 continue
             break
         # 只存**车体系**方位角；换算到 odom 系要等用的时候（车可能在转）
         self.cam_bearing = bearing
+        self.cam_range = cam_range
         self._cam_at = time.monotonic()
 
     def on_scan(self, msg: LaserScan) -> None:
@@ -143,7 +160,7 @@ class LegTrackerNode(Node):
                 and (now - self._cam_at) <= self.cam_stale_s):
             # 相机方位是车体系 → 加航向角变成 odom 系，才能和腿对方的位角比
             cam = {'bearing': ang_norm(self.ryaw + self.cam_bearing),
-                   'range': None}
+                   'range': self.cam_range}
         tracks = self.tracker.step(pairs, now, cam)
 
         self._last_clusters = len(clusters)

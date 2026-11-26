@@ -23,7 +23,7 @@ def test_selected_speaker_reaches_synthesizer(monkeypatch):
 
     tts.engine = Engine()
     monkeypatch.setitem(sys.modules, "sounddevice", None)
-    monkeypatch.setattr("fwr_voice.tts.play_with_alsa", lambda *args: None)
+    monkeypatch.setattr("fwr_voice.tts.play_with_alsa", lambda *args, **kwargs: None)
     tts.speak("你好")
     assert seen == [2]
 
@@ -45,7 +45,7 @@ def test_configured_speech_speed_reaches_synthesizer(monkeypatch):
 
     tts.engine = Engine()
     monkeypatch.setitem(sys.modules, "sounddevice", None)
-    monkeypatch.setattr("fwr_voice.tts.play_with_alsa", lambda *args: None)
+    monkeypatch.setattr("fwr_voice.tts.play_with_alsa", lambda *args, **kwargs: None)
     tts.speak("你好")
     assert seen == [0.75]
 

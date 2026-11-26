@@ -21,8 +21,13 @@ from fwr_bringup.follow_core import (DEFAULTS, cam_bearing, lidar_follow,
                                      pick_lidar_track)
 
 
-def tr(tid: int, bearing_deg: float, r: float) -> dict:
-    return {'id': tid, 'bearing': math.radians(bearing_deg), 'r': r}
+def tr(tid: int, bearing_deg: float, r: float, cam: bool = True,
+       static: bool = False, v: float = 0.3) -> dict:
+    # 2026-11-26：只有"相机新鲜背书"的轨迹才允许认领（`cam` 有效期 1 s），
+    # 默认给 True 模拟"相机正看着这个人"；测家具时显式传 cam=False。
+    return {'id': tid, 'bearing': math.radians(bearing_deg), 'r': r,
+            'cam': cam, 'cam_age_s': (0.0 if cam else None), 'static': static,
+            'v': v}
 
 
 # ---------------------------------------------------------------- 方位换算
@@ -149,9 +154,12 @@ def test_lidar_follow_speed_cap_below_chassis_limit():
 from fwr_bringup.follow_core import reacquire_track  # noqa: E402
 
 
-def _tr(tid: int, bearing_deg: float, r: float, static: bool = False) -> dict:
+def _tr(tid: int, bearing_deg: float, r: float, static: bool = False,
+        cam: bool = True) -> dict:
+    # 2026-11-26：续认只认"相机新鲜背书"的轨迹（cam 1 s 有效）
     return {'id': tid, 'bearing': math.radians(bearing_deg), 'r': r,
-            'static': static}
+            'static': static, 'cam': cam,
+            'cam_age_s': (0.0 if cam else None), 'v': 0.4}
 
 
 def test_reacquire_keeps_same_id_first():

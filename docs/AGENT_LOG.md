@@ -13112,3 +13112,46 @@ sudo nmcli con up 4g
 车上 build 副本 `hasattr(lidar_search_cmd)=True`、`lidar_reacq_deg=28.0`、
 `systemctl show` 里能看到 `birth_requires_cam:=true`，`fwr-legtracker` active。
 **未验证**：现场人绕到车后 → 雷达接管/换号续跟/原地找人的实际表现。
+
+### 2026-11-26 12:20 雷达跟错东西的真凶：相机背书是"一票永久" + 方位角恒为 0
+
+用户发来现场截图：画面里**只有货箱/船壳，没有人**，提示却是
+「雷达跟踪 · 雷达接管中，正朝你过去 · 距离 127 cm」。用户原话
+「现在比上一代还糟糕，雷达跟踪的时候跟踪错」。
+
+**根因（两个 bug 叠加，读代码 + 车上实测确认）**
+1. `leg_tracker.on_persons()` 读的是 `person['box']['x']`，但 `person_detector` 发的是
+   **顶层** `x/y/w/h`（`{"id":3,"x":0.5281,"y":0.0688,"w":0.0781,"h":0.1521}`）→
+   `box` 恒为空 → `cx` 恒为 0.5 → **相机方位角恒等于 0°**（车正前方）。
+   车上实测修好前是 0.0°，修好后同一条报文给出 **0.7°**（cx=0.49），符合预期。
+2. `cam_gate_deg` 默认 **35°** 且 `Track.cam_seen` 是**一票永久**（`tr.cam_seen = True`
+   之后再也不复位）→ 只要某个腿对曾经落在"车正前方 ±35°"里被相机扫到一次，
+   它就**永远**算"相机背书过的人"。于是货箱/船壳堆（静止）既不会被标 static，
+   也能被 `pick_lidar_track`/`reacquire_track` 认领 → 车朝货箱开过去。
+3. 上一版把续认门限放宽到 28°/1.2 m，进一步放大了这个 bug（用户说的"更糟"）。
+
+**改动（4 处）**
+- `leg_track`：`cam_seen` 之外新增 **`cam_at`** 时间戳；新增 `cam_fresh(now, hold)`，
+  背书有效期 **`cam_back_s = 1.0 s`**；`to_dict()` 发的 `cam` 改成**新鲜背书**，
+  另发 `cam_age_s`；`static` 判定改用它 → 静止家具终于能被正确标 static/回收。
+  `cam_gate_deg 35 → 18`（35° 等于"车前方的都算人"）。
+- `leg_tracker.on_persons()`：支持**顶层** x/y/w/h（保留 `box` 兼容）；
+  **按框高估距离** `r = fx·1.7/(h·img_h)`（fx 由 70° 视场和图像宽算），
+  0.3~6 m 内有效，作为 `_cam_range_ok` 的门限（±1.0 m）。车上实测：h=0.90 → **1.80 m**。
+  即：**方位 18° + 距离 1 m 双门限**才算"相机确认这条腿是人"。
+- `follow_core`：`pick_lidar_track` **只认新鲜背书的轨迹**（不再"退而求其次"选没背书的）；
+  `reacquire_track` 也要新鲜背书、门限收紧回 **15°/0.60 m**；两者都拒绝 `static`；
+  `lidar_assoc_deg 25 → 18`、`lidar_vmax 0.22 → 0.16`（没相机辅助，再保守一档）。
+
+**语义变化（重要）**
+- **宁可原地转着找人，也不许把目标换成一件家具**（`lidar_search_cmd` 只转不走）。
+- 人站在车后**不动**时：轨迹会被标 static → 不再续跟，车原地慢慢转着等；
+  人一动，新的背书轨迹出现就能重新锁定。
+
+**部署（已获批）**：`leg_track.py` / `leg_tracker.py` / `follow_core.py` 落 src + build 两处，
+重启 `fwr-legtracker`（active）。`fwr-follow` 当时 inactive，下次进跟随模式即生效。
+
+**已验证**：车上参数 `assoc_deg=18 / reacq=15°/0.6 m / lidar_vmax=0.16 / cam_back_s=1.0 /
+gate_deg=18`；车上直接调 `on_persons()` 验证方位/距离估算；相关套件 **191 passed**
+（follow_core / lidar_fusion / leg_track / person_detector / media_relay / service_toggle）。
+**未验证**：现场"人绕到车后仍能接管、且不再跟货箱"的完整闭环。

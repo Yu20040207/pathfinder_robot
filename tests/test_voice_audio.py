@@ -156,11 +156,12 @@ def test_incomplete_sounddevice_uses_alsa(monkeypatch):
 
     monkeypatch.setitem(sys.modules, "sherpa_onnx", SimpleNamespace(GenerationConfig=SimpleNamespace))
     monkeypatch.setattr(tts, "play_with_alsa",
-                        lambda samples, sample_rate, interrupt: captured.append((sample_rate, len(samples))))
+                        lambda samples, sample_rate, interrupt, device=None: captured.append((sample_rate, len(samples))))
     voice = object.__new__(SherpaVitsTts)
     voice.engine = SimpleNamespace(generate=lambda text, config: SimpleNamespace(samples=np.zeros(8), sample_rate=16000))
     voice.speaker_id = 0
     voice.speed = 1.0
+    voice.device = None
     voice.interrupt = threading.Event()
     voice.playback_lock = threading.Lock()
     voice.speak("测试")
