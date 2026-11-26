@@ -14310,4 +14310,14 @@ build_system_prompt(now=None)  # SYSTEM_PROMPT + time_sentence()
 **测试**：`tests/test_follow_rate_damp.py`（7 例：中线狠刹 / 反打 / 窗口外不动 /
 增益随距离衰减 / kd=0 关断 / 不超 0.74 / 符号对称）+ 相关子集 **138 passed**。
 
-**状态**：已提交，**未部署**（等用户批准；`fwr-follow` 重启才生效）。
+**状态**：已提交 `c00a0fd`，**已部署并重启（2026-11-26 16:41）**：
+`follow_core.py` / `person_follower.py` → 车上 **src + build**，md5 三方一致
+（`0df29cca…` / `734c70e1…`），build 副本 `py_compile` 通过、`def rate_damp` 存在；
+`systemctl restart fwr-follow` 后新代码正常起来，横幅打出
+`对准阻尼：实测转速 kd 0.90（中线圈 |误差|<25%）`（= 新代码已加载、节点构造无异常）。
+⚠️ 重启后 5 s 服务被停（页面离开了跟随模式，`/follow?leave=1`），当前 `inactive`，
+下次进跟随模式即为新代码。
+⚠️ `journalctl` 里 16:39:28 那条 `RCLError: failed to initialize wait set ...` 是
+**SIGTERM 停机时的老噪音**（rclpy 已 `rcl_shutdown` 后再 spin），
+与本次改动无关，退出码 1 只在"停止服务"时出现。
+**未验证**：实车对准是否还摆。验证判据：出现 `对准阻尼：指令 … → …` 日志行。
