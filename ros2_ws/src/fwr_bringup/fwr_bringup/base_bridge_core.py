@@ -391,6 +391,22 @@ class BaseBridgeCore:
         self._fault_clear_pending = True
         return True
 
+    @property
+    def fault_clear_pending(self) -> bool:
+        return self._fault_clear_pending
+
+    def note_fault_clear_sent(self) -> None:
+        """记下"已经向固件写过一次 xc（停车+清故障）"。
+
+        ⚠️ 2026-11-28 实机踩到：`_tick`/`_clear_fault_on_connect` 只写了 `xc`，
+        没有置 `_fault_clear_pending` → 固件其实已经清成 0（`/base/motor_debug`
+        末位实测 0.0），但 ROS 侧 `self.fault` 永远停在 1 →
+        `/base/ready=false`、页面一直「已授权（等待传感器）」、日志每 2 s 刷
+        `auto-clearing latched ESP32 fault 1`（死循环，只能重启节点）。
+        凡是自己发过清故障命令的地方都必须调这一个，让下一帧 fault=0 能落到本地。
+        """
+        self._fault_clear_pending = True
+
     def ready(self, now_s: float) -> bool:
         # 2026-11-15：不再要求 verified。ESP32 重启后握手横幅可能漏收（'?' 不一定
         # 重放横幅），而状态帧一直在来 —— 那时遥测/里程计正常、只有 ready() 为 False，

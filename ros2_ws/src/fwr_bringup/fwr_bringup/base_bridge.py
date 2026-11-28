@@ -700,6 +700,7 @@ class BaseBridgeNode(Node):
                 try:
                     # 固件只在 active=false 时才接受 'c'，必须先发 'x' 停车再清。
                     os.write(self._fd, b'xc')
+                    self._core.note_fault_clear_sent()
                     self._clear_fault_on_connect = False
                     self.get_logger().warn(
                         f'cleared latched ESP32 fault {state.fault} after serial connect')
@@ -797,12 +798,14 @@ class BaseBridgeNode(Node):
             0.0, float(self.get_parameter('manual_decel_mps2').value))
         self._open_if_needed(now)
         if (self._fd is not None and self._core.fault and
+                not self._core.fault_clear_pending and
                 not self._auto_armed and self._safe_cmd_zero and
                 now - self._last_auto_clear >= 2.0):
             # 门控已开、指令为零且未授权（电机空闲）时，自动清一次锁存的固件故障。
             # USB 插拔或编码器毛刺会留下 fault 1/3，否则面板会一直报“底盘未就绪”。
             try:
                 os.write(self._fd, b'xc')
+                self._core.note_fault_clear_sent()
                 self._last_auto_clear = now
                 self.get_logger().warn(
                     f'auto-clearing latched ESP32 fault {self._core.fault} '
