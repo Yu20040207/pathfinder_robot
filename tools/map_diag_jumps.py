@@ -47,7 +47,7 @@ def read(bag: Path):
     rd.open(rosbag2_py.StorageOptions(uri=str(bag), storage_id='sqlite3'),
             rosbag2_py.ConverterOptions('cdr', 'cdr'))
     types = {t.name: t.type for t in rd.get_all_topics_and_types()}
-    msg_cls = {name: get_message(t) for name, t in types.items() if t.startswith('tf2_msgs')}
+    msg_cls = {name: get_message(t) for name, t in types.items()}
 
     tf = []        # (t, parent, child, x, y, yaw)
     scans = []     # (t)

@@ -196,6 +196,12 @@
     `minimum_travel_heading` 保持 **0.25**（降到 0.1 会让 mapper `unable to get pointer in
     probability search` 崩溃）。回归 `tests/test_slam_params.py`；
     取证用 `tools/map_diag_jumps.py`（读 bag 找 `map→odom` 单步角差 ≥2° 的跳变）。
+    ✅ **已用 bag 验证（18:13–18:43 那轮，29 分钟，commit `339af89` 冻结为基线）**：
+    ≥2° 跳变 **17 次**、最大 **−5.6°**、**≥10° 的 0 次**（事故形态消失）；
+    `/scan_merged` 最大间隔 104 ms；编码器 ω 与 IMU ω 分箱差中位 **0.003 rad/s**
+    （右轮修好后方向正确，无打滑）；地图 `1A_end` 1028×895 @0.05 = 51.4×44.8 m，
+    占据 2.6% / 空闲 66.7% / 未知 30.7%。
+    现场操作约束：**转弯 0.2~0.3 rad/s、转完再直走**（直线 0.30 不影响）。
 
   单雷达回退时仍生效的老约束：
   - `/scan` 的后方扇区（scan 角 0° 附近 = ranges 中部）读到的是**车身**，不是障碍；
