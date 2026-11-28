@@ -33,7 +33,12 @@ slam_toolbox:
     resolution: 0.05
     min_laser_range: 0.12
     max_laser_range: 12.0
-    minimum_time_interval: 0.5
+    # 2026-11-28 用户报「快建完时整张图突然转 ~30°，之后重影」。
+    # 当时配置：本项 0.5 s + 建图摇杆 0.60 rad/s → 相邻两帧之间车已转过 17.2°，
+    # 而粗搜索窗口只有 ±20°（余量 1.17 倍）→ 匹配容易锁到隔壁错峰，位姿一步跳十几度。
+    # 现在 0.5 → 0.3：转弯时被处理的扫描更密（@0.6 rad/s 帧间角差 17.2° → 10.3°）。
+    # 代价：map 模式更吃 CPU（Ceres 已报 50 线程 > 16 线程），所以不再往下压。
+    minimum_time_interval: 0.3
     transform_timeout: 0.2
     tf_buffer_duration: 30.0
     stack_size_to_use: 40000000
@@ -56,8 +61,10 @@ slam_toolbox:
     loop_search_maximum_distance: 4.0
     loop_match_minimum_chain_size: 10
     loop_match_maximum_variance_coarse: 3.0
-    loop_match_minimum_response_coarse: 0.35
-    loop_match_minimum_response_fine: 0.45
+    # 2026-11-28：0.35 → 0.45，0.45 → 0.60。假回环的代价是「整张图被转走 + 重影」，
+    # 比漏掉真回环（末端留 1~3° 漂移）严重得多，所以门槛抬高。
+    loop_match_minimum_response_coarse: 0.45
+    loop_match_minimum_response_fine: 0.60
 
     # 相关搜索（扫描匹配）
     correlation_search_space_dimension: 0.5
@@ -73,7 +80,11 @@ slam_toolbox:
     distance_variance_penalty: 0.5
     angle_variance_penalty: 1.0
     fine_search_angle_offset: 0.00349
-    coarse_search_angle_offset: 0.349
+    # 2026-11-28：0.349（±20°）→ 0.52（±30°）。**不要往小改**：
+    # 帧间角差本来就 10~17°，窗口收到 15° 会让真值落在窗口外 → 匹配不到、位姿冻结。
+    # 放大后相对 10.3° 的余量 1.9 倍（相对 17° 仍 1.76 倍），
+    # 由下面的 angle_variance_penalty / minimum_angle_penalty 压住"乱跑"。
+    coarse_search_angle_offset: 0.52
     coarse_angle_resolution: 0.0349
     minimum_angle_penalty: 1.2
     minimum_distance_penalty: 0.5

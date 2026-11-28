@@ -14423,3 +14423,59 @@ build_system_prompt(now=None)  # SYSTEM_PROMPT + time_sentence()
 
 **回归**：`/base/ready=true`、`manual=True`、`armed=False`（运动门未开，符合"未点授权"预期）；
 `2c7c:6005` 与 `303a:1001` 同时在线；`ls /dev/serial/by-id` 9 个符号链接齐全。
+
+## 2026-11-28 18:12 · 建图「快建完时整张图突然转 ~30° 后重影」排查与参数收紧
+
+### 现象
+用户 17:00 左右建图（`fwr-map` 16:52:16 → 17:09:19，17 分钟），快结束时整张图
+**突然旋转约 30°**，之后新扫描与旧墙对不齐，出现**重影**。地图未保存（`maps/phone/` 为空）。
+
+### 排除项（有日志）
+- 底盘串口 / ESP32 故障：16:45 之后 `ESP32 fault` **0 次**；
+- IMU 节点：`dm_imu` 无重启、无超时（0 条相关日志）；
+- 雷达：`fwr-lidar-watchdog` 该时段**无 kill**；`/scan_merged` 10 Hz；
+- USB：16:50–17:10 dmesg 无 usb/cp210x/ch341 事件；
+- 节点：`fwr-base` 无 `process has died`；`fwr-map` 只跑了一次。
+→ 结论：**跳变发生在 slam_toolbox 内部**（位姿/回环层），不是硬件断链。
+
+### 机理（算出来的）
+建图摇杆转向上限 `MAP_MAX_ANGULAR 0.60 rad/s` × `minimum_time_interval 0.5 s`
+= 相邻两帧之间车已转 **17.2°**；而粗搜索窗口 `coarse_search_angle_offset` 只有
+**±0.349 rad（±20°）** → 真值贴在窗口边缘（余量仅 **1.17 倍**），对称/重复墙面下
+匹配容易锁到隔壁错峰 → 位姿一步跳十几到二十几度；`do_loop_closing` 门槛
+（coarse 0.35 / fine 0.45）偏低时还会用假回环把**整张图**转走。
+
+### 改动（只改建图，不动导航/手动/跟随）
+`config/real_slam.yaml`：
+
+| 参数 | 原 | 新 | 作用 |
+|---|---:|---:|---|
+| `minimum_time_interval` | 0.5 | **0.3** | 转弯时被处理的扫描更密（帧间角差 17.2° → 10.3°） |
+| `coarse_search_angle_offset` | 0.349 | **0.52** | 粗搜索 ±20° → ±30°，余量 1.17× → 2.9× |
+| `loop_match_minimum_response_coarse` | 0.35 | **0.45** | 压假回环（宁可末端留 1~3° 漂移，也不要整图转走） |
+| `loop_match_minimum_response_fine` | 0.45 | **0.60** | 同上 |
+
+⚠️ **`coarse_search_angle_offset` 绝对不能往小改**（一开始想收到 15°，是错的：帧间差本来
+就 17°，收到 15° 会让真值落在窗口外 → 匹配不到）。`minimum_travel_heading 0.25` 保持不动
+（上游 issue #642：0.1 会让 mapper `unable to get pointer in probability search` 崩溃）。
+
+### 部署
+实机 `install/share/fwr_bringup/config/real_slam.yaml` 是 `build/` 的软链接，
+所以 **src + build 两处都要写**（md5 `604a76c5af35e3eef2fb7a2685b12f5a`，三处一致）。
+不用重新编译；`fwr-map` 当时 inactive，下次切建图模式即生效。
+
+### 取证工具（新增）
+- `tools/map_diag_jumps.py`：读 bag，找 `map→odom` 单步角差 ≥2° 的跳变，
+  打印时间/角度/当时位姿，并比较编码器 ω 与 IMU ω（判断打滑或右轮方向不对）。
+  判据依据：slam 以 50 Hz 发 `map→odom`，0.6 rad/s 时每帧最多 0.69°。
+- 录制命令（`/tmp/fwr_map_bag.sh`，30 分钟自停，或 `touch /tmp/fwr_map_bag_stop` 提前停）：
+  `/scan_merged /scan /scan_rear /wheel/odom /odom /imu/data_raw /tf /tf_static`。
+
+### 回归
+`tests/test_slam_params.py`（4 例，新增）：钉死四个值；并校验
+`coarse_search_angle_offset ≥ 1.7 × minimum_time_interval × MAP_MAX_ANGULAR`、
+`minimum_travel_heading ≥ 0.25`、`scan_buffer_size ≤ 10`。
+
+### 未验证
+- 新参数下建图质量（等用户走一圈 + bag 分析）；
+- 「30° 那一下」到底是**单帧匹配跳错峰**还是**回环修正**——bag 分析后才能定论。

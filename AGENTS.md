@@ -185,6 +185,18 @@
   - `fwr-lidar-watchdog` 管**两路**（`--stale 2.5 --cooldown 15`），任一路断流就杀对应节点等 launch 重拉；
     remaps 必须用配对写法 `(('/scan','/scan_rear'),)`，扁平写法会让看门狗自己崩（2026-11-20，一天 67 次）
 
+  - 🗺 **建图参数保护点（2026-11-28 事故：快建完时整张图突然转 ~30°，之后重影）**：
+    `config/real_slam.yaml` 里 `coarse_search_angle_offset`（现 **0.52 rad = ±30°**）
+    必须 ≥ 1.7 × `minimum_time_interval`（现 **0.3 s**）× 建图摇杆上限 0.60 rad/s，
+    否则转弯时相邻两帧的角差贴近搜索窗口边界（事故版本 17.2° vs ±20°，余量 1.17×）→
+    扫描匹配跳到隔壁错峰 → 位姿一步跳十几度、后续扫描全插错位姿。
+    **不许把 `coarse_search_angle_offset` 往小改**（收到 15° 会让真值落在窗口外）。
+    回环门槛也不许回退（`loop_match_minimum_response_coarse 0.45` / `fine 0.60`）：
+    假回环会把整张图转走，比漏检真回环（末端留 1~3° 漂移）严重。
+    `minimum_travel_heading` 保持 **0.25**（降到 0.1 会让 mapper `unable to get pointer in
+    probability search` 崩溃）。回归 `tests/test_slam_params.py`；
+    取证用 `tools/map_diag_jumps.py`（读 bag 找 `map→odom` 单步角差 ≥2° 的跳变）。
+
   单雷达回退时仍生效的老约束：
   - `/scan` 的后方扇区（scan 角 0° 附近 = ranges 中部）读到的是**车身**，不是障碍；
     `mask_rear_ranges` 屏蔽这一段
