@@ -14403,3 +14403,23 @@ build_system_prompt(now=None)  # SYSTEM_PROMPT + time_sentence()
 备份 `car.html.bak.20261126-1728` → `cat >` 覆盖；ECS md5 `61eeb3f5…` = 本地；
 `http://127.0.0.1/car/` → **200 / 222741 B**；线上 `spdBarManual` **0**、`spdBarNav` **0**、
 `spdBarFollow` **1**（= 只剩跟随那一条）。
+
+### 2026-11-28 15:00–15:50 USB 重排后三处故障（电量 / 底盘 / 4G）
+
+用户按 §3.9.3 推荐表把 8 个 USB 设备重插（两台相机 + 4G 直连、hub 只留低速串口）。
+布局本身**正是推荐表**，但暴露出三处"写死路径"的老账：
+
+| # | 现象 | 根因 | 修法 | 验证 |
+| --- | --- | --- | --- | --- |
+| 1 | 电量不显示 | 电池表 CH340 从 `3-1.2` 挪到 hub 的 `3-2.3`，udev 规则按物理口钉死 | `99-fwr-serial.rules` 改 `3-2.3`（备份 `.bak.20261128`）→ `udevadm reload/trigger` → 重启 `fwr-battery` | `/dev/jsy_meter -> ttyUSB0`；日志 `已打开 … 已切换直流模式`；实测 **21.22 V / 18.7%** |
+| 2 | 手动授权一直「已授权（等待传感器）」 | ESP32 插到了板上 **UART 口**（板上另一个 Type-C），枚举不出来；`base_bridge` 报 `ESP32 serial unavailable ... 90:70:69:F7:F0:B0` | 换插到丝印 **`USB`** 的口（原生 USB-Serial/JTAG） | `303a:1001 Espressif USB JTAG/serial debug unit` + `ttyACM1` + by-id 完全匹配；15:20:45 起 `conn=True ver=True`；`/base/ready=true` |
+| 3 | 4G 不拨号（`ppp0` 从开机就没有） | NM 的 `4g` 配置写死 `connection.interface-name=ttyUSB5`；重插后 4G 变 `ttyUSB4`，`ttyUSB5` 成了后雷达 | 备份 `/root/4g.nmconnection.bak.20261128` → `nmcli con mod 4g connection.interface-name ""` → `nmcli con up 4g` | `ppp0 10.32.2.220` 起来、`4g` 已连接；默认路由仍是 WiFi(600) 优先，4G(20700) 备份 |
+
+⚠️ **4G 仍不通（未解决）**：能拨号、`registration: home`、`packet service: attached`，
+但 `ping -I ppp0` 到 `223.5.5.5` 和 PPP 对端 `10.64.64.64` **全部 100% 丢包**，
+`curl --interface ppp0` 0.077 s 直接失败。查得 **RSRP −120 dBm / RSRQ −16 dB**
+（正常约 −80）→ 判断是**天线没接好/被压在壳内**，不是套餐问题。
+→ 待用户检查模块侧 SMA/IPEX 天线后重测（判据：`ping -I ppp0` 能有回包）。
+
+**回归**：`/base/ready=true`、`manual=True`、`armed=False`（运动门未开，符合"未点授权"预期）；
+`2c7c:6005` 与 `303a:1001` 同时在线；`ls /dev/serial/by-id` 9 个符号链接齐全。

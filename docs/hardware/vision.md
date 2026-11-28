@@ -540,34 +540,38 @@ HTTP：`GET /video?cam=wide` 取广角，`/video`（或不带参数）仍是 HP6
 主摄显示「广角」、广角显示「主摄」），**只在画面打开时出现**；切换会清 `src` 重连，
 断流自愈/3 s 兜底重连都带当前选择（不会悄悄跳回主摄）。
 
-#### 3.9.3 USB 口分配（2026-11-25 现场清点 + 建议）
+#### 3.9.3 USB 口分配（2026-11-28 已按推荐表重排，实测）
 
-主控只有 **4 个 USB-A + 1 个 USB-C**，现有 8 个 USB 设备：
+主控 **4×USB-A + 1×USB-C**，8 个 USB 设备。**2026-11-28 重排后**的实际拓扑（`lsusb -t` 实测）：
 
 ```
-根口1(USB-C) ─ hub1(总线供电)
-              ├─ 深度相机 NOVATEK（video0/1）
-              ├─ CH340 串口
-              ├─ hub2(VIA Labs, 总线供电) ─┬─ 5MP 广角相机
-              │                            └─ 4G 模块 EC200A
-              └─ RTL8152 网口（DOWN，未使用）
-根口2 ─ 雷达1  |  根口4 ─ 雷达2  |  根口7 ─ ESP32  |  根口9 ─ IMU
+Bus03 Port2 ─ hub(VIA 2822) ─┬─ 3-2.1 前雷达 CP2102N  e00aaf47…  → ttyUSB2
+                             ├─ 3-2.2 后雷达 CP2102N  14da82d3…  → ttyUSB5
+                             ├─ 3-2.3 电池表 CH340    1a86:7523  → ttyUSB0（udev → /dev/jsy_meter）
+                             └─ 3-2.4 IMU DM-IMU-L1  6877:4d55  → ttyACM0
+Bus03 Port4 ─ HP60C 深度相机 3482:6723（直连，video0/1）
+Bus03 Port7 ─ 5MP 广角相机   0abd:8050（直连，video2/3）
+Bus03 Port9 ─ 4G EC200A      2c7c:6005（直连，ttyUSB1/3/4 → ppp0）
 ```
 
-**电流账**（往坏处估）：4G 发射瞬时 ~2 A、深度相机 300~500 mA、广角 200~400 mA、
-雷达各 ~150 mA、ESP32/IMU/CH340 各 30~50 mA、hub 自身 ~200 mA。
-→ 现在 hub1 后面峰值接近 **3 A**，远超凡口 0.9~1.5 A 的供给能力，
-这正是 4G 模块反复 `device descriptor read/all, error -71` 重枚举的最可能原因。
-**带宽不是瓶颈**（深度 ~5-7 MB/s + 广角 1.65 MB/s，480 Mbps 总线实际可跑 ~35 MB/s）。
+⚠️ **三条固定路径规则（踩过，别再踩）**
+1. **电池表 CH340 的 udev 软链接钉在物理口上**：`/etc/udev/rules.d/99-fwr-serial.rules`
+   里 `KERNELS=="3-2.3"`。**换个 USB 口就要改这个值**，否则 `/dev/jsy_meter` 不存在 →
+   `battery_modbus` 每秒报 `打开 /dev/jsy_meter 失败` → 手机不显示电量。
+   两个 CH340（电池表/超声波）ID 完全相同且**没有序列号**，只能靠物理口区分。
+2. **ESP32-S3 必须插板上丝印 `USB` 的那个 Type-C 口**。插 `UART` 口时枚举成
+   `10c4:ea60 Silicon Labs CP210x`（和雷达同款芯片），`base_bridge` 只认
+   `usb-Espressif_USB_JTAG_serial_debug_unit_90:70:69:F7:F0:B0-if00` → 认不到 →
+   `ESP32 serial unavailable` → `conn=False` → 页面「已授权（等待传感器）」。
+   插对时 `lsusb` 显示 `303a:1001 Espressif USB JTAG/serial debug unit` → `ttyACM1`。
+   `base_bridge` 每 5 s 重试打开串口，**插上即恢复，不用重启服务**。
+3. **NetworkManager 的 `4g` 连接不许写死 `connection.interface-name=ttyUSBx`**：
+   重插后编号会变（本次 4G 从 ttyUSB5 变 ttyUSB4，而 ttyUSB5 成了后雷达），
+   NM 直接报 `No suitable device found … mismatching interface name`，`ppp0` 起不来。
+   现在该字段为**空**（`nmcli con mod 4g connection.interface-name ""`），NM 自动找唯一 modem。
 
-推荐分配：
+**电流账（重排后已解决大头）**：4G 与两台相机都拿到直连口，hub 上只剩低速串口
+（雷达×2 + CH340 + IMU，合计 ~450 mA）。
 
-| 位置 | 挂什么 | 理由 |
-| --- | --- | --- |
-| USB-C + hub1 | 2× 雷达、ESP32、IMU、CH340（合计 ~450 mA）| 全是 12M 低速串口，hub 扛得住 |
-| A1 | 深度相机 HP60C | UVC 电流/带宽大户，独享 900 mA |
-| A2 | 5MP 广角相机 | 同上 |
-| A3 | 4G 模块 | 峰值电流最大，不能串两级 hub |
-| A4 | 备用 | 调试键盘/U 盘/ESP32 烧录 |
-
-若换直连后 4G 仍掉线 → 上有源 hub（5V 2A）把两个相机 + 4G 都挂上；再不行查 SIM 套餐/运营商。
+**天线**：2026-11-28 重插后 RSRP **-120 dBm**（正常约 -80）→ 4G 能拨号 `ppp0` 但零回包，
+**先查天线**（模块侧 SMA/IPEX 是否接好、天线是否被压在壳内/金属旁）再怀疑套餐。

@@ -474,6 +474,17 @@
     ⚠️ **链路探测不许 spawn `ip route get`**：每 5 s 一次会把广角从 20 拖到 13.4。
     **没人看就不转码**（只留 1 帧/秒原图给 `/snapshot.jpg`）。
   - 回归：`tests/test_mjpeg_wide_camera.py`（21 例）+ `tests/test_page_camera_switch.py`（8 例）。
+  - 🔌 **USB 口重排后的三条固定路径规则（2026-11-28 实机踩过，详见 `docs/hardware/vision.md` §3.9.3）**
+    1. **电池表 CH340 的 udev 软链接钉在物理口**（`KERNELS=="3-2.3"`）：换口就要改
+       `/etc/udev/rules.d/99-fwr-serial.rules`，否则 `/dev/jsy_meter` 消失 → 手机不显示电量；
+       两个 CH340 ID 相同且无序列号，只能靠物理口区分。
+    2. **ESP32 必须插板上丝印 `USB` 的 Type-C 口**：插 `UART` 口会枚举成 `10c4:ea60`
+       （和雷达同芯片），`base_bridge` 只认 `usb-Espressif_USB_JTAG_serial_debug_unit_...`，
+       认不到就 `conn=False` → 页面「已授权（等待传感器）」。插对时 `lsusb` 有 `303a:1001`，
+       `base_bridge` 每 5 s 自动重试，**不用重启服务**。
+    3. **NM 的 `4g` 连接不许写死 `connection.interface-name=ttyUSBx`**：重插后编号会变
+       （本次 4G ttyUSB5→ttyUSB4，ttyUSB5 变成后雷达）→ NM 报 `mismatching interface name`、
+       `ppp0` 起不来。该字段已置空，让 NM 自动找唯一 modem。
   - ⚠️ **USB 供电是现场最大隐患**：8 个设备挤在 4A+1C 上，4G 模块和两路相机都在
     「USB-C → hub1 → hub2」两级级联 hub 后面，峰值接近 3 A。建议分配见
     `docs/hardware/vision.md` §3.9.3（相机/4G 直连、串口设备留 hub）。
